@@ -1,4 +1,4 @@
-import { AuthFilesystemReadScope } from "@t3tools/contracts";
+import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { environmentSession } from "../../state/session";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -34,6 +34,7 @@ import { useMediaActions, type MediaActionsSource } from "../../lib/mediaActions
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useEnvironmentQuery } from "../../state/query";
+import { useEnvironmentPresentation } from "../../state/presentation";
 import { projectEnvironment } from "../../state/projects";
 import type { AssetUrlFailureReason } from "../../state/asset-url-state";
 import {
@@ -343,10 +344,13 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
   const fileAccessSession = useEnvironmentQuery(
     environmentId !== null ? environmentSession.sessionStateAtom(environmentId) : null,
   );
-  const canReadFiles =
-    fileAccessSession.error === null &&
-    fileAccessSession.data?.authenticated === true &&
-    fileAccessSession.data.scopes?.includes(AuthFilesystemReadScope) === true;
+  const fileEnvironment = useEnvironmentPresentation(environmentId);
+  const fileAccess = resolveFilesystemReadAccess({
+    connection: fileEnvironment.presentation?.connection ?? null,
+    session: fileAccessSession.data,
+    sessionError: fileAccessSession.error,
+  });
+  const { canReadFiles } = fileAccess;
   const entriesQuery = useFileTreeEntries({
     environmentId,
     cwd: !canReadFiles || fileInspector.supported ? null : cwd,
@@ -437,13 +441,11 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
   }
 
   if (!canReadFiles) {
-    if (fileAccessSession.data === null && fileAccessSession.error === null) {
+    if (fileAccess.isPending) {
       return <LoadingScreen message="Checking file access..." messagePlacement="above-spinner" />;
     }
     return (
-      <FilesUnavailable
-        detail={fileAccessSession.error ?? "This connection cannot read host files."}
-      />
+      <FilesUnavailable detail={fileAccess.error ?? "This connection cannot read host files."} />
     );
   }
   if (cwd === null) {
@@ -700,10 +702,13 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   const fileAccessSession = useEnvironmentQuery(
     environmentId !== null ? environmentSession.sessionStateAtom(environmentId) : null,
   );
-  const canReadFiles =
-    fileAccessSession.error === null &&
-    fileAccessSession.data?.authenticated === true &&
-    fileAccessSession.data.scopes?.includes(AuthFilesystemReadScope) === true;
+  const fileEnvironment = useEnvironmentPresentation(environmentId);
+  const fileAccess = resolveFilesystemReadAccess({
+    connection: fileEnvironment.presentation?.connection ?? null,
+    session: fileAccessSession.data,
+    sessionError: fileAccessSession.error,
+  });
+  const { canReadFiles } = fileAccess;
   const fileQuery = useEnvironmentQuery(
     canReadFiles &&
       environmentId !== null &&
@@ -931,13 +936,11 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   }
 
   if (!canReadFiles) {
-    if (fileAccessSession.data === null && fileAccessSession.error === null) {
+    if (fileAccess.isPending) {
       return <LoadingScreen message="Checking file access..." messagePlacement="above-spinner" />;
     }
     return (
-      <FilesUnavailable
-        detail={fileAccessSession.error ?? "This connection cannot read host files."}
-      />
+      <FilesUnavailable detail={fileAccess.error ?? "This connection cannot read host files."} />
     );
   }
   if (cwd === null) {
