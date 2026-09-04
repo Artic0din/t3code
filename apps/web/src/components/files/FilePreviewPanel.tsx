@@ -28,7 +28,6 @@ import { Code2, Eye, FolderTree, Globe2, Table2, WrapTextIcon } from "lucide-rea
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { useEnvironmentScope } from "~/state/session";
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
