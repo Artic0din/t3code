@@ -1,3 +1,5 @@
+import { AuthFilesystemReadScope } from "@t3tools/contracts";
+import { useEnvironmentScope } from "../../state/session";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { SymbolView } from "../../components/AppSymbol";
 import { useCallback, useMemo, useState, type ComponentProps } from "react";
@@ -34,9 +36,10 @@ export function ThreadFileNavigatorPane(props: {
   const foregroundColor = theme["--color-foreground"];
   const sheetColor = theme["--color-sheet"];
   const headerScrollEdgeEffects = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
+  const canReadFiles = useEnvironmentScope(props.environmentId, AuthFilesystemReadScope);
   const entriesQuery = useFileTreeEntries({
     environmentId: props.environmentId,
-    cwd: props.cwd,
+    cwd: canReadFiles ? props.cwd : null,
     searchQuery,
   });
   const handlePreviewFile = useCallback(
@@ -83,7 +86,7 @@ export function ThreadFileNavigatorPane(props: {
       entries={entriesQuery.entries}
       loadedDirectories={entriesQuery.loadedDirectories}
       onLoadDirectory={entriesQuery.loadDirectory}
-      error={entriesQuery.error}
+      error={canReadFiles ? entriesQuery.error : "This connection cannot read host files."}
       isPending={entriesQuery.isPending}
       searchQuery={searchQuery}
       searchTruncated={entriesQuery.searchTruncated}
