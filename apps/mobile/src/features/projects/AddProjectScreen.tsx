@@ -32,6 +32,7 @@ import {
   isWindowsPlatform,
 } from "@t3tools/client-runtime/state/projects";
 import {
+  AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   CommandId,
   type EnvironmentId,
@@ -54,7 +55,7 @@ import { useProjects, useServerConfigs, waitForProject } from "../../state/entit
 import { filesystemEnvironment } from "../../state/filesystem";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
-import { useEnvironmentScope } from "../../state/session";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { sourceControlEnvironment } from "../../state/sourceControl";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
@@ -474,6 +475,11 @@ export function AddProjectSourceScreen() {
     selectedEnvironment?.environmentId ?? null,
     AuthSourceControlWriteScope,
   );
+  const canCreateProject = useEnvironmentScope(
+    selectedEnvironment?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
+  const canCloneProject = canWriteSourceControl && canCreateProject;
   const discoveryState = useEnvironmentQuery(
     selectedEnvironment === null
       ? null
@@ -564,10 +570,10 @@ export function AddProjectSourceScreen() {
                   key={candidate}
                   source={candidate}
                   selectedEnvironmentId={selectedEnvironment.environmentId}
-                  ready={canWriteSourceControl && readiness[candidate].ready}
+                  ready={canCloneProject && readiness[candidate].ready}
                   hint={
-                    !canWriteSourceControl
-                      ? "This connection cannot clone repositories."
+                    !canCloneProject
+                      ? "This connection cannot clone projects."
                       : readiness[candidate].ready
                         ? addProjectRemoteSourcePathHint(candidate)
                         : (readiness[candidate].hint ?? "")
@@ -937,6 +943,11 @@ export function AddProjectDestinationScreen(props: {
     environment?.environmentId ?? null,
     AuthSourceControlWriteScope,
   );
+  const canCreateProject = useEnvironmentScope(
+    environment?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
+  const canCloneProject = canWriteSourceControl && canCreateProject;
   const createProject = useCreateProject(environment);
   const remoteUrl = stringParam(props.remoteUrl);
   const repositoryTitle = stringParam(props.repositoryTitle);
@@ -954,8 +965,9 @@ export function AddProjectDestinationScreen(props: {
 
   const submitPath = useCallback(async () => {
     if (
-      !canWriteSourceControl ||
       !environment ||
+      !readEnvironmentScope(environment.environmentId, AuthSourceControlWriteScope) ||
+      !readEnvironmentScope(environment.environmentId, AuthOrchestrationOperateScope) ||
       !remoteUrl ||
       isBrowseNavigating ||
       isSubmitting
@@ -1033,7 +1045,6 @@ export function AddProjectDestinationScreen(props: {
     }
     setIsSubmitting(false);
   }, [
-    canWriteSourceControl,
     cloneRepository,
     createProject,
     environment,
@@ -1058,20 +1069,16 @@ export function AddProjectDestinationScreen(props: {
       ) : null}
       {environment ? (
         <>
-          <ProjectPathInput
-            value={pathInput}
-            onChangeText={setPathInput}
-            onSubmit={() => void submitPath()}
-          />
+          <ProjectPathInput value={pathInput} onChangeText={setPathInput} onSubmit={submitPath} />
           <PrimaryActionButton
             label="Clone project"
-            disabled={!canWriteSourceControl || isBrowseNavigating || isSubmitting || !remoteUrl}
-            onPress={() => void submitPath()}
+            disabled={!canCloneProject || isBrowseNavigating || isSubmitting || !remoteUrl}
+            onPress={submitPath}
             loading={isSubmitting}
           />
-          {!canWriteSourceControl ? (
+          {!canCloneProject ? (
             <Text className="text-sm text-foreground-muted">
-              This connection cannot clone repositories.
+              This connection cannot clone projects.
             </Text>
           ) : null}
           <FolderBrowser
