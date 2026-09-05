@@ -4,7 +4,6 @@ import type {
   ProjectListEntriesResult,
   ProjectReadFileResult,
 } from "@t3tools/contracts";
-import { AuthFilesystemReadScope } from "@t3tools/contracts";
 import {
   isWorkspaceImagePreviewPath,
   isWorkspaceVideoPreviewPath,
@@ -15,9 +14,9 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback } from "react";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { useFilesystemReadAccess } from "~/state/filesystem";
 import { projectEnvironment } from "~/state/projects";
 import { useProjectPathSearch } from "~/state/queries";
-import { useEnvironmentScope } from "~/state/session";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 
 const EMPTY_PROJECT_FILE_PATH = "";
@@ -167,7 +166,8 @@ export function useProjectEntriesQuery(
   cwd: string,
   directoryPath?: string,
 ): ProjectQueryState<ProjectListEntriesResult> {
-  const canReadFiles = useEnvironmentScope(environmentId, AuthFilesystemReadScope);
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const { canReadFiles } = fileAccess;
   const atom = canReadFiles
     ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath)
     : EMPTY_PROJECT_ENTRIES_QUERY_ATOM;
@@ -176,8 +176,12 @@ export function useProjectEntriesQuery(
   const refresh = useCallback(() => refreshAtom(), [refreshAtom]);
   return {
     data: Option.getOrNull(AsyncResult.value(result)),
-    error: canReadFiles ? errorMessage(result) : "This connection cannot read host files.",
-    isPending: result.waiting,
+    error: fileAccess.isPending
+      ? null
+      : canReadFiles
+        ? errorMessage(result)
+        : (fileAccess.error ?? "This connection cannot read host files."),
+    isPending: fileAccess.isPending || result.waiting,
     refresh,
   };
 }
@@ -223,12 +227,14 @@ export function useProjectFileQuery(
   relativePath: string | null,
   enabled = true,
 ): ProjectQueryState<ProjectReadFileResult> {
-  const canReadFiles = useEnvironmentScope(environmentId, AuthFilesystemReadScope);
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const { canReadFiles } = fileAccess;
   const isMedia =
     relativePath !== null &&
     (isWorkspaceImagePreviewPath(relativePath) || isWorkspaceVideoPreviewPath(relativePath));
+  const isQueryEnabled = enabled && !isMedia;
   const atom =
-    canReadFiles && enabled && !isMedia
+    canReadFiles && isQueryEnabled
       ? getProjectFileQueryAtom(environmentId, cwd, relativePath)
       : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
@@ -242,8 +248,13 @@ export function useProjectFileQuery(
 
   return {
     data: canReadFiles ? (optimisticFile?.data ?? data) : null,
-    error: canReadFiles ? errorMessage(result) : "This connection cannot read host files.",
-    isPending: result.waiting,
+    error:
+      !isQueryEnabled || fileAccess.isPending
+        ? null
+        : canReadFiles
+          ? errorMessage(result)
+          : (fileAccess.error ?? "This connection cannot read host files."),
+    isPending: isQueryEnabled && (fileAccess.isPending || result.waiting),
     refresh,
   };
 }
