@@ -43,6 +43,7 @@ import { environmentSession, readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironments } from "../../state/environments";
 import {
+  AuthRelayWriteScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
   MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
@@ -354,6 +355,8 @@ function ConfiguredSettingsRouteScreen() {
           previousEnabled: liveActivitiesPreferenceEnabled,
           clerkToken: tokenResult.value,
           connections,
+          canConfigureEnvironment: (environmentId) =>
+            readEnvironmentScope(environmentId, AuthRelayWriteScope),
         }),
       ),
     );
@@ -381,7 +384,7 @@ function ConfiguredSettingsRouteScreen() {
       Alert.alert(
         Platform.OS === "android" ? "Ongoing activity enabled" : "Live Activities enabled",
         environmentCount > 0
-          ? `${environmentCount} environment${environmentCount === 1 ? "" : "s"} linked for agent activity updates.`
+          ? "Agent activity updates are enabled for this device."
           : "Agent activity updates are enabled. Add an environment to start receiving updates.",
       );
     } else {
@@ -449,6 +452,8 @@ function ConfiguredSettingsRouteScreen() {
                 previousEnabled: liveActivitiesPreferenceEnabled,
                 clerkToken: token,
                 connections,
+                canConfigureEnvironment: (environmentId) =>
+                  readEnvironmentScope(environmentId, AuthRelayWriteScope),
               }),
             ),
           );
