@@ -1309,7 +1309,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
               <TerminalSurface
                 autoFocus={canOperateTerminal && !SHOWCASE_ENABLED}
                 readOnly={!canOperateTerminal}
-                buffer={terminalSurfaceBuffer}
+                buffer={terminal.version === 0 ? null : terminalSurfaceBuffer}
                 fontSize={fontSize}
                 isRunning={isRunning}
                 keyboardFocusRequest={keyboardFocusRequest}
