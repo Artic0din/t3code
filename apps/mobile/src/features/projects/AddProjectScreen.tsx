@@ -546,7 +546,11 @@ export function AddProjectSourceScreen() {
           <ListSection>
             <ListRow
               title="Local folder"
-              subtitle="Browse a folder on disk"
+              subtitle={
+                canCreateProject
+                  ? "Browse a folder on disk"
+                  : "This connection cannot add projects."
+              }
               icon={
                 <SymbolView
                   name="folder.badge.plus"
@@ -556,6 +560,7 @@ export function AddProjectSourceScreen() {
                 />
               }
               isFirst
+              disabled={!canCreateProject}
               onPress={() =>
                 navigation.dispatch(
                   StackActions.push("AddProjectLocal", {
@@ -608,7 +613,13 @@ function useCreateProject(environment: EnvironmentOption | null) {
 
   return useCallback(
     async (workspaceRoot: string) => {
-      if (!environment || !canCreateProjectInEnvironment(environment.connectionState)) return;
+      if (
+        !environment ||
+        !canCreateProjectInEnvironment(environment.connectionState) ||
+        !readEnvironmentScope(environment.environmentId, AuthOrchestrationOperateScope)
+      ) {
+        return;
+      }
 
       const existing = findExistingAddProject({
         projects,
@@ -868,6 +879,10 @@ function FolderBrowser(props: {
 
 export function AddProjectLocalFolderScreen(props: { readonly environmentId?: string | string[] }) {
   const environment = useEnvironmentFromParam(props.environmentId);
+  const canCreateProject = useEnvironmentScope(
+    environment?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
   const createProject = useCreateProject(environment);
   const { isBrowseNavigating, navigateToBrowsePath, pathInput, setPathInput } =
     useBrowsePathInput(environment);
@@ -900,15 +915,14 @@ export function AddProjectLocalFolderScreen(props: { readonly environmentId?: st
       {error ? <ErrorBanner message={error} /> : null}
       {environment ? (
         <>
-          <ProjectPathInput
-            value={pathInput}
-            onChangeText={setPathInput}
-            onSubmit={() => void submitPath()}
-          />
+          {!canCreateProject ? (
+            <ErrorBanner message="This connection cannot add projects." />
+          ) : null}
+          <ProjectPathInput value={pathInput} onChangeText={setPathInput} onSubmit={submitPath} />
           <PrimaryActionButton
             label="Add project"
-            disabled={isBrowseNavigating || isSubmitting}
-            onPress={() => void submitPath()}
+            disabled={!canCreateProject || isBrowseNavigating || isSubmitting}
+            onPress={submitPath}
             loading={isSubmitting}
           />
           <FolderBrowser
