@@ -750,9 +750,7 @@ const makeServerLayer = Layer.unwrap(
                 }).pipe(
                   Effect.retry({
                     while: (error) =>
-                      error._tag !== "EnvironmentHttpBadRequestError" &&
-                      error._tag !== "EnvironmentHttpUnauthorizedError" &&
-                      error._tag !== "EnvironmentHttpConflictError" &&
+                      shouldRetryCloudLink(error) &&
                       error._tag !== "EnvironmentCloudEndpointUnavailableError",
                     schedule: Schedule.exponential("1 second").pipe(
                       Schedule.modifyDelay(({ duration }) =>
@@ -800,10 +798,8 @@ const makeServerLayer = Layer.unwrap(
                 retryRuntimeFailures: true,
               }),
               (error) =>
-                error._tag !== "EnvironmentCloudEndpointUnavailableError" &&
-                error._tag !== "EnvironmentHttpBadRequestError" &&
-                error._tag !== "EnvironmentHttpUnauthorizedError" &&
-                error._tag !== "EnvironmentHttpConflictError",
+                shouldRetryCloudLink(error) &&
+                error._tag !== "EnvironmentCloudEndpointUnavailableError",
             ).pipe(
               Effect.tap((result) =>
                 result.status === "ready"
@@ -836,10 +832,7 @@ const makeServerLayer = Layer.unwrap(
                 localOrigin,
               ).pipe(
                 Effect.retry({
-                  while: (error) =>
-                    error._tag !== "EnvironmentHttpBadRequestError" &&
-                    error._tag !== "EnvironmentHttpUnauthorizedError" &&
-                    error._tag !== "EnvironmentHttpConflictError",
+                  while: shouldRetryCloudLink,
                   schedule: Schedule.exponential("1 second").pipe(
                     Schedule.modifyDelay(({ duration }) =>
                       Effect.succeed(Duration.min(duration, Duration.seconds(30))),
