@@ -6298,14 +6298,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               yield* check(
                 client[WS_METHODS.serverUpdateSettings]({
                   patch: {
-                    projectSettingsOverrides: { "project-auth-test": { defaultAutoPull: true } },
+                    projectSettingsOverrides: {
+                      [ProjectId.make("project-auth-test")]: { defaultAutoPull: true },
+                    },
                   },
                 }),
                 ["settings:write"],
               );
               yield* check(
                 client[WS_METHODS.serverUpdateSettings]({
-                  patch: { projectSettingsOverrides: { "project-auth-test": null } },
+                  patch: {
+                    projectSettingsOverrides: { [ProjectId.make("project-auth-test")]: null },
+                  },
                 }),
                 ["settings:write"],
               );
