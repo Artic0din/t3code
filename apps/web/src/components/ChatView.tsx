@@ -6378,10 +6378,10 @@ export default function ChatView(props: ChatViewProps) {
     ? !canOperateThread
       ? "This connection cannot change threads."
       : !activeProject
-      ? "Choose a project before compacting"
-      : !manualCompactionProviderAvailable
-        ? "Compaction is unavailable for this provider"
-        : "Compacting is unavailable right now"
+        ? "Choose a project before compacting"
+        : !manualCompactionProviderAvailable
+          ? "Compaction is unavailable for this provider"
+          : "Compacting is unavailable right now"
     : null;
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
@@ -9425,13 +9425,15 @@ export default function ChatView(props: ChatViewProps) {
                             canOperateThread={canOperateThread}
                             isRevertingCheckpoint={isRevertingCheckpoint}
                             sendDisabledReason={
-                              !canOperateThread ? "This connection cannot change threads." : isRevertingCheckpoint
-                                ? "Rewinding conversation"
-                                : feedbackUploading
-                                  ? "Sending feedback"
-                                  : threadDetailLoading
-                                    ? "Messages loading"
-                                    : projectCloneSendBlockReason
+                              !canOperateThread
+                                ? "This connection cannot change threads."
+                                : isRevertingCheckpoint
+                                  ? "Rewinding conversation"
+                                  : feedbackUploading
+                                    ? "Sending feedback"
+                                    : threadDetailLoading
+                                      ? "Messages loading"
+                                      : projectCloneSendBlockReason
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}
