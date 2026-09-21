@@ -176,6 +176,35 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer))),
   );
 
+  it.effect("surfaces a rate-limited probe instead of spending the read on the same 403", () =>
+    Effect.gen(function* () {
+      const commands: string[] = [];
+      const gh = yield* GitHubCli.make.pipe(
+        Effect.provideService(VcsProcess.VcsProcess, {
+          run: (input) =>
+            input.args[1] === "rate_limit"
+              ? Effect.fail(
+                  new VcsProcessExitError({
+                    operation: "GitHubCli.execute",
+                    command: "gh",
+                    cwd: input.cwd,
+                    exitCode: 1,
+                    failureKind: "rate-limited",
+                    detail: "Process exited with a non-zero status.",
+                  }),
+                )
+              : Effect.sync(() => {
+                  commands.push(input.args.slice(0, 2).join(" "));
+                  return processOutput("[]");
+                }),
+        }),
+      );
+      const error = yield* gh.execute({ cwd: "/repo", args: ["pr", "list"] }).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "GitHubCliRateLimitError");
+      assert.deepStrictEqual(commands, []);
+    }).pipe(Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer))),
+  );
+
   it.effect("keeps quota snapshots separate for verified credentials on the same host", () =>
     Effect.gen(function* () {
       let reads = 0;
