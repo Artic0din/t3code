@@ -129,6 +129,29 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer))),
   );
 
+  it.effect("shares one host-scoped probe across projects on the same host", () =>
+    Effect.gen(function* () {
+      const probeCwds: string[] = [];
+      const gh = yield* GitHubCli.make.pipe(
+        Effect.provideService(VcsProcess.VcsProcess, {
+          run: (input) =>
+            Effect.sync(() => {
+              if (input.args[1] === "rate_limit") {
+                probeCwds.push(input.cwd);
+                return quotaOutput();
+              }
+              return processOutput("[]");
+            }),
+        }),
+      );
+      yield* gh.execute({ cwd: "/repo/project-a", args: ["pr", "list"] });
+      yield* gh.execute({ cwd: "/repo/project-b", args: ["pr", "list"] });
+      // The budget the probe feeds is host+credential scoped, so a second project must reuse
+      // the cached probe instead of spawning its own `gh api rate_limit`.
+      assert.deepStrictEqual(probeCwds, ["/repo/project-a"]);
+    }).pipe(Effect.provide(Layer.merge(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer))),
+  );
+
   it.effect("does not block the read when the quota probe itself fails", () =>
     Effect.gen(function* () {
       const gh = yield* GitHubCli.make.pipe(

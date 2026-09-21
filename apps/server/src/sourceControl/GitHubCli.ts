@@ -438,11 +438,17 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // The probe's result is host+credential scoped (see `githubGraphQlBudget`), so the cache key
+  // stays host+credential scoped too and one probe serves every project on that host. The `cwd`
+  // is only needed when a refresh actually spawns `gh`, so the newest caller's one is recorded
+  // here rather than folded into the key, which would cost one probe per project per sweep.
+  const probeCwds = new Map<string, string>();
+
   const quota = yield* Cache.makeWith(
     (key: string) => {
-      const [host, , cwd] = key.split("\0") as [string, string, string];
+      const host = key.split("\0")[0]!;
       return executeRaw({
-        cwd,
+        cwd: probeCwds.get(key) ?? globalThis.process.cwd(),
         args: [
           "api",
           "rate_limit",
@@ -490,10 +496,9 @@ export const make = Effect.gen(function* () {
           // A quota probe is a courtesy check, not a precondition: its own transport or
           // command failure must not block the read it is guarding. `budget.query` right
           // after it is what actually enforces a known-exhausted budget.
-          yield* Cache.get(
-            quota,
-            `${host}\0${credential?.credentialFingerprint ?? ""}\0${input.cwd}`,
-          ).pipe(
+          const quotaKey = `${host}\0${credential?.credentialFingerprint ?? ""}`;
+          probeCwds.set(quotaKey, input.cwd);
+          yield* Cache.get(quota, quotaKey).pipe(
             Effect.catch((error) =>
               Effect.logWarning("GitHub API quota probe failed; proceeding without it", {
                 host,
