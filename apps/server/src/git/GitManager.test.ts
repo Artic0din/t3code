@@ -5112,6 +5112,11 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.branch).toBe("issue/31-add-dark-mode");
       const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
       expect(worktreeSha).toBe(mainSha);
+      const checkedOut = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(checkedOut).toBe("issue/31-add-dark-mode");
     }),
   );
 
