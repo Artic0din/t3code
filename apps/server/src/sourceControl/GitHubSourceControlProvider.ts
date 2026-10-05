@@ -28,7 +28,8 @@ const decodeIssue = Schema.decodeUnknownEffect(
       title: Schema.String,
       body: Schema.NullOr(Schema.String),
       url: Schema.String,
-      state: Schema.Literals(["OPEN", "CLOSED"]),
+      // A pull request number reports MERGED, so the PR check must run before the state is mapped.
+      state: Schema.String,
     }),
   ),
 );

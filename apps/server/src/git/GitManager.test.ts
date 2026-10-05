@@ -86,7 +86,7 @@ interface FakeGhScenario {
     title: string;
     body: string | null;
     url: string;
-    state: "OPEN" | "CLOSED";
+    state: "OPEN" | "CLOSED" | "MERGED";
     isPullRequest?: boolean;
   };
   failWith?: GitHubCli.GitHubCliError;
@@ -4665,6 +4665,31 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
 
       expect(error.message).toContain("is a pull request, not an issue");
+    }),
+  );
+
+  it.effect("rejects a merged pull request number with the pull request message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 1,
+            title: "oxc stack",
+            body: "",
+            url: "https://github.com/o/r/issues/1",
+            state: "MERGED",
+            isPullRequest: true,
+          },
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "1" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("#1 is a pull request, not an issue.");
     }),
   );
 
