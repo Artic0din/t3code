@@ -255,7 +255,8 @@ export const make = Effect.gen(function* () {
         cwd: input.cwd,
         args: ["issue", "view", input.reference, "--json", "number,title,body,state,url"],
         env: { GH_PROMPT_DISABLED: "1" },
-        maxOutputBytes: 256_000,
+        // GitHub allows 65,536-character bodies; 4-byte characters plus JSON escaping exceed 256 KB.
+        maxOutputBytes: 1_000_000,
       })
       .pipe(
         Effect.mapError((cause) =>
