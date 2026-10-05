@@ -90,6 +90,9 @@ export function IssueThreadDialog({
   const [reference, setReference] = useState(initialReference ?? "");
   const [referenceDirty, setReferenceDirty] = useState(false);
   const [openDraftError, setOpenDraftError] = useState<string | null>(null);
+  // Owned by this dialog: the action's own pending flag follows its scope, which automatic
+  // environment selection can change mid-start, re-enabling the controls too early.
+  const [isStarting, setIsStarting] = useState(false);
   const [debouncedReference, referenceDebouncer] = useDebouncedValue(
     reference,
     { wait: 450 },
@@ -141,9 +144,11 @@ export function IssueThreadDialog({
     }
     if (!resolvedIssue || !cwd) return;
     setOpenDraftError(null);
+    setIsStarting(true);
     const result = await prepareIssueThreadAction.run({ reference: parsedReference, threadId });
     if (!mountedRef.current) return;
     if (result._tag === "Failure") {
+      setIsStarting(false);
       if (isAtomCommandInterrupted(result)) prepareIssueThreadAction.resetError();
       return;
     }
@@ -154,6 +159,7 @@ export function IssueThreadDialog({
         worktreePath: result.value.worktreePath,
       });
     } catch (error) {
+      setIsStarting(false);
       // The worktree exists; starting again reuses it, so a retry is safe.
       setOpenDraftError(
         `The worktree is ready, but its draft could not be opened: ${
@@ -188,14 +194,13 @@ export function IssueThreadDialog({
         : prepareIssueThreadAction.error
           ? "Failed to start the issue thread."
           : null);
-  const canStart =
-    cwd !== null && resolvedIssue !== null && !isResolving && !prepareIssueThreadAction.isPending;
+  const canStart = cwd !== null && resolvedIssue !== null && !isResolving && !isStarting;
 
   return (
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!prepareIssueThreadAction.isPending) onOpenChange(nextOpen);
+        if (!isStarting) onOpenChange(nextOpen);
       }}
     >
       <DialogPopup className="max-w-xl">
@@ -214,7 +219,7 @@ export function IssueThreadDialog({
             <Input
               ref={referenceInputRef}
               placeholder="Issue URL, #123, or 123"
-              disabled={prepareIssueThreadAction.isPending}
+              disabled={isStarting}
               value={reference}
               onChange={(event) => {
                 setReferenceDirty(true);
@@ -265,7 +270,7 @@ export function IssueThreadDialog({
             variant="outline"
             size="sm"
             onClick={() => onOpenChange(false)}
-            disabled={prepareIssueThreadAction.isPending}
+            disabled={isStarting}
           >
             Cancel
           </Button>
@@ -277,7 +282,7 @@ export function IssueThreadDialog({
             }}
             disabled={!canStart}
           >
-            {prepareIssueThreadAction.isPending ? "Starting..." : "Start work"}
+            {isStarting ? "Starting..." : "Start work"}
           </Button>
         </DialogFooter>
       </DialogPopup>

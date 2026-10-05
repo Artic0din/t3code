@@ -101,8 +101,8 @@ make your first commit before pushing.
 
 ## Start work from an issue
 
-Use **Start work from issue** in the command palette, or type `issue 123` or paste a GitHub issue
-URL in the branch picker. T3 Code creates a worktree on a new `issue/<number>-<title>` branch from the
+On web and desktop, use **Start work from issue** in the command palette, or type `issue 123` or
+paste a GitHub issue URL in the branch picker. T3 Code creates a worktree on a new `issue/<number>-<title>` branch from the
 default branch and opens a draft thread with the issue in the composer. Edit the prompt, then send
 it. Starting the same issue again reuses its worktree.
 
