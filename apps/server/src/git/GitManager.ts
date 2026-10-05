@@ -19,6 +19,8 @@ import {
   GitActionProgressPhase,
   GitCommandError,
   GitIssueRefInput,
+  GitPrepareIssueThreadInput,
+  GitPrepareIssueThreadResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitPullRequestRefInput,
@@ -43,6 +45,7 @@ import {
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import {
+  buildIssueBranchName,
   detectSourceControlProviderFromGitRemoteUrl,
   mergeGitStatusParts,
   normalizeGitRemoteUrl,
@@ -133,6 +136,9 @@ export class GitManager extends Context.Service<
     readonly resolveIssue: (
       input: GitIssueRefInput,
     ) => Effect.Effect<GitResolveIssueResult, GitManagerServiceError>;
+    readonly prepareIssueThread: (
+      input: GitPrepareIssueThreadInput,
+    ) => Effect.Effect<GitPrepareIssueThreadResult, GitManagerServiceError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
@@ -2366,6 +2372,73 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
+    "prepareIssueThread",
+  )(function* (input) {
+    const runSetupScript = (worktreePath: string) =>
+      input.threadId === undefined
+        ? Effect.void
+        : projectSetupScriptRunner
+            .runForThread({ threadId: input.threadId, projectCwd: input.cwd, worktreePath })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("GitManager.prepareIssueThread setup script failed", {
+                  threadId: input.threadId,
+                  worktreePath,
+                  cause,
+                }).pipe(Effect.asVoid),
+              ),
+            );
+    return yield* Effect.gen(function* () {
+      const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
+      const branch = buildIssueBranchName(issue.number, issue.title);
+
+      const { refs } = yield* gitCore.listRefs({ cwd: input.cwd, refresh: true });
+      const existing = refs.find((ref) => !ref.isRemote && ref.name === branch);
+      if (existing?.worktreePath) {
+        return { issue, branch, worktreePath: existing.worktreePath };
+      }
+
+      const submodules = yield* projectSettingsFor(input).pipe(
+        Effect.map((settings) => settings.worktreeSubmodules),
+        Effect.orElseSucceed(() => null),
+      );
+      if (existing) {
+        const worktree = yield* gitCore.createWorktree(
+          { cwd: input.cwd, refName: branch, path: null },
+          { submodules },
+        );
+        yield* runSetupScript(worktree.worktree.path);
+        return { issue, branch: worktree.worktree.refName, worktreePath: worktree.worktree.path };
+      }
+
+      const baseBranch =
+        (yield* (yield* sourceControlProvider(input.cwd))
+          .getDefaultBranch({ cwd: input.cwd })
+          .pipe(Effect.orElseSucceed(() => null))) ??
+        (yield* gitCore.statusDetails(input.cwd)).branch;
+      if (!baseBranch) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: "Could not find a base branch for the new worktree.",
+        });
+      }
+      const worktree = yield* gitCore.createWorktree(
+        {
+          cwd: input.cwd,
+          refName: baseBranch,
+          newRefName: branch,
+          baseRefName: baseBranch,
+          path: null,
+        },
+        { submodules },
+      );
+      yield* runSetupScript(worktree.worktree.path);
+      return { issue, branch: worktree.worktree.refName, worktreePath: worktree.worktree.path };
+    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+  });
+
   const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(
     "preparePullRequestThread",
   )(function* (input) {
@@ -2895,6 +2968,7 @@ export const make = Effect.gen(function* () {
     resolvePullRequest,
     preparePullRequestThread,
     resolveIssue,
+    prepareIssueThread,
     runStackedAction,
   });
 });
