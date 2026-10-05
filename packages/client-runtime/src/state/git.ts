@@ -19,5 +19,15 @@ export function createGitEnvironmentAtoms<R, E>(
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
     }),
+    issueResolution: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:git:resolve-issue",
+      tag: WS_METHODS.gitResolveIssue,
+    }),
+    prepareIssueThread: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:git:prepare-issue-thread",
+      tag: WS_METHODS.gitPrepareIssueThread,
+      scheduler: vcsCommandScheduler,
+      concurrency: vcsCommandConcurrency,
+    }),
   };
 }

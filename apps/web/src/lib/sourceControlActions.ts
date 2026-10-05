@@ -1,6 +1,8 @@
 export {
   readCachedPullRequestResolution,
   useGitStackedAction,
+  useIssueResolution,
+  usePrepareIssueThreadAction,
   usePreparePullRequestThreadAction,
   usePullRequestResolutionState as usePullRequestResolution,
   useSourceControlActionRunning,
