@@ -57,6 +57,38 @@ it.effect("uses the enterprise quota for a current-repository default branch rea
   ),
 );
 
+it.effect("uses the enterprise quota for a bare issue number read", () =>
+  Effect.gen(function* () {
+    // github.com is out of quota; the enterprise issue read must not be priced against it.
+    const budget = yield* GitHubGraphQlBudget.GitHubGraphQlBudget;
+    yield* budget.observe(
+      "github.com",
+      '{"data":{"rateLimit":{"cost":1,"limit":5000,"remaining":0,"resetAt":"2099-01-01T00:00:00Z"}}}',
+    );
+    const provider = yield* GitHubSourceControlProvider.make;
+    const issue = yield* provider.getIssue!({
+      cwd: "/enterprise-repo",
+      reference: "12",
+      context: {
+        provider: { kind: "github", name: "GitHub Enterprise", baseUrl: "https://enterprise.test" },
+        remoteName: "origin",
+        remoteUrl: "https://enterprise.test/acme/web.git",
+      },
+    });
+    assert.strictEqual(issue.number, 12);
+  }).pipe(
+    Effect.provide(GitHubCli.layer),
+    Effect.provideService(VcsProcess.VcsProcess, {
+      run: () =>
+        Effect.succeed(
+          processResult(
+            '{"number":12,"title":"Crash","body":null,"state":"OPEN","url":"https://enterprise.test/acme/web/issues/12"}',
+          ),
+        ),
+    }),
+  ),
+);
+
 it.effect("maps GitHub PR summaries into provider-neutral change requests", () =>
   Effect.gen(function* () {
     const provider = yield* makeProvider({

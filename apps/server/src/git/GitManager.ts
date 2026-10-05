@@ -41,6 +41,7 @@ import {
   type SourceControlWritingStyleSettings,
   type ThreadId,
   type VcsCreateWorktreeResult,
+  type VcsRef,
 } from "@t3tools/contracts";
 import {
   hasProjectSettingsOverrides,
@@ -2375,8 +2376,18 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // ponytail: one lock for every repository; key it by repository if issue starts ever contend.
-  const issueThreadLock = yield* Semaphore.make(1);
+  // ponytail: keyed by the project folder and never evicted; one entry per project ever used.
+  const issueThreadLocks = new Map<string, Semaphore.Semaphore>();
+  const issueThreadLockFor = (cwd: string) =>
+    canonicalizeExistingPath(cwd).pipe(
+      Effect.map((key) => {
+        const existing = issueThreadLocks.get(key);
+        if (existing) return existing;
+        const created = Semaphore.makeUnsafe(1);
+        issueThreadLocks.set(key, created);
+        return created;
+      }),
+    );
   const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
     "prepareIssueThread",
   )(function* (input) {
@@ -2394,7 +2405,7 @@ export const make = Effect.gen(function* () {
                 }).pipe(Effect.asVoid),
               ),
             );
-    return yield* Effect.gen(function* () {
+    const prepared = yield* Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
 
@@ -2423,21 +2434,26 @@ export const make = Effect.gen(function* () {
             detail: `${existing.name} is already checked out in the main repo. Switch the main repo off that branch to start a worktree thread.`,
           });
         }
-        return { issue, branch: existing.name, worktreePath: existing.worktreePath };
+        return {
+          issue,
+          branch: existing.name,
+          worktreePath: existing.worktreePath,
+          created: false,
+        };
       }
 
       const submodules = yield* projectSettingsFor(input).pipe(
         Effect.map((settings) => settings.worktreeSubmodules),
         Effect.orElseSucceed(() => null),
       );
-      const finish = Effect.fn("prepareIssueThread.finish")(function* (
-        worktree: VcsCreateWorktreeResult,
-      ) {
-        yield* runSetupScript(worktree.worktree.path);
-        return { issue, branch: worktree.worktree.refName, worktreePath: worktree.worktree.path };
+      const finish = (worktree: VcsCreateWorktreeResult) => ({
+        issue,
+        branch: worktree.worktree.refName,
+        worktreePath: worktree.worktree.path,
+        created: true,
       });
       if (existing) {
-        return yield* finish(
+        return finish(
           yield* gitCore.createWorktree(
             { cwd: input.cwd, refName: existing.name, path: null },
             { submodules },
@@ -2446,18 +2462,21 @@ export const make = Effect.gen(function* () {
       }
 
       // Work pushed from another machine lives only on the remote; continue it, never fork it.
+      // Remote names may contain slashes, so strip the exact remote name when git reports it.
+      const localNameOf = (ref: VcsRef) =>
+        ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`)
+          ? ref.name.slice(ref.remoteName.length + 1)
+          : deriveLocalBranchNameFromRemoteRef(ref.name);
       const remoteRef = refs.find(
-        (ref) =>
-          ref.isRemote === true &&
-          deriveLocalBranchNameFromRemoteRef(ref.name).startsWith(issueBranchPrefix),
+        (ref) => ref.isRemote === true && localNameOf(ref).startsWith(issueBranchPrefix),
       );
       if (remoteRef) {
-        return yield* finish(
+        return finish(
           yield* gitCore.createWorktree(
             {
               cwd: input.cwd,
               refName: remoteRef.name,
-              newRefName: deriveLocalBranchNameFromRemoteRef(remoteRef.name),
+              newRefName: localNameOf(remoteRef),
               path: null,
             },
             { submodules },
@@ -2476,7 +2495,7 @@ export const make = Effect.gen(function* () {
           detail: "Could not find the default branch to start the issue worktree from.",
         });
       }
-      return yield* finish(
+      return finish(
         yield* gitCore.createWorktree(
           {
             cwd: input.cwd,
@@ -2488,7 +2507,13 @@ export const make = Effect.gen(function* () {
           { submodules },
         ),
       );
-    }).pipe(issueThreadLock.withPermits(1), Effect.ensuring(invalidateStatus(input.cwd)));
+    }).pipe(
+      (yield* issueThreadLockFor(input.cwd)).withPermits(1),
+      Effect.ensuring(invalidateStatus(input.cwd)),
+    );
+    // Outside the lock: a slow setup script must not hold up other starts in this project.
+    if (prepared.created) yield* runSetupScript(prepared.worktreePath);
+    return { issue: prepared.issue, branch: prepared.branch, worktreePath: prepared.worktreePath };
   });
 
   const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(

@@ -239,6 +239,7 @@ export const make = Effect.gen(function* () {
 
   const getIssue = Effect.fn("GitHubSourceControlProvider.getIssue")(function* (input: {
     readonly cwd: string;
+    readonly context?: SourceControlProvider.SourceControlProviderContext;
     readonly reference: string;
   }) {
     const issueError = (operation: string, detail: string, cause?: unknown) =>
@@ -254,6 +255,10 @@ export const make = Effect.gen(function* () {
       .execute({
         cwd: input.cwd,
         args: ["issue", "view", input.reference, "--json", "number,title,body,state,url"],
+        // A bare number names no host, so charge the repository's own quota, not github.com's.
+        ...(input.context === undefined
+          ? {}
+          : { rateLimitHost: new URL(input.context.provider.baseUrl).host }),
         env: { GH_PROMPT_DISABLED: "1" },
         // GitHub allows 65,536-character bodies; 4-byte characters plus JSON escaping exceed 256 KB.
         maxOutputBytes: 1_000_000,

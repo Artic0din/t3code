@@ -5,7 +5,9 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -694,7 +696,7 @@ function resolveIssue(
 
 function prepareIssueThread(
   manager: GitManager.GitManager["Service"],
-  input: { cwd: string; reference: string },
+  input: { cwd: string; reference: string; threadId?: ThreadId },
 ) {
   return manager.prepareIssueThread(input);
 }
@@ -5110,6 +5112,83 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.branch).toBe("issue/31-add-dark-mode");
       const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
       expect(worktreeSha).toBe(mainSha);
+    }),
+  );
+
+  it.effect("continues a remote issue branch when the remote name contains a slash", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "team/origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
+      yield* runGit(repoDir, ["add", "dark.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Earlier issue work"]);
+      yield* runGit(repoDir, ["push", "team/origin", "issue/31-add-dark-mode"]);
+      const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(pushedSha);
+    }),
+  );
+
+  it.effect("does not block other repositories while a setup script runs", () =>
+    Effect.gen(function* () {
+      const slowRepo = yield* makeTempDir("t3code-git-manager-");
+      const otherRepo = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(slowRepo);
+      yield* initRepo(otherRepo);
+      const setupStarted = yield* Deferred.make<void>();
+      const releaseSetup = yield* Deferred.make<void>();
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+        setupScriptRunner: {
+          runForThread: () =>
+            Deferred.succeed(setupStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseSetup)),
+              Effect.as({ status: "no-script" as const }),
+            ),
+        },
+      });
+
+      const slow = yield* prepareIssueThread(manager, {
+        cwd: slowRepo,
+        reference: "31",
+        threadId: ThreadId.make("thread:slow-setup"),
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(setupStarted);
+      const other = yield* prepareIssueThread(manager, { cwd: otherRepo, reference: "31" });
+      yield* Deferred.succeed(releaseSetup, undefined);
+      yield* Fiber.join(slow);
+
+      expect(other.branch).toBe("issue/31-add-dark-mode");
     }),
   );
 

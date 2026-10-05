@@ -102,6 +102,7 @@ export class SourceControlProvider extends Context.Service<
     /** Optional: read one issue for the "start from issue" flow. Hosts without it are unsupported. */
     readonly getIssue?: (input: {
       readonly cwd: string;
+      readonly context?: SourceControlProviderContext;
       readonly reference: string;
     }) => Effect.Effect<GitResolvedIssue, SourceControlProviderError>;
     readonly listChangeRequests: (input: {
