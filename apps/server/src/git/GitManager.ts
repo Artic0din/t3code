@@ -2376,18 +2376,30 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // ponytail: keyed by the project folder and never evicted; one entry per project ever used.
+  // ponytail: never evicted; one entry per repository ever used.
   const issueThreadLocks = new Map<string, Semaphore.Semaphore>();
+  // Keyed by the repository's shared git directory, so a root and a subfolder project share it.
   const issueThreadLockFor = (cwd: string) =>
-    canonicalizeExistingPath(cwd).pipe(
-      Effect.map((key) => {
-        const existing = issueThreadLocks.get(key);
-        if (existing) return existing;
-        const created = Semaphore.makeUnsafe(1);
-        issueThreadLocks.set(key, created);
-        return created;
-      }),
-    );
+    gitCore
+      .execute({
+        operation: "GitManager.prepareIssueThread.lockKey",
+        cwd,
+        args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      })
+      .pipe(
+        Effect.map((result) => result.stdout.trim()),
+        Effect.orElseSucceed(() => cwd),
+        Effect.flatMap(canonicalizeExistingPath),
+      )
+      .pipe(
+        Effect.map((key) => {
+          const existing = issueThreadLocks.get(key);
+          if (existing) return existing;
+          const created = Semaphore.makeUnsafe(1);
+          issueThreadLocks.set(key, created);
+          return created;
+        }),
+      );
   const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
     "prepareIssueThread",
   )(function* (input) {
