@@ -2520,11 +2520,12 @@ export const make = Effect.gen(function* () {
         ),
       );
     }).pipe(
+      // Launching setup only opens its terminal, so it stays inside the lock: a second start of
+      // the same issue must not return before the creator has launched setup.
+      Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),
     );
-    // Outside the lock: a slow setup script must not hold up other starts in this project.
-    if (prepared.created) yield* runSetupScript(prepared.worktreePath);
     return { issue: prepared.issue, branch: prepared.branch, worktreePath: prepared.worktreePath };
   });
 
