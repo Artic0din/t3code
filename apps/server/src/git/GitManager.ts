@@ -40,6 +40,7 @@ import {
   type SourceControlProviderKind,
   type SourceControlWritingStyleSettings,
   type ThreadId,
+  type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
   type VcsRef,
 } from "@t3tools/contracts";
@@ -113,6 +114,10 @@ interface SourceControlTextGenerationSettings {
 export class GitManager extends Context.Service<
   GitManager,
   {
+    readonly createWorktree: (
+      input: VcsCreateWorktreeInput,
+      options?: GitVcsDriver.CreateWorktreeOptions,
+    ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
     readonly status: (
       input: VcsStatusInput,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
@@ -743,6 +748,19 @@ export const make = Effect.gen(function* () {
         );
     return resolveProjectSettings(settings, projectId).settings;
   });
+  const createWorktree: GitManager["Service"]["createWorktree"] = Effect.fn(
+    "GitManager.createWorktree",
+  )(function* (input, options) {
+    const submodules =
+      options?.submodules !== undefined
+        ? options.submodules
+        : yield* projectSettingsFor(input).pipe(
+            Effect.map((settings) => settings.worktreeSubmodules),
+            Effect.orElseSucceed(() => null),
+          );
+    return yield* gitCore.createWorktree(input, { ...options, submodules });
+  });
+
   const readRepositoryInstructions = (cwd: string, fileName: string) =>
     Effect.gen(function* () {
       const root = yield* fileSystem.realPath(cwd);
@@ -3048,6 +3066,7 @@ export const make = Effect.gen(function* () {
   );
 
   return GitManager.of({
+    createWorktree,
     localStatus,
     remoteStatus,
     status,
