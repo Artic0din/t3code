@@ -5192,6 +5192,39 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("serializes starts of one issue from the repository root and a subfolder", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const subDir = NodePath.join(repoDir, "packages", "app");
+      NodeFS.mkdirSync(subDir, { recursive: true });
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const [fromRoot, fromSub] = yield* Effect.all(
+        [
+          prepareIssueThread(manager, { cwd: repoDir, reference: "31" }),
+          prepareIssueThread(manager, { cwd: subDir, reference: "31" }),
+        ],
+        { concurrency: 2 },
+      );
+
+      expect(NodeFS.realpathSync(fromSub.worktreePath)).toBe(
+        NodeFS.realpathSync(fromRoot.worktreePath),
+      );
+    }),
+  );
+
   it.effect("prepares pull request threads in local mode by checking out the PR branch", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
