@@ -268,7 +268,7 @@ export const make = Effect.gen(function* () {
           issueError(
             "getIssue",
             cause._tag === "GitHubPullRequestNotFoundError"
-              ? `Issue ${input.reference} not found. Check the number or URL.`
+              ? `Issue ${SourceControlProvider.transportSafeSourceControlErrorValue(input.reference)} not found. Check the number or URL.`
               : cause.detail,
             cause,
           ),

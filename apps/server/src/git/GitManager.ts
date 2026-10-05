@@ -2553,16 +2553,27 @@ export const make = Effect.gen(function* () {
             allowNonZeroExit: true,
           })
           .pipe(Effect.map((result) => result.exitCode === 0));
+      // Any remote may hold it (forks often use "upstream"); origin wins when several do.
+      const remoteStartRef = Effect.gen(function* () {
+        const listed = yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.remoteBaseRef",
+          cwd: input.cwd,
+          args: ["for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+        });
+        const matches = listed.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((ref) => ref.endsWith(`/${baseBranch}`));
+        return matches.find((ref) => ref === `origin/${baseBranch}`) ?? matches[0] ?? null;
+      });
       const startRef = (yield* refExists(`refs/heads/${baseBranch}`))
         ? baseBranch
-        : (yield* refExists(`refs/remotes/origin/${baseBranch}`))
-          ? `origin/${baseBranch}`
-          : null;
+        : yield* remoteStartRef;
       if (startRef === null) {
         return yield* new GitManagerError({
           operation: "prepareIssueThread",
           cwd: input.cwd,
-          detail: `The default branch ${baseBranch} is not available locally or on origin. Fetch it, then start work again.`,
+          detail: `The default branch ${baseBranch} is not available locally or on any remote. Fetch it, then start work again.`,
         });
       }
       return finish(

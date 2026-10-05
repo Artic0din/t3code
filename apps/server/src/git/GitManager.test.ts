@@ -5256,6 +5256,65 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("starts from the default branch on a remote not named origin", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "upstream", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "upstream", "main"]);
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-local"]);
+      yield* runGit(repoDir, ["branch", "-D", "main"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      const checkedOut = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(checkedOut).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
+    }),
+  );
+
+  it.effect("keeps query strings out of the issue not-found message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCli.GitHubPullRequestNotFoundError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("Could not resolve to an issue or pull request"),
+          }),
+        },
+      });
+
+      const error = yield* resolveIssue(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/o/r/issues/999?token=secret-value#frag",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain("not found");
+      expect(error.message).not.toContain("secret-value");
+    }),
+  );
+
   it.effect("prepares pull request threads in local mode by checking out the PR branch", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
