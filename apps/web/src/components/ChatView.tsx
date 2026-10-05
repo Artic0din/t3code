@@ -2986,6 +2986,16 @@ export default function ChatView(props: ChatViewProps) {
   const canStartFromIssue =
     canCheckoutPullRequestIntoThread &&
     serverConfig?.environment.capabilities.issueThreads === true;
+  // A draft balanced onto a server without issue support can never show the dialog; drop the
+  // request so it cannot reappear later on another draft.
+  const issueDialogUnsupportedHere =
+    issueDialogMatchesProject &&
+    canCheckoutPullRequestIntoThread &&
+    serverConfig !== null &&
+    serverConfig.environment.capabilities.issueThreads !== true;
+  useEffect(() => {
+    if (issueDialogUnsupportedHere) closeIssueThreadDialog();
+  }, [issueDialogUnsupportedHere]);
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsQuestionAttachments =
