@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  GitPrepareIssueThreadResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitRunStackedActionResult,
@@ -165,5 +166,35 @@ describe("GitRunStackedActionResult", () => {
     if (parsed.toast.cta.kind === "run_action") {
       expect(parsed.toast.cta.action.kind).toBe("create_pr");
     }
+  });
+});
+
+const decodePrepareIssueThreadResult = Schema.decodeUnknownSync(GitPrepareIssueThreadResult);
+
+describe("GitPrepareIssueThreadResult", () => {
+  it("decodes an issue with a null body", () => {
+    const parsed = decodePrepareIssueThreadResult({
+      issue: {
+        number: 7,
+        title: "Crash",
+        body: null,
+        url: "https://github.com/o/r/issues/7",
+        state: "open",
+      },
+      branch: "issue/7-crash",
+      worktreePath: "/tmp/wt",
+    });
+    expect(parsed.issue.body).toBeNull();
+    expect(parsed.branch).toBe("issue/7-crash");
+  });
+
+  it("rejects an unknown issue state", () => {
+    expect(() =>
+      decodePrepareIssueThreadResult({
+        issue: { number: 7, title: "Crash", body: "", url: "u", state: "merged" },
+        branch: "issue/7-crash",
+        worktreePath: "/tmp/wt",
+      }),
+    ).toThrow();
   });
 });

@@ -104,6 +104,16 @@ const GitResolvedPullRequest = Schema.Struct({
 });
 export type GitResolvedPullRequest = typeof GitResolvedPullRequest.Type;
 
+const GitIssueState = Schema.Literals(["open", "closed"]);
+export const GitResolvedIssue = Schema.Struct({
+  number: PositiveInt,
+  title: TrimmedNonEmptyStringSchema,
+  body: Schema.NullOr(Schema.String),
+  url: Schema.String,
+  state: GitIssueState,
+});
+export type GitResolvedIssue = typeof GitResolvedIssue.Type;
+
 // RPC Inputs
 
 export const VcsStatusInput = Schema.Struct({
@@ -166,6 +176,19 @@ export const GitPreparePullRequestThreadInput = Schema.Struct({
   threadId: Schema.optional(ThreadId),
 });
 export type GitPreparePullRequestThreadInput = typeof GitPreparePullRequestThreadInput.Type;
+
+export const GitIssueRefInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  reference: TrimmedNonEmptyStringSchema,
+});
+export type GitIssueRefInput = typeof GitIssueRefInput.Type;
+
+export const GitPrepareIssueThreadInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  reference: TrimmedNonEmptyStringSchema,
+  threadId: Schema.optional(ThreadId),
+});
+export type GitPrepareIssueThreadInput = typeof GitPrepareIssueThreadInput.Type;
 
 export const VcsRemoveWorktreeInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
@@ -313,6 +336,16 @@ export const GitPreparePullRequestThreadResult = Schema.Struct({
   isOnPullRequestHead: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
 });
 export type GitPreparePullRequestThreadResult = typeof GitPreparePullRequestThreadResult.Type;
+
+export const GitResolveIssueResult = Schema.Struct({ issue: GitResolvedIssue });
+export type GitResolveIssueResult = typeof GitResolveIssueResult.Type;
+
+export const GitPrepareIssueThreadResult = Schema.Struct({
+  issue: GitResolvedIssue,
+  branch: TrimmedNonEmptyStringSchema,
+  worktreePath: TrimmedNonEmptyStringSchema,
+});
+export type GitPrepareIssueThreadResult = typeof GitPrepareIssueThreadResult.Type;
 
 export const VcsSwitchRefResult = Schema.Struct({
   refName: Schema.NullOr(TrimmedNonEmptyStringSchema),
