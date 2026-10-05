@@ -2553,18 +2553,25 @@ export const make = Effect.gen(function* () {
             allowNonZeroExit: true,
           })
           .pipe(Effect.map((result) => result.exitCode === 0));
-      // Any remote may hold it (forks often use "upstream"); origin wins when several do.
+      // Any remote may hold it (forks often use "upstream"); origin wins when several do. Match
+      // <remote>/<base> exactly, since a suffix test also accepts e.g. aaa/releases/main.
       const remoteStartRef = Effect.gen(function* () {
         const listed = yield* gitCore.execute({
-          operation: "GitManager.prepareIssueThread.remoteBaseRef",
+          operation: "GitManager.prepareIssueThread.remotes",
           cwd: input.cwd,
-          args: ["for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+          args: ["remote"],
         });
-        const matches = listed.stdout
+        const remotes = listed.stdout
           .split("\n")
           .map((line) => line.trim())
-          .filter((ref) => ref.endsWith(`/${baseBranch}`));
-        return matches.find((ref) => ref === `origin/${baseBranch}`) ?? matches[0] ?? null;
+          .filter((name) => name.length > 0)
+          .toSorted((left, right) => Number(right === "origin") - Number(left === "origin"));
+        for (const remote of remotes) {
+          if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
+            return `${remote}/${baseBranch}`;
+          }
+        }
+        return null;
       });
       const startRef = (yield* refExists(`refs/heads/${baseBranch}`))
         ? baseBranch
