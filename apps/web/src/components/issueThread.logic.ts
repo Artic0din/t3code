@@ -8,9 +8,22 @@ export function buildIssuePrompt(issue: GitResolvedIssue): string {
     .join("\n\n");
 }
 
-/** Never discards what the user already typed in a reused draft. */
-export function mergeIssuePrompt(existing: string, issuePrompt: string, issueUrl: string): string {
-  if (existing.trim().length === 0) return issuePrompt;
-  if (existing.includes(issueUrl)) return existing;
+function containsUrlToken(text: string, url: string): boolean {
+  return text.split(/\s+/).includes(url);
+}
+
+/**
+ * The project keeps one draft, so starting an issue reuses it. Text the user typed is kept and the
+ * same issue is never added twice. `previousPrefill` is the exact text an earlier issue start wrote;
+ * a draft still equal to it is replaced, so two issues never end up in one prompt.
+ */
+export function mergeIssuePrompt(
+  existing: string,
+  issuePrompt: string,
+  issueUrl: string,
+  previousPrefill?: string,
+): string {
+  if (existing.trim().length === 0 || existing === previousPrefill) return issuePrompt;
+  if (containsUrlToken(existing, issueUrl)) return existing;
   return `${existing.trimEnd()}\n\n${issuePrompt}`;
 }

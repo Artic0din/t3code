@@ -1977,7 +1977,7 @@ function OpenCommandPaletteDialog(props: {
     }
   }
 
-  if (activeThread !== null) {
+  if (activeDraftThread !== null || contextualProjectRef !== null) {
     actionItems.push({
       kind: "action",
       value: "action:start-from-issue",
@@ -1985,6 +1985,10 @@ function OpenCommandPaletteDialog(props: {
       title: "Start work from issue",
       icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
+        // The dialog lives on the project's draft thread, so open that draft first when needed.
+        if (activeDraftThread === null && contextualProjectRef !== null) {
+          await handleNewThread(contextualProjectRef);
+        }
         openIssueThreadDialog();
       },
     });

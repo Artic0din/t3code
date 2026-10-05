@@ -2844,6 +2844,8 @@ export default function ChatView(props: ChatViewProps) {
 
   const issueDialogRequest = useIssueThreadDialogRequest();
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  // In-memory only: after a reload the next issue start appends, which never loses text.
+  const issuePrefillByDraftRef = useRef(new Map<DraftId, string>());
   const handlePreparedIssueThread = useCallback(
     async (input: { issue: GitResolvedIssue; branch: string; worktreePath: string }) => {
       const { draftId: preparedDraftId } = await openOrReuseProjectDraftThread({
@@ -2852,10 +2854,14 @@ export default function ChatView(props: ChatViewProps) {
         envMode: "worktree",
       });
       const existingPrompt = getComposerDraft(preparedDraftId)?.prompt ?? "";
-      setComposerDraftPrompt(
-        preparedDraftId,
-        mergeIssuePrompt(existingPrompt, buildIssuePrompt(input.issue), input.issue.url),
+      const nextPrompt = mergeIssuePrompt(
+        existingPrompt,
+        buildIssuePrompt(input.issue),
+        input.issue.url,
+        issuePrefillByDraftRef.current.get(preparedDraftId),
       );
+      issuePrefillByDraftRef.current.set(preparedDraftId, nextPrompt);
+      setComposerDraftPrompt(preparedDraftId, nextPrompt);
     },
     [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt],
   );
