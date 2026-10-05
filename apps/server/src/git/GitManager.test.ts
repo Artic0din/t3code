@@ -5315,6 +5315,43 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("ignores nested remote branches that only end in the default name", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const decoyDir = yield* createBareRemote();
+      const upstreamDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "aaa", decoyDir]);
+      yield* runGit(repoDir, ["remote", "add", "upstream", upstreamDir]);
+      yield* runGit(repoDir, ["push", "upstream", "main"]);
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "-b", "releases/main"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "release.txt"), "release\n");
+      yield* runGit(repoDir, ["add", "release.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Unrelated release work"]);
+      yield* runGit(repoDir, ["push", "aaa", "releases/main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-local"]);
+      yield* runGit(repoDir, ["branch", "-D", "main", "releases/main"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
+    }),
+  );
+
   it.effect("prepares pull request threads in local mode by checking out the PR branch", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
