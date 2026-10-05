@@ -9,7 +9,7 @@ export function buildIssuePrompt(issue: GitResolvedIssue): string {
 }
 
 function containsUrlToken(text: string, url: string): boolean {
-  return text.split(/\s+/).includes(url);
+  return text.split(/\s+/).some((token) => token.replace(/[.,!?;:)\]}>]+$/, "") === url);
 }
 
 /**

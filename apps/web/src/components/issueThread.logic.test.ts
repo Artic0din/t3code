@@ -76,6 +76,11 @@ describe("mergeIssuePrompt", () => {
     );
   });
 
+  it("recognizes the issue url followed by punctuation", () => {
+    const draft = `Context in ${issue.url}.`;
+    expect(mergeIssuePrompt(draft, prompt, issue.url)).toBe(draft);
+  });
+
   it("does not add the same issue twice", () => {
     const once = mergeIssuePrompt("", prompt, issue.url);
     expect(mergeIssuePrompt(once, prompt, issue.url)).toBe(once);

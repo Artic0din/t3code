@@ -73,6 +73,7 @@ export function IssueThreadDialog({
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const [reference, setReference] = useState(initialReference ?? "");
   const [referenceDirty, setReferenceDirty] = useState(false);
+  const [openDraftError, setOpenDraftError] = useState<string | null>(null);
   const [debouncedReference, referenceDebouncer] = useDebouncedValue(
     reference,
     { wait: 450 },
@@ -118,16 +119,27 @@ export function IssueThreadDialog({
       return;
     }
     if (!resolvedIssue || !cwd) return;
+    setOpenDraftError(null);
     const result = await prepareIssueThreadAction.run({ reference: parsedReference, threadId });
     if (result._tag === "Failure") {
       if (isAtomCommandInterrupted(result)) prepareIssueThreadAction.resetError();
       return;
     }
-    await onPrepared({
-      issue: result.value.issue,
-      branch: result.value.branch,
-      worktreePath: result.value.worktreePath,
-    });
+    try {
+      await onPrepared({
+        issue: result.value.issue,
+        branch: result.value.branch,
+        worktreePath: result.value.worktreePath,
+      });
+    } catch (error) {
+      // The worktree exists; starting again reuses it, so a retry is safe.
+      setOpenDraftError(
+        `The worktree is ready, but its draft could not be opened: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      );
+      return;
+    }
     onOpenChange(false);
   }, [
     cwd,
@@ -146,6 +158,7 @@ export function IssueThreadDialog({
       : null;
   const errorMessage =
     validationMessage ??
+    openDraftError ??
     (resolvedIssue === null && issueResolution.error
       ? issueResolution.error
       : prepareIssueThreadAction.error instanceof Error
@@ -182,6 +195,7 @@ export function IssueThreadDialog({
               value={reference}
               onChange={(event) => {
                 setReferenceDirty(true);
+                setOpenDraftError(null);
                 setReference(event.target.value);
               }}
               onKeyDown={(event) => {
