@@ -2514,6 +2514,22 @@ export const make = Effect.gen(function* () {
         );
       }
 
+      // Git cannot create issue/<n>-… while a branch named exactly "issue" exists.
+      const flatIssueBranch = yield* gitCore.execute({
+        operation: "GitManager.prepareIssueThread.flatIssueBranch",
+        cwd: input.cwd,
+        args: ["rev-parse", "--verify", "--quiet", "refs/heads/issue"],
+        allowNonZeroExit: true,
+      });
+      if (flatIssueBranch.exitCode === 0) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail:
+            'A branch named "issue" blocks issue/ branches. Rename it (git branch -m issue <new-name>) to start work from issues.',
+        });
+      }
+
       // No fallback to the current branch: it would carry unrelated commits into the issue.
       const baseBranch = yield* (yield* sourceControlProvider(input.cwd))
         .getDefaultBranch({ cwd: input.cwd })
