@@ -281,7 +281,11 @@ export function BranchToolbarBranchSelector({
   const supportsIssueThreads =
     useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
   const startFromIssueItemValue =
-    issueReference && onCheckoutPullRequestRequest && supportsIssueThreads && activeProject
+    issueReference &&
+    onCheckoutPullRequestRequest &&
+    supportsIssueThreads &&
+    draftId &&
+    activeProject?.repositoryIdentity?.provider === "github"
       ? `__start_from_issue__:${issueReference}`
       : null;
   const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
@@ -611,9 +615,9 @@ export function BranchToolbarBranchSelector({
       : `#${prNumber}${displayedPr?.title.trim() ? `: ${displayedPr.title}` : ""}`;
 
   function selectPickerItem(itemValue: string) {
-    if (itemValue === startFromIssueItemValue && issueReference && activeProject) {
+    if (itemValue === startFromIssueItemValue && issueReference && draftId) {
       handleOpenChange(false);
-      openIssueThreadDialog(scopeProjectRef(environmentId, activeProject.id), issueReference);
+      openIssueThreadDialog(draftId, issueReference);
     } else if (
       itemValue === checkoutPullRequestItemValue &&
       prReference &&

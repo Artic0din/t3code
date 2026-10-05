@@ -741,6 +741,11 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const paletteRouteTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const routeDraftId = paletteRouteTarget?.kind === "draft" ? paletteRouteTarget.draftId : null;
   const projects = useProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
@@ -1990,6 +1995,7 @@ function OpenCommandPaletteDialog(props: {
     contextualProjectRef !== null &&
     issueProject !== undefined &&
     !isScratchProject(issueProject, scratchWorkspaceRootFor(issueProject.environmentId)) &&
+    issueProject.repositoryIdentity?.provider === "github" &&
     serverConfigs.get(contextualProjectRef.environmentId)?.environment.capabilities.issueThreads ===
       true
   ) {
@@ -2002,12 +2008,9 @@ function OpenCommandPaletteDialog(props: {
       icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         // The dialog lives on the project's draft thread, so open that draft first when needed.
-        // activeThread is only set on a server-thread route; a promoted thread keeps its old
-        // draft record, so the draft record alone does not mean a draft is open.
-        if (activeThread !== null || activeDraftThread === null) {
-          await handleNewThread(projectRef);
-        }
-        openIssueThreadDialog(projectRef);
+        // The dialog lives on a draft: use the open one, or open the project's draft first.
+        const draftId = routeDraftId ?? (await handleNewThread(projectRef))?.draftId;
+        if (draftId) openIssueThreadDialog(draftId);
       },
     });
   }

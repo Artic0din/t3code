@@ -1,9 +1,5 @@
-import type {
-  EnvironmentId,
-  GitResolvedIssue,
-  ScopedProjectRef,
-  ThreadId,
-} from "@t3tools/contracts";
+import type { EnvironmentId, GitResolvedIssue, ThreadId } from "@t3tools/contracts";
+import type { DraftId } from "~/composerDraftStore";
 import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import { parseIssueReference } from "@t3tools/shared/git";
 import { useAtomValue } from "@effect/atom-react";
@@ -33,18 +29,18 @@ import { Spinner } from "./ui/spinner";
  * dialog outlives a palette that closes the moment its command runs.
  */
 const issueThreadDialogRequestAtom = Atom.make<{
-  readonly projectRef: ScopedProjectRef;
+  readonly draftId: DraftId;
   readonly reference: string | null;
   readonly key: number;
 } | null>(null).pipe(Atom.keepAlive, Atom.withLabel("issues:start-dialog"));
 
-/** The chat view only renders the request for this project, so navigation can't retarget it. */
-export function openIssueThreadDialog(
-  projectRef: ScopedProjectRef,
-  initialReference?: string,
-): void {
+/**
+ * Only the chat view showing this draft renders the request, so leaving the draft (Back, sidebar,
+ * another project) drops it, while automatic environment selection keeps the same draft.
+ */
+export function openIssueThreadDialog(draftId: DraftId, initialReference?: string): void {
   appAtomRegistry.set(issueThreadDialogRequestAtom, {
-    projectRef,
+    draftId,
     reference: initialReference ?? null,
     key: Date.now(),
   });
@@ -119,6 +115,11 @@ export function IssueThreadDialog({
     reference: open ? parsedDebouncedReference : null,
   });
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
+  // A failed start from an earlier dialog is scope-wide state; a newly opened dialog starts clean.
+  const resetPrepareErrorOnOpen = useRef(prepareIssueThreadAction.resetError);
+  useEffect(() => {
+    resetPrepareErrorOnOpen.current();
+  }, []);
 
   const resolvedIssue =
     parsedReference !== null && parsedReference === parsedDebouncedReference
@@ -218,6 +219,7 @@ export function IssueThreadDialog({
               onChange={(event) => {
                 setReferenceDirty(true);
                 setOpenDraftError(null);
+                prepareIssueThreadAction.resetError();
                 setReference(event.target.value);
               }}
               onKeyDown={(event) => {

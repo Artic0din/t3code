@@ -2843,29 +2843,12 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const issueDialogRequest = useIssueThreadDialogRequest();
-  const issueDialogProject = useProject(issueDialogRequest?.projectRef ?? null);
-  // Matched by logical project: automatic environment selection may move the fresh draft to
-  // another member of the same project, which must keep the dialog.
-  const issueDialogLogicalKey =
-    issueDialogProject == null
-      ? null
-      : deriveLogicalProjectKeyFromSettings(issueDialogProject, projectGroupingSettings);
-  const activeLogicalKey =
-    activeProject == null
-      ? null
-      : deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
   const issueDialogMatchesProject =
-    issueDialogLogicalKey !== null && issueDialogLogicalKey === activeLogicalKey;
-  // Only a confirmed mismatch (for example after browser Back) drops the request, never a
-  // project that is still loading.
-  const issueDialogTargetsOtherProject =
-    issueDialogRequest !== null &&
-    issueDialogLogicalKey !== null &&
-    activeLogicalKey !== null &&
-    issueDialogLogicalKey !== activeLogicalKey;
+    issueDialogRequest !== null && routeKind === "draft" && draftId === issueDialogRequest.draftId;
+  // Leaving the requesting draft drops the request, so it can never reopen on another thread.
   useEffect(() => {
-    if (issueDialogTargetsOtherProject) closeIssueThreadDialog();
-  }, [issueDialogTargetsOtherProject]);
+    if (issueDialogRequest !== null && !issueDialogMatchesProject) closeIssueThreadDialog();
+  }, [issueDialogMatchesProject, issueDialogRequest]);
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
   // In-memory only: after a reload the next issue start appends, which never loses text.
   const issuePrefillByDraftRef = useRef(new Map<DraftId, string>());
