@@ -257,7 +257,17 @@ export const make = Effect.gen(function* () {
         env: { GH_PROMPT_DISABLED: "1" },
         maxOutputBytes: 256_000,
       })
-      .pipe(Effect.mapError((cause) => issueError("getIssue", cause.detail, cause)));
+      .pipe(
+        Effect.mapError((cause) =>
+          issueError(
+            "getIssue",
+            cause._tag === "GitHubPullRequestNotFoundError"
+              ? `Issue ${input.reference} not found. Check the number or URL.`
+              : cause.detail,
+            cause,
+          ),
+        ),
+      );
     const issue = yield* decodeIssue(result.stdout.trim()).pipe(
       Effect.mapError((cause) =>
         issueError("getIssue.decode", "The issue could not be read.", cause),

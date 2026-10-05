@@ -4693,6 +4693,28 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("reports a missing issue number as not found", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCli.GitHubPullRequestNotFoundError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("Could not resolve to an issue or pull request"),
+          }),
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "999" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("Issue 999 not found.");
+    }),
+  );
+
   it.effect("rejects an unparseable issue reference before calling gh", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
@@ -4819,6 +4841,88 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         "--show-current",
       ])).stdout.trim();
       expect(worktreeBranch).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("refuses an issue branch that is checked out in the main checkout", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const error = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("already checked out in the main repo");
+    }),
+  );
+
+  it.effect("recreates an issue worktree whose folder was deleted", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const first = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+      NodeFS.rmSync(first.worktreePath, { recursive: true, force: true });
+      const second = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(NodeFS.existsSync(second.worktreePath)).toBe(true);
+      const worktreeBranch = (yield* runGit(second.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(worktreeBranch).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("reuses an issue worktree after the issue title changed", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const worktreePath = NodePath.join(yield* makeTempDir("t3code-issue-wt-"), "wt");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "issue/31-old-title", worktreePath]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-old-title");
+      expect(NodeFS.realpathSync(result.worktreePath)).toBe(NodeFS.realpathSync(worktreePath));
     }),
   );
 

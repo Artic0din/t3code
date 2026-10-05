@@ -2393,10 +2393,25 @@ export const make = Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
 
+      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
       const { refs } = yield* gitCore.listRefs({ cwd: input.cwd, refresh: true });
-      const existing = refs.find((ref) => !ref.isRemote && ref.name === branch);
+      const issueBranchPrefix = `issue/${issue.number}-`;
+      const localRefs = refs.filter((ref) => !ref.isRemote);
+      // The slug follows the title, so a renamed issue still finds its branch by number.
+      const existing =
+        localRefs.find((ref) => ref.name === branch) ??
+        localRefs.find((ref) => ref.name.startsWith(issueBranchPrefix));
       if (existing?.worktreePath) {
-        return { issue, branch, worktreePath: existing.worktreePath };
+        const rootWorktreePath = yield* canonicalizeExistingPath(input.cwd);
+        if ((yield* canonicalizeExistingPath(existing.worktreePath)) === rootWorktreePath) {
+          return yield* new GitManagerError({
+            operation: "prepareIssueThread",
+            cwd: input.cwd,
+            detail: `${existing.name} is already checked out in the main repo. Switch the main repo off that branch to start a worktree thread.`,
+          });
+        }
+        return { issue, branch: existing.name, worktreePath: existing.worktreePath };
       }
 
       const submodules = yield* projectSettingsFor(input).pipe(
@@ -2405,7 +2420,7 @@ export const make = Effect.gen(function* () {
       );
       if (existing) {
         const worktree = yield* gitCore.createWorktree(
-          { cwd: input.cwd, refName: branch, path: null },
+          { cwd: input.cwd, refName: existing.name, path: null },
           { submodules },
         );
         yield* runSetupScript(worktree.worktree.path);
