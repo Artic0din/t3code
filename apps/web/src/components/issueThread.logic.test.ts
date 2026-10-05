@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildIssuePrompt, mergeIssuePrompt } from "./issueThread.logic";
+import { applyIssuePrefill, buildIssuePrompt, mergeIssuePrompt } from "./issueThread.logic";
 
 const issue = {
   number: 31,
@@ -84,5 +84,47 @@ describe("mergeIssuePrompt", () => {
   it("does not add the same issue twice", () => {
     const once = mergeIssuePrompt("", prompt, issue.url);
     expect(mergeIssuePrompt(once, prompt, issue.url)).toBe(once);
+  });
+});
+
+describe("applyIssuePrefill", () => {
+  const issueA = {
+    ...issue,
+    number: 1,
+    title: "A",
+    body: null,
+    url: "https://github.com/o/r/issues/1",
+  };
+  const issueB = {
+    ...issue,
+    number: 2,
+    title: "B",
+    body: null,
+    url: "https://github.com/o/r/issues/2",
+  };
+  const issueC = {
+    ...issue,
+    number: 3,
+    title: "C",
+    body: null,
+    url: "https://github.com/o/r/issues/3",
+  };
+
+  it("never deletes user text across repeated issue starts", () => {
+    const first = applyIssuePrefill("", undefined, issueA);
+    const edited = `${first.prompt}\n\nKeep the API stable.`;
+    const second = applyIssuePrefill(edited, first.prefill, issueB);
+    const third = applyIssuePrefill(second.prompt, second.prefill, issueC);
+
+    expect(third.prompt).toContain("Keep the API stable.");
+    expect(third.prompt).toContain(issueC.url);
+  });
+
+  it("replaces an untouched issue prefill", () => {
+    const first = applyIssuePrefill("", undefined, issueA);
+    const second = applyIssuePrefill(first.prompt, first.prefill, issueB);
+
+    expect(second.prompt).toBe(buildIssuePrompt(issueB));
+    expect(second.prefill).toBe(second.prompt);
   });
 });

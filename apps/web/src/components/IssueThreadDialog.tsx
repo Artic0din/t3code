@@ -1,4 +1,9 @@
-import type { EnvironmentId, GitResolvedIssue, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  GitResolvedIssue,
+  ScopedProjectRef,
+  ThreadId,
+} from "@t3tools/contracts";
 import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import { parseIssueReference } from "@t3tools/shared/git";
 import { useAtomValue } from "@effect/atom-react";
@@ -28,12 +33,18 @@ import { Spinner } from "./ui/spinner";
  * dialog outlives a palette that closes the moment its command runs.
  */
 const issueThreadDialogRequestAtom = Atom.make<{
+  readonly projectRef: ScopedProjectRef;
   readonly reference: string | null;
   readonly key: number;
 } | null>(null).pipe(Atom.keepAlive, Atom.withLabel("issues:start-dialog"));
 
-export function openIssueThreadDialog(initialReference?: string): void {
+/** The chat view only renders the request for this project, so navigation can't retarget it. */
+export function openIssueThreadDialog(
+  projectRef: ScopedProjectRef,
+  initialReference?: string,
+): void {
   appAtomRegistry.set(issueThreadDialogRequestAtom, {
+    projectRef,
     reference: initialReference ?? null,
     key: Date.now(),
   });

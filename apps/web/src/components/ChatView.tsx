@@ -429,7 +429,7 @@ import {
   IssueThreadDialog,
   useIssueThreadDialogRequest,
 } from "./IssueThreadDialog";
-import { buildIssuePrompt, mergeIssuePrompt } from "./issueThread.logic";
+import { applyIssuePrefill } from "./issueThread.logic";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
@@ -2843,6 +2843,14 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const issueDialogRequest = useIssueThreadDialogRequest();
+  const issueDialogMatchesProject =
+    issueDialogRequest !== null &&
+    activeProject?.environmentId === issueDialogRequest.projectRef.environmentId &&
+    activeProject.id === issueDialogRequest.projectRef.projectId;
+  // A request for another project (for example after browser Back) is dropped, never retargeted.
+  useEffect(() => {
+    if (issueDialogRequest !== null && !issueDialogMatchesProject) closeIssueThreadDialog();
+  }, [issueDialogMatchesProject, issueDialogRequest]);
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
   // In-memory only: after a reload the next issue start appends, which never loses text.
   const issuePrefillByDraftRef = useRef(new Map<DraftId, string>());
@@ -2853,15 +2861,14 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: input.worktreePath,
         envMode: "worktree",
       });
-      const existingPrompt = getComposerDraft(preparedDraftId)?.prompt ?? "";
-      const nextPrompt = mergeIssuePrompt(
-        existingPrompt,
-        buildIssuePrompt(input.issue),
-        input.issue.url,
+      const next = applyIssuePrefill(
+        getComposerDraft(preparedDraftId)?.prompt ?? "",
         issuePrefillByDraftRef.current.get(preparedDraftId),
+        input.issue,
       );
-      issuePrefillByDraftRef.current.set(preparedDraftId, nextPrompt);
-      setComposerDraftPrompt(preparedDraftId, nextPrompt);
+      if (next.prefill === undefined) issuePrefillByDraftRef.current.delete(preparedDraftId);
+      else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
+      setComposerDraftPrompt(preparedDraftId, next.prompt);
     },
     [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt],
   );
@@ -2961,6 +2968,9 @@ export default function ChatView(props: ChatViewProps) {
   const modelPickerLockedProvider = supportsProviderSwitchingViaHandoff ? null : lockedProvider;
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const canStartFromIssue =
+    canCheckoutPullRequestIntoThread &&
+    serverConfig?.environment.capabilities.issueThreads === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsQuestionAttachments =
@@ -11468,7 +11478,7 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
 
-            {issueDialogRequest && canCheckoutPullRequestIntoThread ? (
+            {issueDialogRequest && issueDialogMatchesProject && canStartFromIssue ? (
               <IssueThreadDialog
                 key={issueDialogRequest.key}
                 open

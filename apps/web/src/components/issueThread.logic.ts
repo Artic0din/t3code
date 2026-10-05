@@ -27,3 +27,17 @@ export function mergeIssuePrompt(
   if (containsUrlToken(existing, issueUrl)) return existing;
   return `${existing.trimEnd()}\n\n${issuePrompt}`;
 }
+
+/**
+ * Next draft text for an issue start, plus the text a later start may replace. Only a prompt the
+ * issue fully owns is replaceable; once user text is mixed in, later starts append instead.
+ */
+export function applyIssuePrefill(
+  existing: string,
+  previousPrefill: string | undefined,
+  issue: GitResolvedIssue,
+): { readonly prompt: string; readonly prefill: string | undefined } {
+  const issuePrompt = buildIssuePrompt(issue);
+  const prompt = mergeIssuePrompt(existing, issuePrompt, issue.url, previousPrefill);
+  return { prompt, prefill: prompt === issuePrompt ? prompt : undefined };
+}

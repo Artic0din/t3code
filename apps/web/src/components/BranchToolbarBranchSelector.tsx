@@ -29,7 +29,7 @@ import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { readLocalApi } from "../localApi";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { usePaginatedBranches } from "../state/queries";
-import { useProject, useThreadShell } from "../state/entities";
+import { useProject, useServerConfigs, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -278,8 +278,10 @@ export function BranchToolbarBranchSelector({
     prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
   const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
   // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
+  const supportsIssueThreads =
+    useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
   const startFromIssueItemValue =
-    issueReference && onCheckoutPullRequestRequest
+    issueReference && onCheckoutPullRequestRequest && supportsIssueThreads && activeProject
       ? `__start_from_issue__:${issueReference}`
       : null;
   const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
@@ -609,9 +611,9 @@ export function BranchToolbarBranchSelector({
       : `#${prNumber}${displayedPr?.title.trim() ? `: ${displayedPr.title}` : ""}`;
 
   function selectPickerItem(itemValue: string) {
-    if (itemValue === startFromIssueItemValue && issueReference) {
+    if (itemValue === startFromIssueItemValue && issueReference && activeProject) {
       handleOpenChange(false);
-      openIssueThreadDialog(issueReference);
+      openIssueThreadDialog(scopeProjectRef(environmentId, activeProject.id), issueReference);
     } else if (
       itemValue === checkoutPullRequestItemValue &&
       prReference &&

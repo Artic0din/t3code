@@ -753,7 +753,8 @@ function OpenCommandPaletteDialog(props: {
         ? scopeThreadRef(activeThread.environmentId, activeThread.id)
         : null;
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(referenceThreadRef);
-  const activeThreadServerConfig = useServerConfigs().get(
+  const serverConfigs = useServerConfigs();
+  const activeThreadServerConfig = serverConfigs.get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
   const activeThreadReferenceCopyTarget =
@@ -1977,7 +1978,22 @@ function OpenCommandPaletteDialog(props: {
     }
   }
 
-  if (activeDraftThread !== null || contextualProjectRef !== null) {
+  const issueProject =
+    contextualProjectRef === null
+      ? undefined
+      : projects.find(
+          (project) =>
+            project.environmentId === contextualProjectRef.environmentId &&
+            project.id === contextualProjectRef.projectId,
+        );
+  if (
+    contextualProjectRef !== null &&
+    issueProject !== undefined &&
+    !isScratchProject(issueProject, scratchWorkspaceRootFor(issueProject.environmentId)) &&
+    serverConfigs.get(contextualProjectRef.environmentId)?.environment.capabilities.issueThreads ===
+      true
+  ) {
+    const projectRef = contextualProjectRef;
     actionItems.push({
       kind: "action",
       value: "action:start-from-issue",
@@ -1986,10 +2002,8 @@ function OpenCommandPaletteDialog(props: {
       icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         // The dialog lives on the project's draft thread, so open that draft first when needed.
-        if (activeDraftThread === null && contextualProjectRef !== null) {
-          await handleNewThread(contextualProjectRef);
-        }
-        openIssueThreadDialog();
+        if (activeDraftThread === null) await handleNewThread(projectRef);
+        openIssueThreadDialog(projectRef);
       },
     });
   }
