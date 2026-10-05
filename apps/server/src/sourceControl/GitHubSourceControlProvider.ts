@@ -21,6 +21,19 @@ const decodeLinkSubject = Schema.decodeUnknownEffect(
   ),
 );
 
+const decodeIssue = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      number: Schema.Number,
+      title: Schema.String,
+      body: Schema.NullOr(Schema.String),
+      url: Schema.String,
+      state: Schema.Literals(["OPEN", "CLOSED"]),
+    }),
+  ),
+);
+const GITHUB_PULL_REQUEST_URL_PATTERN = /\/pull\/\d+(?:[/?#]|$)/;
+
 function toChangeRequest(summary: GitHubCli.GitHubPullRequestSummary): ChangeRequest {
   return {
     provider: "github",
@@ -223,8 +236,48 @@ export const make = Effect.gen(function* () {
     return { title: subject.title, body: subject.body };
   });
 
+  const getIssue = Effect.fn("GitHubSourceControlProvider.getIssue")(function* (input: {
+    readonly cwd: string;
+    readonly reference: string;
+  }) {
+    const issueError = (operation: string, detail: string, cause?: unknown) =>
+      new SourceControlProviderError({
+        provider: "github",
+        operation,
+        cwd: input.cwd,
+        reference: SourceControlProvider.transportSafeSourceControlErrorValue(input.reference),
+        detail,
+        ...(cause === undefined ? {} : { cause }),
+      });
+    const result = yield* github
+      .execute({
+        cwd: input.cwd,
+        args: ["issue", "view", input.reference, "--json", "number,title,body,state,url"],
+        env: { GH_PROMPT_DISABLED: "1" },
+        maxOutputBytes: 256_000,
+      })
+      .pipe(Effect.mapError((cause) => issueError("getIssue", cause.detail, cause)));
+    const issue = yield* decodeIssue(result.stdout.trim()).pipe(
+      Effect.mapError((cause) =>
+        issueError("getIssue.decode", "The issue could not be read.", cause),
+      ),
+    );
+    // GitHub serves pull requests through the issues API too.
+    if (GITHUB_PULL_REQUEST_URL_PATTERN.test(issue.url)) {
+      return yield* issueError("getIssue", `#${issue.number} is a pull request, not an issue.`);
+    }
+    return {
+      number: issue.number,
+      title: issue.title,
+      body: issue.body,
+      url: issue.url,
+      state: issue.state === "OPEN" ? ("open" as const) : ("closed" as const),
+    };
+  });
+
   return SourceControlProvider.SourceControlProvider.of({
     kind: "github",
+    getIssue,
     resolveLink: (input) => {
       // Automatic enrichment must not send ambient CLI credentials to a host from message text.
       if (input.url.host !== "github.com") return undefined;

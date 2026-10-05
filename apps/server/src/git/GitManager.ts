@@ -18,9 +18,11 @@ import {
   GitActionProgressEvent,
   GitActionProgressPhase,
   GitCommandError,
+  GitIssueRefInput,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitPullRequestRefInput,
+  GitResolveIssueResult,
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
@@ -44,6 +46,7 @@ import {
   detectSourceControlProviderFromGitRemoteUrl,
   mergeGitStatusParts,
   normalizeGitRemoteUrl,
+  parseIssueReference,
   resolveAutoFeatureBranchName,
   sanitizeBranchFragment,
   sanitizeFeatureBranchName,
@@ -127,6 +130,9 @@ export class GitManager extends Context.Service<
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
+    readonly resolveIssue: (
+      input: GitIssueRefInput,
+    ) => Effect.Effect<GitResolveIssueResult, GitManagerServiceError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
@@ -2330,6 +2336,36 @@ export const make = Effect.gen(function* () {
     return { pullRequest };
   });
 
+  const readIssue = Effect.fn("readIssue")(function* (
+    cwd: string,
+    reference: string,
+    operation: string,
+  ) {
+    const normalized = parseIssueReference(reference);
+    if (normalized === null) {
+      return yield* new GitManagerError({
+        operation,
+        cwd,
+        detail: "Use an issue number or GitHub issue URL.",
+      });
+    }
+    const provider = yield* sourceControlProvider(cwd);
+    if (provider.getIssue === undefined) {
+      return yield* new GitManagerError({
+        operation,
+        cwd,
+        detail: "Only GitHub issues are supported.",
+      });
+    }
+    return yield* provider.getIssue({ cwd, reference: normalized });
+  });
+
+  const resolveIssue: GitManager["Service"]["resolveIssue"] = Effect.fn("resolveIssue")(
+    function* (input) {
+      return { issue: yield* readIssue(input.cwd, input.reference, "resolveIssue") };
+    },
+  );
+
   const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(
     "preparePullRequestThread",
   )(function* (input) {
@@ -2858,6 +2894,7 @@ export const make = Effect.gen(function* () {
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,
+    resolveIssue,
     runStackedAction,
   });
 });

@@ -3362,6 +3362,10 @@ const makeWsRpcLayer = (
               .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
             { "rpc.aggregate": "git" },
           ),
+        [WS_METHODS.gitResolveIssue]: (input) =>
+          observeRpcEffect(WS_METHODS.gitResolveIssue, gitWorkflow.resolveIssue(input), {
+            "rpc.aggregate": "git",
+          }),
         [WS_METHODS.vcsListRefs]: (input) =>
           observeRpcEffect(WS_METHODS.vcsListRefs, gitWorkflow.listRefs(input), {
             "rpc.aggregate": "vcs",

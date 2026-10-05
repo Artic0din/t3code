@@ -81,6 +81,14 @@ interface FakeGhScenario {
     headRepositoryOwnerLogin?: string | null;
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
+  issue?: {
+    number: number;
+    title: string;
+    body: string | null;
+    url: string;
+    state: "OPEN" | "CLOSED";
+    isPullRequest?: boolean;
+  };
   failWith?: GitHubCli.GitHubCliError;
   /** Let this many gh calls succeed before failWith kicks in (default 0 = fail immediately). */
   failAfterCalls?: number;
@@ -481,6 +489,27 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       });
     }
 
+    if (args[0] === "issue" && args[1] === "view") {
+      if (!scenario.issue) {
+        return Effect.fail(
+          new GitHubCli.GitHubCliCommandError({
+            command: "gh",
+            cwd: input.cwd,
+            cause: new Error("Could not resolve to an issue"),
+          }),
+        );
+      }
+      const { isPullRequest, ...issue } = scenario.issue;
+      return Effect.succeed(
+        fakeGhOutput(
+          JSON.stringify({
+            ...issue,
+            ...(isPullRequest ? { url: issue.url.replace("/issues/", "/pull/") } : {}),
+          }),
+        ),
+      );
+    }
+
     if (args[0] === "repo" && args[1] === "view") {
       const repository = args[2];
       if (typeof repository === "string" && args.includes("nameWithOwner,url,sshUrl")) {
@@ -654,6 +683,13 @@ function resolvePullRequest(
   input: { cwd: string; reference: string },
 ) {
   return manager.resolvePullRequest(input);
+}
+
+function resolveIssue(
+  manager: GitManager.GitManager["Service"],
+  input: { cwd: string; reference: string },
+) {
+  return manager.resolveIssue(input);
 }
 
 function preparePullRequestThread(
@@ -4568,6 +4604,101 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         state: "open",
       });
       expect(ghCalls.some((call) => call.startsWith("pr view 42 "))).toBe(true);
+    }),
+  );
+
+  it.effect("resolves a GitHub issue by number", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 12,
+            title: "Crash on start",
+            body: null,
+            url: "https://github.com/o/r/issues/12",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* resolveIssue(manager, { cwd: repoDir, reference: "#12" });
+
+      expect(result.issue).toEqual({
+        number: 12,
+        title: "Crash on start",
+        body: null,
+        url: "https://github.com/o/r/issues/12",
+        state: "open",
+      });
+      expect(ghCalls).toContain("issue view 12 --json number,title,body,state,url");
+    }),
+  );
+
+  it.effect("rejects an issue number that belongs to a pull request", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 42,
+            title: "A PR",
+            body: "",
+            url: "https://github.com/o/r/issues/42",
+            state: "OPEN",
+            isPullRequest: true,
+          },
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "42" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("is a pull request, not an issue");
+    }),
+  );
+
+  it.effect("rejects an unparseable issue reference before calling gh", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager, ghCalls } = yield* makeManager({});
+
+      const error = yield* resolveIssue(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/o/r/pull/3",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain("Use an issue number or GitHub issue URL.");
+      expect(ghCalls.filter((call) => call.startsWith("issue "))).toEqual([]);
+    }),
+  );
+
+  it.effect("reports issues as unsupported on hosts other than GitHub", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const provider = yield* GitLabSourceControlProvider.make.pipe(
+        Effect.provide(
+          GitLabCli.layer.pipe(
+            Layer.provide(
+              Layer.mock(VcsProcess.VcsProcess)({
+                run: () => Effect.die("GitLab CLI should not run for issues"),
+              }),
+            ),
+          ),
+        ),
+      );
+      const { manager } = yield* makeManager({ sourceControlProvider: provider });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "5" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("Only GitHub issues are supported.");
     }),
   );
 
