@@ -2002,7 +2002,11 @@ function OpenCommandPaletteDialog(props: {
       icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         // The dialog lives on the project's draft thread, so open that draft first when needed.
-        if (activeDraftThread === null) await handleNewThread(projectRef);
+        // activeThread is only set on a server-thread route; a promoted thread keeps its old
+        // draft record, so the draft record alone does not mean a draft is open.
+        if (activeThread !== null || activeDraftThread === null) {
+          await handleNewThread(projectRef);
+        }
         openIssueThreadDialog(projectRef);
       },
     });
