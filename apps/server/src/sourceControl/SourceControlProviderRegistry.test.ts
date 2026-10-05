@@ -117,6 +117,18 @@ it.effect("routes GitHub remotes to the GitHub provider", () =>
   }),
 );
 
+it.effect("keeps the issue capability on a resolved GitHub provider", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: "https://github.com/Artic0din/t3code.git" }],
+    });
+
+    const provider = yield* registry.resolve({ cwd: "/repo" });
+
+    assert.strictEqual(typeof provider.getIssue, "function");
+  }),
+);
+
 it.effect("routes directly by provider kind for remote-first workflows", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
