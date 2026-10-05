@@ -3,10 +3,12 @@ import { Atom } from "effect/unstable/reactivity";
 
 import { createEnvironmentRpcCommand, createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import type * as Persistence from "../platform/persistence.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
+import { invalidateCachedVcsRefs } from "./vcsRefInvalidation.ts";
 
 export function createGitEnvironmentAtoms<R, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | Persistence.EnvironmentCacheStore | R, E>,
 ) {
   return {
     pullRequestResolution: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -28,6 +30,12 @@ export function createGitEnvironmentAtoms<R, E>(
       tag: WS_METHODS.gitPrepareIssueThread,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
+      // The start creates or checks out an issue branch, so cached branch lists are stale.
+      onSettled: (target, registry) =>
+        invalidateCachedVcsRefs(registry, {
+          environmentId: target.environmentId,
+          cwd: target.input.cwd,
+        }),
     }),
   };
 }
