@@ -2855,7 +2855,19 @@ export default function ChatView(props: ChatViewProps) {
   // In-memory only: after a reload the next issue start appends, which never loses text.
   const issuePrefillByDraftRef = useRef(new Map<DraftId, string>());
   const handlePreparedIssueThread = useCallback(
-    async (input: { issue: GitResolvedIssue; branch: string; worktreePath: string }) => {
+    async (input: {
+      environmentId: EnvironmentId;
+      issue: GitResolvedIssue;
+      branch: string;
+      worktreePath: string;
+    }) => {
+      // The worktree lives on the environment the start ran on; never attach it to a draft that
+      // automatic environment selection has since moved elsewhere.
+      if (activeProject?.environmentId !== input.environmentId) {
+        throw new Error(
+          "This project moved to another environment while the worktree was created. Close this dialog and start the issue again.",
+        );
+      }
       const { draftId: preparedDraftId } = await openOrReuseProjectDraftThread({
         branch: input.branch,
         worktreePath: input.worktreePath,
@@ -2870,7 +2882,12 @@ export default function ChatView(props: ChatViewProps) {
       else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
       setComposerDraftPrompt(preparedDraftId, next.prompt);
     },
-    [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt],
+    [
+      activeProject?.environmentId,
+      getComposerDraft,
+      openOrReuseProjectDraftThread,
+      setComposerDraftPrompt,
+    ],
   );
 
   const handlePreparedPullRequestThread = useCallback(
@@ -2968,19 +2985,6 @@ export default function ChatView(props: ChatViewProps) {
   const modelPickerLockedProvider = supportsProviderSwitchingViaHandoff ? null : lockedProvider;
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
-  const canStartFromIssue =
-    canCheckoutPullRequestIntoThread &&
-    serverConfig?.environment.capabilities.issueThreads === true;
-  // A draft balanced onto a server without issue support can never show the dialog; drop the
-  // request so it cannot reappear later on another draft.
-  const issueDialogUnsupportedHere =
-    issueDialogMatchesProject &&
-    canCheckoutPullRequestIntoThread &&
-    serverConfig !== null &&
-    serverConfig.environment.capabilities.issueThreads !== true;
-  useEffect(() => {
-    if (issueDialogUnsupportedHere) closeIssueThreadDialog();
-  }, [issueDialogUnsupportedHere]);
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsQuestionAttachments =
@@ -11549,7 +11553,7 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
 
-            {issueDialogRequest && issueDialogMatchesProject && canStartFromIssue ? (
+            {issueDialogRequest && issueDialogMatchesProject && canCheckoutPullRequestIntoThread ? (
               <IssueThreadDialog
                 key={issueDialogRequest.key}
                 open

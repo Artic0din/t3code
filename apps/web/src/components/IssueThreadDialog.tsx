@@ -6,7 +6,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { Atom } from "effect/reactivity";
 import { CircleDotIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useIssueResolution, usePrepareIssueThreadAction } from "~/lib/sourceControlActions";
 import { cn } from "~/lib/utils";
@@ -62,6 +62,7 @@ interface IssueThreadDialogProps {
   initialReference: string | null;
   onOpenChange: (open: boolean) => void;
   onPrepared: (input: {
+    environmentId: EnvironmentId;
     issue: GitResolvedIssue;
     branch: string;
     worktreePath: string;
@@ -112,7 +113,9 @@ export function IssueThreadDialog({
 
   const parsedReference = parseIssueReference(reference);
   const parsedDebouncedReference = parseIssueReference(debouncedReference);
-  const scope = useMemo(() => ({ environmentId, cwd }), [cwd, environmentId]);
+  // Frozen at open: automatic environment selection may move the draft mid-start, and the
+  // lookup, the start, and its error must all stay on the environment the user started from.
+  const [scope] = useState(() => ({ environmentId, cwd }));
   const issueResolution = useIssueResolution({
     ...scope,
     reference: open ? parsedDebouncedReference : null,
@@ -132,7 +135,7 @@ export function IssueThreadDialog({
     open &&
     parsedReference !== null &&
     resolvedIssue === null &&
-    issueResolution.error === null &&
+    (issueResolution.error === null || parsedReference !== parsedDebouncedReference) &&
     (referenceDebouncer.state.isPending ||
       parsedReference !== parsedDebouncedReference ||
       issueResolution.isPending);
@@ -142,7 +145,7 @@ export function IssueThreadDialog({
       setReferenceDirty(true);
       return;
     }
-    if (!resolvedIssue || !cwd) return;
+    if (!resolvedIssue || !scope.cwd) return;
     setOpenDraftError(null);
     setIsStarting(true);
     const result = await prepareIssueThreadAction.run({ reference: parsedReference, threadId });
@@ -154,6 +157,7 @@ export function IssueThreadDialog({
     }
     try {
       await onPrepared({
+        environmentId: scope.environmentId,
         issue: result.value.issue,
         branch: result.value.branch,
         worktreePath: result.value.worktreePath,
@@ -170,12 +174,12 @@ export function IssueThreadDialog({
     }
     onOpenChange(false);
   }, [
-    cwd,
     onOpenChange,
     onPrepared,
     parsedReference,
     prepareIssueThreadAction,
     resolvedIssue,
+    scope,
     threadId,
   ]);
 
@@ -187,14 +191,14 @@ export function IssueThreadDialog({
   const errorMessage =
     validationMessage ??
     openDraftError ??
-    (resolvedIssue === null && issueResolution.error
+    (resolvedIssue === null && parsedReference === parsedDebouncedReference && issueResolution.error
       ? issueResolution.error
       : prepareIssueThreadAction.error instanceof Error
         ? prepareIssueThreadAction.error.message
         : prepareIssueThreadAction.error
           ? "Failed to start the issue thread."
           : null);
-  const canStart = cwd !== null && resolvedIssue !== null && !isResolving && !isStarting;
+  const canStart = scope.cwd !== null && resolvedIssue !== null && !isResolving && !isStarting;
 
   return (
     <Dialog
