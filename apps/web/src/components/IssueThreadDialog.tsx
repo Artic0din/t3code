@@ -4,7 +4,7 @@ import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime"
 import { parseIssueReference } from "@t3tools/shared/git";
 import { useAtomValue } from "@effect/atom-react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { CircleDotIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
