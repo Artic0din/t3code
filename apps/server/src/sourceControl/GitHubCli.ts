@@ -741,7 +741,8 @@ export const make = Effect.gen(function* () {
       if (
         !(
           (command === "pr" && (action === "list" || action === "view")) ||
-          (command === "repo" && action === "view")
+          (command === "repo" && action === "view") ||
+          (command === "issue" && action === "view")
         )
       )
         return yield* executeRaw(input);
