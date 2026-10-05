@@ -82,6 +82,15 @@ export function IssueThreadDialog({
   onPrepared,
 }: IssueThreadDialogProps) {
   const referenceInputRef = useRef<HTMLInputElement>(null);
+  // Cleared on unmount: a start that finishes after navigation closed the dialog is ignored.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Set here too: React's development double-invoke runs the cleanup before remounting.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [reference, setReference] = useState(initialReference ?? "");
   const [referenceDirty, setReferenceDirty] = useState(false);
   const [openDraftError, setOpenDraftError] = useState<string | null>(null);
@@ -132,6 +141,7 @@ export function IssueThreadDialog({
     if (!resolvedIssue || !cwd) return;
     setOpenDraftError(null);
     const result = await prepareIssueThreadAction.run({ reference: parsedReference, threadId });
+    if (!mountedRef.current) return;
     if (result._tag === "Failure") {
       if (isAtomCommandInterrupted(result)) prepareIssueThreadAction.resetError();
       return;
@@ -203,6 +213,7 @@ export function IssueThreadDialog({
             <Input
               ref={referenceInputRef}
               placeholder="Issue URL, #123, or 123"
+              disabled={prepareIssueThreadAction.isPending}
               value={reference}
               onChange={(event) => {
                 setReferenceDirty(true);
