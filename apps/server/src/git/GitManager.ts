@@ -2402,10 +2402,11 @@ export const make = Effect.gen(function* () {
       .execute({
         operation: "GitManager.prepareIssueThread.lockKey",
         cwd,
-        args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        // No --path-format: Git 2.30 and older reject it. The output may be relative to cwd.
+        args: ["rev-parse", "--git-common-dir"],
       })
       .pipe(
-        Effect.map((result) => result.stdout.trim()),
+        Effect.map((result) => path.resolve(cwd, result.stdout.trim())),
         Effect.orElseSucceed(() => cwd),
         Effect.flatMap(canonicalizeExistingPath),
       )
@@ -2541,11 +2542,34 @@ export const make = Effect.gen(function* () {
           detail: "Could not find the default branch to start the issue worktree from.",
         });
       }
+      // Pass an explicit ref: with only origin/<base>, `git worktree add -b` given the bare name
+      // checks out a new local <base> tracking branch instead of the issue branch.
+      const refExists = (ref: string) =>
+        gitCore
+          .execute({
+            operation: "GitManager.prepareIssueThread.baseRef",
+            cwd: input.cwd,
+            args: ["rev-parse", "--verify", "--quiet", ref],
+            allowNonZeroExit: true,
+          })
+          .pipe(Effect.map((result) => result.exitCode === 0));
+      const startRef = (yield* refExists(`refs/heads/${baseBranch}`))
+        ? baseBranch
+        : (yield* refExists(`refs/remotes/origin/${baseBranch}`))
+          ? `origin/${baseBranch}`
+          : null;
+      if (startRef === null) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: `The default branch ${baseBranch} is not available locally or on origin. Fetch it, then start work again.`,
+        });
+      }
       return finish(
         yield* gitCore.createWorktree(
           {
             cwd: input.cwd,
-            refName: baseBranch,
+            refName: startRef,
             newRefName: branch,
             baseRefName: baseBranch,
             path: null,
