@@ -1,5 +1,7 @@
-import { assert, it, vi } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
+import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { GitCommandError, ProjectId } from "@t3tools/contracts";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -149,92 +151,162 @@ it.effect("resolves setup scripts through the standalone project service", () =>
 const runSetupForSubfolderProject = (
   worktreeHasSubfolder: boolean,
   prefix: string | null = "packages/app/",
-) => {
-  const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
-    Effect.succeed({
-      threadId: input.threadId,
-      terminalId: input.terminalId,
-      cwd: input.cwd,
-      worktreePath: input.worktreePath ?? null,
-      status: "running" as const,
-      pid: 123,
-      history: "",
-      exitCode: null,
-      exitSignal: null,
-      label: "Shell",
-      updatedAt: "2026-06-20T00:00:00.000Z",
-    }),
-  );
-  const projectId = ProjectId.make("project:setup-runner-subfolder");
-  const layer = ProjectSetupScriptRunner.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        Layer.mock(ProjectService.ProjectService)({
-          getById: () =>
-            Effect.succeed(
-              Option.some({
-                id: projectId,
-                title: "App",
-                workspaceRoot: "/repo/packages/app",
-                repositoryIdentity: null,
-                faviconPath: null,
-                defaultModelSelection: null,
-                scripts: [
-                  {
-                    id: "setup",
-                    name: "Setup",
-                    command: "vp install",
-                    icon: "configure" as const,
-                    runOnWorktreeCreate: true,
-                  },
-                ],
-                createdAt: "2026-06-20T00:00:00.000Z",
-                updatedAt: "2026-06-20T00:00:00.000Z",
-                deletedAt: null,
-              }),
-            ),
-        }),
-        Layer.mock(TerminalManager.TerminalManager)({
-          open,
-          write: () => Effect.void,
-          subscribe: () => Effect.succeed(() => undefined),
-        }),
-        gitWithPrefix(prefix),
-        FileSystem.layerNoop({ exists: () => Effect.succeed(worktreeHasSubfolder) }),
-        Path.layer,
-        ServerSettings.layerTest(),
+  scenario:
+    | "normal"
+    | "project-alias"
+    | "root-launch"
+    | "escaped-link"
+    | "parent-link"
+    | "file" = "normal",
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const base = yield* fs.makeTempDirectoryScoped();
+    const projectFolder = path.join(base, "repo", "packages", "app");
+    yield* fs.makeDirectory(projectFolder, { recursive: true });
+    const workspaceRoot = scenario === "project-alias" ? path.join(base, "alias") : projectFolder;
+    if (scenario === "project-alias") yield* fs.symlink(projectFolder, workspaceRoot);
+    const worktreePath = scenario === "root-launch" ? workspaceRoot : path.join(base, "worktree");
+    const mappedFolder = path.join(worktreePath, "packages", "app");
+    const packagesFolder = path.join(worktreePath, "packages");
+    yield* fs.makeDirectory(packagesFolder, { recursive: true });
+    if (scenario === "escaped-link") {
+      yield* fs.symlink(base, mappedFolder);
+    } else if (scenario === "parent-link") {
+      yield* fs.remove(packagesFolder, { recursive: true });
+      yield* fs.symlink(path.join(base, "repo", "packages"), packagesFolder);
+    } else if (scenario === "file") {
+      yield* fs.writeFileString(mappedFolder, "not a directory");
+    } else if (worktreeHasSubfolder) {
+      yield* fs.makeDirectory(mappedFolder);
+    }
+    const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
+      Effect.succeed({
+        threadId: input.threadId,
+        terminalId: input.terminalId,
+        cwd: input.cwd,
+        worktreePath: input.worktreePath ?? null,
+        status: "running" as const,
+        pid: 123,
+        history: "",
+        exitCode: null,
+        exitSignal: null,
+        label: "Shell",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+      }),
+    );
+    const projectId = ProjectId.make("project:setup-runner-subfolder");
+    const layer = ProjectSetupScriptRunner.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectService.ProjectService)({
+            getById: () =>
+              Effect.succeed(
+                Option.some({
+                  id: projectId,
+                  title: "App",
+                  workspaceRoot,
+                  repositoryIdentity: null,
+                  faviconPath: null,
+                  defaultModelSelection: null,
+                  scripts: [
+                    {
+                      id: "setup",
+                      name: "Setup",
+                      command: "vp install",
+                      icon: "configure" as const,
+                      runOnWorktreeCreate: true,
+                    },
+                  ],
+                  createdAt: "2026-06-20T00:00:00.000Z",
+                  updatedAt: "2026-06-20T00:00:00.000Z",
+                  deletedAt: null,
+                }),
+              ),
+          }),
+          Layer.mock(TerminalManager.TerminalManager)({
+            open,
+            write: () => Effect.void,
+            subscribe: () => Effect.succeed(() => undefined),
+          }),
+          gitWithPrefix(prefix),
+          NodeFileSystem.layer,
+          NodePath.layer,
+          ServerSettings.layerTest(),
+        ),
       ),
-    ),
-  );
-  return Effect.gen(function* () {
-    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
-    const result = yield* runner.runForThread({
-      threadId: "thread-1",
-      projectId,
-      worktreePath: "/worktree",
-    });
-    return { result, openedCwd: open.mock.calls[0]?.[0].cwd };
-  }).pipe(Effect.provide(layer));
-};
+    );
+    return yield* Effect.gen(function* () {
+      const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      const result = yield* runner.runForThread({
+        threadId: "thread-1",
+        projectId,
+        worktreePath,
+      });
+      return { result, openedCwd: open.mock.calls[0]?.[0].cwd, worktreePath, mappedFolder };
+    }).pipe(Effect.provide(layer));
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)));
 
 it.effect("runs setup in the project's subfolder of the worktree", () =>
   Effect.gen(function* () {
-    const { result, openedCwd } = yield* runSetupForSubfolderProject(true);
-    assert.equal(openedCwd, "/worktree/packages/app");
-    assert.equal(result.status === "started" ? result.cwd : null, "/worktree/packages/app");
+    const { result, openedCwd, mappedFolder } = yield* runSetupForSubfolderProject(true);
+    assert.equal(openedCwd, mappedFolder);
+    assert.equal(result.status === "started" ? result.cwd : null, mappedFolder);
   }),
 );
 
 it.effect("runs setup at the worktree root when the subfolder is missing there", () =>
   Effect.gen(function* () {
-    const { openedCwd } = yield* runSetupForSubfolderProject(false);
-    assert.equal(openedCwd, "/worktree");
+    const { openedCwd, worktreePath } = yield* runSetupForSubfolderProject(false);
+    assert.equal(openedCwd, worktreePath);
   }),
 );
 
 it.effect("runs setup at the worktree root when git cannot read the project's prefix", () =>
   Effect.gen(function* () {
-    const { openedCwd } = yield* runSetupForSubfolderProject(true, null);
-    assert.equal(openedCwd, "/worktree");
+    const { openedCwd, worktreePath } = yield* runSetupForSubfolderProject(true, null);
+    assert.equal(openedCwd, worktreePath);
   }),
 );
+
+it.effect.skipIf(!symlinksSupported)(
+  "maps a project alias using Git's physical repository prefix",
+  () =>
+    Effect.gen(function* () {
+      const { openedCwd, mappedFolder } = yield* runSetupForSubfolderProject(
+        true,
+        "packages/app/",
+        "project-alias",
+      );
+      assert.equal(openedCwd, mappedFolder);
+    }),
+);
+
+it.effect.each(["root-launch", "file"] as const)(
+  "keeps setup at the launch root for %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const { openedCwd, worktreePath } = yield* runSetupForSubfolderProject(
+        true,
+        "packages/app/",
+        scenario,
+      );
+      assert.equal(openedCwd, worktreePath);
+    }),
+);
+
+describe.skipIf(!symlinksSupported)("worktree symlink containment", () => {
+  it.effect.each(["escaped-link", "parent-link"] as const)(
+    "keeps setup inside the worktree for %s",
+    (scenario) =>
+      Effect.gen(function* () {
+        const { openedCwd, worktreePath } = yield* runSetupForSubfolderProject(
+          true,
+          "packages/app/",
+          scenario,
+        );
+        assert.equal(openedCwd, worktreePath);
+      }),
+  );
+});

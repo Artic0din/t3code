@@ -1,7 +1,6 @@
 import { ProjectId, type ProjectScript } from "@t3tools/contracts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
-  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
   setupProjectScript,
@@ -298,33 +297,34 @@ export const make = Effect.gen(function* () {
       return { completion, unsubscribe };
     });
 
-  // A subfolder project runs setup in the matching worktree subfolder. The repository root comes
-  // from the project's git prefix rather than --show-toplevel, which resolves symlinks.
-  const resolveSetupCwd = (workspaceRoot: string, worktreePath: string) =>
-    git
-      .execute({
+  const resolveSetupCwd = Effect.fnUntraced(function* (
+    workspaceRoot: string,
+    worktreePath: string,
+  ) {
+    // Root-workspace launches pass the project folder in place of a separate worktree.
+    if (path.resolve(workspaceRoot) === path.resolve(worktreePath)) return worktreePath;
+    return yield* Effect.gen(function* () {
+      const { stdout } = yield* git.execute({
         operation: "ProjectSetupScriptRunner.projectPrefix",
         cwd: workspaceRoot,
         args: ["rev-parse", "--show-prefix"],
-      })
-      .pipe(
-        Effect.map(({ stdout }) =>
-          stdout
-            .trim()
-            .split("/")
-            .filter((segment) => segment.length > 0)
-            .reduce((root) => path.dirname(root), workspaceRoot),
-        ),
-        Effect.map((repositoryRoot) =>
-          projectScriptRunCwd({ project: { cwd: workspaceRoot }, repositoryRoot, worktreePath }),
-        ),
-        Effect.flatMap((cwd) =>
-          cwd === worktreePath
-            ? Effect.succeed(cwd)
-            : fileSystem.exists(cwd).pipe(Effect.map((exists) => (exists ? cwd : worktreePath))),
-        ),
-        Effect.orElseSucceed(() => worktreePath),
-      );
+      });
+      // Git's prefix describes the physical project folder even when workspaceRoot is an alias.
+      const prefix = stdout.replace(/\r?\n$/, "");
+      if (!prefix) return worktreePath;
+      const cwd = path.resolve(worktreePath, prefix);
+      const info = yield* fileSystem.stat(cwd);
+      if (info.type !== "Directory") return worktreePath;
+      const root = yield* fileSystem.realPath(worktreePath);
+      const resolved = yield* fileSystem.realPath(cwd);
+      const relative = path.relative(root, resolved);
+      // Check resolved paths so symlinks in any component cannot escape the new worktree.
+      if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        return worktreePath;
+      }
+      return cwd;
+    }).pipe(Effect.orElseSucceed(() => worktreePath));
+  });
 
   const runForThread: ProjectSetupScriptRunner["Service"]["runForThread"] = Effect.fn(
     "ProjectSetupScriptRunner.runForThread",
