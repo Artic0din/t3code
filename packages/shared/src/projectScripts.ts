@@ -72,14 +72,15 @@ export function projectScriptRunCwd(input: {
   const worktreePath = input.worktreePath;
   if (!worktreePath) return input.project.cwd;
   if (!input.repositoryRoot) return worktreePath;
-  // Git reports Windows roots with forward slashes and any letter case; compare normalized forms.
+  // Compare normalized forms so separator style and Windows letter case do not matter.
   const root = normalizeProjectPathForComparison(input.repositoryRoot);
   const projectCwd = normalizeProjectPathForComparison(input.project.cwd);
   if (projectCwd.length <= root.length || !projectCwd.startsWith(root)) return worktreePath;
   const relative = normalizeProjectPathForDispatch(input.project.cwd).slice(
     normalizeProjectPathForDispatch(input.repositoryRoot).length,
   );
-  if (!/^[\\/]/.test(relative)) return worktreePath;
+  // A filesystem root such as "/" or "C:\" keeps its separator, so the boundary is already there.
+  if (!/[\\/]$/.test(root) && !/^[\\/]/.test(relative)) return worktreePath;
   const separator = worktreePath.includes("\\") ? "\\" : "/";
   return [
     normalizeProjectPathForDispatch(worktreePath),
