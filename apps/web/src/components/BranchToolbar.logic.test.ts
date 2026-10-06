@@ -774,6 +774,18 @@ describe("resolveBranchSelectionTarget", () => {
 });
 
 describe("shouldIncludeBranchPickerItem", () => {
+  it("keeps the synthetic start-from-issue item visible for issue input", () => {
+    expect(
+      shouldIncludeBranchPickerItem({
+        itemValue: "__start_from_issue__:12",
+        normalizedQuery: "issue 12",
+        createBranchItemValue: "__create_new_branch__:issue 12",
+        checkoutPullRequestItemValue: null,
+        startFromIssueItemValue: "__start_from_issue__:12",
+      }),
+    ).toBe(true);
+  });
+
   it("keeps the synthetic checkout PR item visible for gh pr checkout input", () => {
     expect(
       shouldIncludeBranchPickerItem({

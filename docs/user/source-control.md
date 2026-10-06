@@ -99,6 +99,16 @@ For a local Git repository without a remote, **Publish Repository** creates a ho
 adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
 make your first commit before pushing.
 
+## Start work from an issue
+
+On web and desktop, use **Start work from issue** in the command palette, or type `issue 123` or
+paste a GitHub issue URL in the branch picker. T3 Code creates a worktree on a new `issue/<number>-<title>` branch from the
+default branch and opens a draft thread with the issue in the composer. Edit the prompt, then send
+it. Starting the same issue again reuses its worktree.
+
+A bare number resolves in the repository `gh` picks for the project. In a fork, paste the full issue
+URL to be sure you get the fork's issue. Only GitHub issues are supported.
+
 ## Create a pull request
 
 Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit

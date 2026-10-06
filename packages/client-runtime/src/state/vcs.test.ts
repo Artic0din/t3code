@@ -28,6 +28,7 @@ import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 
+import { createGitEnvironmentAtoms } from "./git.ts";
 import {
   commitVcsRefsRefresh,
   createVcsEnvironmentAtoms,
@@ -341,6 +342,70 @@ describe("cached VCS refs", () => {
         expect(AsyncResult.isSuccess(refreshResult)).toBe(true);
         expect(yield* Ref.get(clears)).toBe(2);
         expect(registry.get(vcsRefsCacheStateAtom(TARGET)).revision).toBe(2);
+      }),
+    ),
+  );
+
+  it.effect("invalidates cached refs when an issue worktree is prepared", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = {
+          [WS_METHODS.gitPrepareIssueThread]: () =>
+            Effect.succeed({
+              issue: {
+                number: 31,
+                title: "Add dark mode",
+                body: null,
+                url: "https://github.com/o/r/issues/31",
+                state: "open",
+              },
+              branch: "issue/31-add-dark-mode",
+              worktreePath: "/repo-worktrees/issue-31",
+            }),
+        } as unknown as WsRpcProtocolClient;
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(CONNECTED_CONNECTION_STATE),
+          session: yield* SubscriptionRef.make(Option.some(session(client))),
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const run: EnvironmentRegistry.EnvironmentRegistry["Service"]["run"] = (
+          _environmentId,
+          effect,
+        ) => Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor);
+        const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
+          run,
+        } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
+        const clears = yield* Ref.make(0);
+        const runtime = Atom.runtime(
+          Layer.merge(
+            Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
+            Layer.succeed(
+              Persistence.EnvironmentCacheStore,
+              cacheWithRefs(Option.none(), {
+                clearVcsRefs: () => Ref.update(clears, (count) => count + 1),
+              }),
+            ),
+          ),
+        );
+        const atoms = createGitEnvironmentAtoms(runtime);
+        const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (registry) =>
+          Effect.sync(() => registry.dispose()),
+        );
+
+        const result = yield* Effect.promise(() =>
+          atoms.prepareIssueThread.run(registry, {
+            environmentId: TARGET.environmentId,
+            input: { cwd: "/repo", reference: "31" },
+          }),
+        );
+
+        expect(AsyncResult.isSuccess(result)).toBe(true);
+        expect(yield* Ref.get(clears)).toBe(1);
+        expect(registry.get(vcsRefsCacheStateAtom(TARGET)).revision).toBe(1);
       }),
     ),
   );

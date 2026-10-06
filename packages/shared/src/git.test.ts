@@ -10,6 +10,7 @@ import {
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
+  parseExplicitIssueReference,
   parseIssueReference,
   parseOriginUrlFromGitConfig,
   WORKTREE_BRANCH_PREFIX,
@@ -388,5 +389,19 @@ describe("buildIssueBranchName", () => {
 
   it("keeps a title that is literally 'Update'", () => {
     expect(buildIssueBranchName(4, "Update")).toBe("issue/4-update");
+  });
+});
+
+describe("parseExplicitIssueReference", () => {
+  it.each([
+    ["issue 12", "12"],
+    ["issue #12", "12"],
+    ["https://github.com/o/r/issues/12", "https://github.com/o/r/issues/12"],
+  ])("accepts %s", (input, expected) => {
+    expect(parseExplicitIssueReference(input)).toBe(expected);
+  });
+
+  it.each(["12", "#12", "feature/12", "issue"])("leaves %s to branch and PR search", (input) => {
+    expect(parseExplicitIssueReference(input)).toBeNull();
   });
 });

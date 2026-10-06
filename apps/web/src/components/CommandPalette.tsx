@@ -44,6 +44,7 @@ import {
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
+  CircleDotIcon,
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
@@ -186,6 +187,7 @@ import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { Checkbox } from "./ui/checkbox";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
+import { openIssueThreadDialog } from "./IssueThreadDialog";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
@@ -739,6 +741,11 @@ function OpenCommandPaletteDialog(props: {
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const paletteRouteTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const routeDraftId = paletteRouteTarget?.kind === "draft" ? paletteRouteTarget.draftId : null;
   const projects = useProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
@@ -751,7 +758,8 @@ function OpenCommandPaletteDialog(props: {
         ? scopeThreadRef(activeThread.environmentId, activeThread.id)
         : null;
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(referenceThreadRef);
-  const activeThreadServerConfig = useServerConfigs().get(
+  const serverConfigs = useServerConfigs();
+  const activeThreadServerConfig = serverConfigs.get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
   const activeThreadReferenceCopyTarget =
@@ -1973,6 +1981,38 @@ function OpenCommandPaletteDialog(props: {
         },
       });
     }
+  }
+
+  const issueProject =
+    contextualProjectRef === null
+      ? undefined
+      : projects.find(
+          (project) =>
+            project.environmentId === contextualProjectRef.environmentId &&
+            project.id === contextualProjectRef.projectId,
+        );
+  if (
+    contextualProjectRef !== null &&
+    issueProject !== undefined &&
+    !isScratchProject(issueProject, scratchWorkspaceRootFor(issueProject.environmentId)) &&
+    issueProject.repositoryIdentity?.provider === "github" &&
+    serverConfigs.get(contextualProjectRef.environmentId)?.environment.capabilities.issueThreads ===
+      true
+  ) {
+    const projectRef = contextualProjectRef;
+    actionItems.push({
+      kind: "action",
+      value: "action:start-from-issue",
+      searchTerms: ["issue", "github", "start", "work", "worktree", "ticket"],
+      title: "Start work from issue",
+      icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        // The dialog lives on the project's draft thread, so open that draft first when needed.
+        // The dialog lives on a draft: use the open one, or open the project's draft first.
+        const draftId = routeDraftId ?? (await handleNewThread(projectRef))?.draftId;
+        if (draftId) openIssueThreadDialog(draftId);
+      },
+    });
   }
 
   if (activeThread !== null) {

@@ -153,6 +153,13 @@ export function parseIssueReference(input: string): string | null {
   return ISSUE_NUMBER_PATTERN.exec(trimmed)?.[1] ?? null;
 }
 
+/** Branch search treats bare numbers as pull requests, so issues need an explicit form there. */
+export function parseExplicitIssueReference(input: string): string | null {
+  const trimmed = input.trim();
+  if (!/^issue\s/i.test(trimmed) && !GITHUB_ISSUE_URL_PATTERN.test(trimmed)) return null;
+  return parseIssueReference(trimmed);
+}
+
 /** Names the worktree branch for an issue: `issue/<number>-<title slug>`. */
 export function buildIssueBranchName(number: number, title: string): string {
   // sanitizeBranchFragment substitutes "update" for unusable input, so detect that case first.

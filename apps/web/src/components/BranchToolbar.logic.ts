@@ -304,8 +304,13 @@ export function shouldIncludeBranchPickerItem(input: {
   normalizedQuery: string;
   createBranchItemValue: string | null;
   checkoutPullRequestItemValue: string | null;
+  startFromIssueItemValue?: string | null;
 }): boolean {
   const { itemValue, normalizedQuery, createBranchItemValue, checkoutPullRequestItemValue } = input;
+
+  if (input.startFromIssueItemValue && itemValue === input.startFromIssueItemValue) {
+    return true;
+  }
 
   if (normalizedQuery.length === 0) {
     return true;

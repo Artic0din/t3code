@@ -65,6 +65,7 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type GitResolvedIssue,
   type ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
@@ -425,6 +426,12 @@ import { isTimelineScrollTarget } from "./chat/timelineScrollTarget";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+import {
+  closeIssueThreadDialog,
+  IssueThreadDialog,
+  useIssueThreadDialogRequest,
+} from "./IssueThreadDialog";
+import { applyIssuePrefill } from "./issueThread.logic";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
@@ -2786,7 +2793,7 @@ export default function ChatView(props: ChatViewProps) {
             params: buildDraftThreadRouteParams(storedDraftSession.draftId),
           });
         }
-        return storedDraftSession.threadId;
+        return { threadId: storedDraftSession.threadId, draftId: storedDraftSession.draftId };
       }
 
       const activeDraftSession = routeKind === "draft" && draftId ? getDraftSession(draftId) : null;
@@ -2803,7 +2810,7 @@ export default function ChatView(props: ChatViewProps) {
           interactionMode: activeDraftSession.interactionMode,
           ...input,
         });
-        return activeDraftSession.threadId;
+        return { threadId: activeDraftSession.threadId, draftId };
       }
 
       const nextDraftId = newDraftId();
@@ -2820,7 +2827,7 @@ export default function ChatView(props: ChatViewProps) {
         to: "/draft/$draftId",
         params: buildDraftThreadRouteParams(nextDraftId),
       });
-      return nextThreadId;
+      return { threadId: nextThreadId, draftId: nextDraftId };
     },
     [
       activeProject,
@@ -2834,6 +2841,52 @@ export default function ChatView(props: ChatViewProps) {
       settings,
       setDraftThreadContext,
       setLogicalProjectDraftThreadId,
+    ],
+  );
+
+  const issueDialogRequest = useIssueThreadDialogRequest();
+  const issueDialogMatchesProject =
+    issueDialogRequest !== null && routeKind === "draft" && draftId === issueDialogRequest.draftId;
+  // Leaving the requesting draft drops the request, so it can never reopen on another thread.
+  useEffect(() => {
+    if (issueDialogRequest !== null && !issueDialogMatchesProject) closeIssueThreadDialog();
+  }, [issueDialogMatchesProject, issueDialogRequest]);
+  const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  // In-memory only: after a reload the next issue start appends, which never loses text.
+  const issuePrefillByDraftRef = useRef(new Map<DraftId, string>());
+  const handlePreparedIssueThread = useCallback(
+    async (input: {
+      environmentId: EnvironmentId;
+      issue: GitResolvedIssue;
+      branch: string;
+      worktreePath: string;
+    }) => {
+      // The worktree lives on the environment the start ran on; never attach it to a draft that
+      // automatic environment selection has since moved elsewhere.
+      if (activeProject?.environmentId !== input.environmentId) {
+        throw new Error(
+          "This project moved to another environment while the worktree was created. Close this dialog and start the issue again.",
+        );
+      }
+      const { draftId: preparedDraftId } = await openOrReuseProjectDraftThread({
+        branch: input.branch,
+        worktreePath: input.worktreePath,
+        envMode: "worktree",
+      });
+      const next = applyIssuePrefill(
+        getComposerDraft(preparedDraftId)?.prompt ?? "",
+        issuePrefillByDraftRef.current.get(preparedDraftId),
+        input.issue,
+      );
+      if (next.prefill === undefined) issuePrefillByDraftRef.current.delete(preparedDraftId);
+      else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
+      setComposerDraftPrompt(preparedDraftId, next.prompt);
+    },
+    [
+      activeProject?.environmentId,
+      getComposerDraft,
+      openOrReuseProjectDraftThread,
+      setComposerDraftPrompt,
     ],
   );
 
@@ -11497,6 +11550,21 @@ export default function ChatView(props: ChatViewProps) {
                   }
                 }}
                 onPrepared={handlePreparedPullRequestThread}
+              />
+            ) : null}
+
+            {issueDialogRequest && issueDialogMatchesProject && canCheckoutPullRequestIntoThread ? (
+              <IssueThreadDialog
+                key={issueDialogRequest.key}
+                open
+                environmentId={activeThread.environmentId}
+                threadId={activeThread.id}
+                cwd={activeProject?.workspaceRoot ?? null}
+                initialReference={issueDialogRequest.reference}
+                onOpenChange={(open) => {
+                  if (!open) closeIssueThreadDialog();
+                }}
+                onPrepared={handlePreparedIssueThread}
               />
             ) : null}
           </ChatCanvas>
