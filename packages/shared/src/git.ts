@@ -141,6 +141,37 @@ export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
 }
 
+const ISSUE_NUMBER_PATTERN = /^(?:issue\s+)?#?([1-9]\d*)$/i;
+const GITHUB_ISSUE_URL_PATTERN =
+  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/([1-9]\d*)(?:[/?#].*)?$/i;
+const ISSUE_BRANCH_SLUG_MAX = 40;
+
+/** Normalizes `123`, `#123`, `issue 123`, or a GitHub issue URL; anything else is null. */
+export function parseIssueReference(input: string): string | null {
+  const trimmed = input.trim();
+  if (GITHUB_ISSUE_URL_PATTERN.test(trimmed)) return trimmed;
+  return ISSUE_NUMBER_PATTERN.exec(trimmed)?.[1] ?? null;
+}
+
+/** Branch search treats bare numbers as pull requests, so issues need an explicit form there. */
+export function parseExplicitIssueReference(input: string): string | null {
+  const trimmed = input.trim();
+  if (!/^issue\s/i.test(trimmed) && !GITHUB_ISSUE_URL_PATTERN.test(trimmed)) return null;
+  return parseIssueReference(trimmed);
+}
+
+/** Names the worktree branch for an issue: `issue/<number>-<title slug>`. */
+export function buildIssueBranchName(number: number, title: string): string {
+  // sanitizeBranchFragment substitutes "update" for unusable input, so detect that case first.
+  if (!/[a-z0-9]/i.test(title)) return `issue/${number}-work`;
+  const slug = sanitizeBranchFragment(title)
+    .replace(/\//g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, ISSUE_BRANCH_SLUG_MAX)
+    .replace(/[-_.]+$/g, "");
+  return `issue/${number}-${slug || "work"}`;
+}
+
 /**
  * The web spelling of an Azure DevOps repository reached over SSH, or null for anything else.
  *

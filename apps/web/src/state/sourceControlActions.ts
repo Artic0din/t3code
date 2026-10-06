@@ -33,7 +33,8 @@ export type SourceControlActionKind =
   | "pull"
   | "publishRepository"
   | "runStackedAction"
-  | "preparePullRequestThread";
+  | "preparePullRequestThread"
+  | "prepareIssueThread";
 
 export interface SourceControlActionScope {
   readonly environmentId: EnvironmentId | null;
@@ -60,6 +61,7 @@ const ACTION_OPERATION = {
   publishRepository: "publish_repository",
   runStackedAction: "run_change_request",
   preparePullRequestThread: "prepare_pull_request_thread",
+  prepareIssueThread: "prepare_issue_thread",
 } as const satisfies Record<SourceControlActionKind, VcsActionOperation>;
 
 function useAction<
@@ -325,6 +327,60 @@ export function usePreparePullRequestThreadAction(scope: SourceControlActionScop
     scope,
     action,
   });
+}
+
+export function usePrepareIssueThreadAction(scope: SourceControlActionScope) {
+  const prepareIssueThread = useAtomCommand(gitEnvironment.prepareIssueThread, {
+    reportFailure: false,
+  });
+  const action = useCallback(
+    async (input: { reference: string; threadId?: ThreadId }) => {
+      const target = resolveScope(scope);
+      if (target === null) {
+        return AsyncResult.failure<never, VcsActionUnavailableError>(
+          Cause.fail(
+            new VcsActionUnavailableError({
+              operation: "prepare_issue_thread",
+              environmentId: scope.environmentId,
+              cwd: scope.cwd,
+            }),
+          ),
+        );
+      }
+      return prepareIssueThread({
+        environmentId: target.environmentId,
+        input: {
+          cwd: target.cwd,
+          reference: input.reference,
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+        },
+      });
+    },
+    [prepareIssueThread, scope],
+  );
+  return useAction({
+    kind: "prepareIssueThread",
+    label: "Preparing issue worktree",
+    scope,
+    action,
+  });
+}
+
+/** Resolves an issue reference for the start-from-issue dialog; null inputs skip the request. */
+export function useIssueResolution(target: PullRequestResolutionTarget) {
+  const query = useEnvironmentQuery(
+    target.environmentId !== null && target.cwd !== null && target.reference !== null
+      ? gitEnvironment.issueResolution({
+          environmentId: target.environmentId,
+          input: { cwd: target.cwd, reference: target.reference },
+        })
+      : null,
+  );
+  return {
+    data: query.data ?? null,
+    error: query.error,
+    isPending: query.isPending,
+  };
 }
 
 export interface PullRequestResolutionTarget {

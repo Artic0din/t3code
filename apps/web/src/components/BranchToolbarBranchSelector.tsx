@@ -1,6 +1,7 @@
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { parseExplicitIssueReference } from "@t3tools/shared/git";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useRightPanelStore } from "../rightPanelStore";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -9,7 +10,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ContextMenuItem, EnvironmentId, VcsRef, ThreadId } from "@t3tools/contracts";
-import { ChevronDownIcon, GitBranchIcon } from "lucide-react";
+import { ChevronDownIcon, CircleDotIcon, GitBranchIcon } from "lucide-react";
 import {
   useCallback,
   useDeferredValue,
@@ -28,7 +29,7 @@ import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { readLocalApi } from "../localApi";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { usePaginatedBranches } from "../state/queries";
-import { useProject, useThreadShell } from "../state/entities";
+import { useProject, useServerConfigs, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -40,6 +41,7 @@ import {
 } from "./chat/threadDetailsPanelStyles";
 import { ThreadDetailsPrRows } from "./chat/ThreadDetailsPrRows";
 import { parsePullRequestReference } from "../pullRequestReference";
+import { openIssueThreadDialog } from "./IssueThreadDialog";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import {
@@ -274,6 +276,18 @@ export function BranchToolbarBranchSelector({
     effectiveEnvMode === "worktree" && !envLocked && !activeWorktreePath;
   const checkoutPullRequestItemValue =
     prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
+  const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
+  // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
+  const supportsIssueThreads =
+    useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
+  const startFromIssueItemValue =
+    issueReference &&
+    onCheckoutPullRequestRequest &&
+    supportsIssueThreads &&
+    draftId &&
+    activeProject?.repositoryIdentity?.provider === "github"
+      ? `__start_from_issue__:${issueReference}`
+      : null;
   const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
   // The ref is created under its sanitized name, so the collision check has to
   // use that name too. Matching on the raw query would offer to create a ref
@@ -291,8 +305,17 @@ export function BranchToolbarBranchSelector({
     if (checkoutPullRequestItemValue) {
       items.unshift(checkoutPullRequestItemValue);
     }
+    if (startFromIssueItemValue) {
+      items.unshift(startFromIssueItemValue);
+    }
     return items;
-  }, [branchNames, checkoutPullRequestItemValue, createBranchItemValue, hasExactBranchMatch]);
+  }, [
+    branchNames,
+    checkoutPullRequestItemValue,
+    createBranchItemValue,
+    hasExactBranchMatch,
+    startFromIssueItemValue,
+  ]);
   const filteredBranchPickerItems = useMemo(
     () =>
       normalizedDeferredBranchQuery.length === 0
@@ -303,6 +326,7 @@ export function BranchToolbarBranchSelector({
               normalizedQuery: normalizedDeferredBranchQuery,
               createBranchItemValue,
               checkoutPullRequestItemValue,
+              startFromIssueItemValue,
             }),
           ),
     [
@@ -310,6 +334,7 @@ export function BranchToolbarBranchSelector({
       checkoutPullRequestItemValue,
       createBranchItemValue,
       normalizedDeferredBranchQuery,
+      startFromIssueItemValue,
     ],
   );
   const [resolvedActiveBranch, setOptimisticBranch] = useOptimistic(
@@ -590,7 +615,14 @@ export function BranchToolbarBranchSelector({
       : `#${prNumber}${displayedPr?.title.trim() ? `: ${displayedPr.title}` : ""}`;
 
   function selectPickerItem(itemValue: string) {
-    if (itemValue === checkoutPullRequestItemValue && prReference && onCheckoutPullRequestRequest) {
+    if (itemValue === startFromIssueItemValue && issueReference && draftId) {
+      handleOpenChange(false);
+      openIssueThreadDialog(draftId, issueReference);
+    } else if (
+      itemValue === checkoutPullRequestItemValue &&
+      prReference &&
+      onCheckoutPullRequestRequest
+    ) {
       handleOpenChange(false);
       onComposerFocusRequest?.();
       onCheckoutPullRequestRequest(prReference);
@@ -603,6 +635,25 @@ export function BranchToolbarBranchSelector({
   }
 
   function renderPickerItem(itemValue: string, index: number) {
+    if (startFromIssueItemValue && itemValue === startFromIssueItemValue) {
+      return (
+        <ComboboxItem
+          hideIndicator
+          key={itemValue}
+          index={index}
+          value={itemValue}
+          onClick={() => selectPickerItem(itemValue)}
+        >
+          <div className="flex min-w-0 items-center gap-2 py-1">
+            <CircleDotIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="flex min-w-0 flex-col items-start">
+              <span className="truncate font-medium">Start work from issue</span>
+              <span className="truncate text-muted-foreground text-xs">{issueReference}</span>
+            </span>
+          </div>
+        </ComboboxItem>
+      );
+    }
     if (checkoutPullRequestItemValue && itemValue === checkoutPullRequestItemValue) {
       return (
         <ComboboxItem
@@ -670,11 +721,13 @@ export function BranchToolbarBranchSelector({
       statusText={branchStatusText}
       renderItem={renderPickerItem}
       getItemType={(item) =>
-        item === checkoutPullRequestItemValue
-          ? "checkout-pull-request"
-          : item === createBranchItemValue
-            ? "create-branch"
-            : "branch"
+        item === startFromIssueItemValue
+          ? "start-from-issue"
+          : item === checkoutPullRequestItemValue
+            ? "checkout-pull-request"
+            : item === createBranchItemValue
+              ? "create-branch"
+              : "branch"
       }
       originControl={
         isSelectingWorktreeBase

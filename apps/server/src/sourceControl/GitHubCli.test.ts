@@ -411,6 +411,19 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(layer.pipe(Layer.provide(GitHubGraphQlBudget.layer)))),
   );
 
+  it.effect("guards issue reads with the shared GraphQL budget", () =>
+    Effect.gen(function* () {
+      const budget = yield* GitHubGraphQlBudget.GitHubGraphQlBudget;
+      const gh = yield* GitHubCli.GitHubCli;
+      yield* budget.observe("github.com", quotaOutput(0).stdout);
+      const error = yield* gh
+        .execute({ cwd: "/repo", args: ["issue", "view", "12", "--json", "number"] })
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "GitHubCliRateLimitError");
+      expect(mockRun).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(layer.pipe(Layer.provide(GitHubGraphQlBudget.layer)))),
+  );
+
   it.effect("keeps quota snapshots separate for verified credentials on the same host", () =>
     Effect.gen(function* () {
       let reads = 0;

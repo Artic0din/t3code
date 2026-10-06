@@ -4,11 +4,14 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyGitStatusStreamEvent,
   formatGeneratedBranchName,
+  buildIssueBranchName,
   buildTemporaryWorktreeBranchName,
   flattenTemporaryWorktreeBranchName,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
+  parseExplicitIssueReference,
+  parseIssueReference,
   parseOriginUrlFromGitConfig,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
@@ -336,5 +339,69 @@ describe("formatGeneratedBranchName", () => {
         instructions: "",
       }),
     ).toBe(branch);
+  });
+});
+
+describe("parseIssueReference", () => {
+  it.each([
+    ["123", "123"],
+    ["#123", "123"],
+    ["  issue 123 ", "123"],
+    ["Issue #7", "7"],
+    [
+      "https://github.com/pingdotgg/t3code/issues/11067",
+      "https://github.com/pingdotgg/t3code/issues/11067",
+    ],
+    [
+      "https://github.com/pingdotgg/t3code/issues/11067#issuecomment-1",
+      "https://github.com/pingdotgg/t3code/issues/11067#issuecomment-1",
+    ],
+  ])("parses %s", (input, expected) => {
+    expect(parseIssueReference(input)).toBe(expected);
+  });
+
+  it.each([
+    "",
+    "#0",
+    "abc",
+    "https://github.com/pingdotgg/t3code/pull/42",
+    "https://gitlab.com/a/b/-/issues/3",
+  ])("rejects %s", (input) => {
+    expect(parseIssueReference(input)).toBeNull();
+  });
+});
+
+describe("buildIssueBranchName", () => {
+  it("slugs the title", () => {
+    expect(buildIssueBranchName(123, "Fix: Login fails on Safari!")).toBe(
+      "issue/123-fix-login-fails-on-safari",
+    );
+  });
+
+  it("flattens slashes and caps the slug at 40 chars", () => {
+    const name = buildIssueBranchName(9, "feat/web: " + "a".repeat(80));
+    expect(name).toBe(`issue/9-feat-web-${"a".repeat(31)}`);
+  });
+
+  it("falls back when the title has no usable characters", () => {
+    expect(buildIssueBranchName(12, "🚀🚀 !!!")).toBe("issue/12-work");
+  });
+
+  it("keeps a title that is literally 'Update'", () => {
+    expect(buildIssueBranchName(4, "Update")).toBe("issue/4-update");
+  });
+});
+
+describe("parseExplicitIssueReference", () => {
+  it.each([
+    ["issue 12", "12"],
+    ["issue #12", "12"],
+    ["https://github.com/o/r/issues/12", "https://github.com/o/r/issues/12"],
+  ])("accepts %s", (input, expected) => {
+    expect(parseExplicitIssueReference(input)).toBe(expected);
+  });
+
+  it.each(["12", "#12", "feature/12", "issue"])("leaves %s to branch and PR search", (input) => {
+    expect(parseExplicitIssueReference(input)).toBeNull();
   });
 });

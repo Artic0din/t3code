@@ -112,6 +112,10 @@ import {
   VcsListRefsInput,
   VcsListRefsResult,
   GitManagerServiceError,
+  GitIssueRefInput,
+  GitPrepareIssueThreadInput,
+  GitPrepareIssueThreadResult,
+  GitResolveIssueResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   VcsPullInput,
@@ -394,6 +398,8 @@ export const WS_METHODS = {
   gitRunStackedAction: "git.runStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
+  gitResolveIssue: "git.resolveIssue",
+  gitPrepareIssueThread: "git.prepareIssueThread",
 
   // Review methods
   reviewGetDiffPreview: "review.getDiffPreview",
@@ -1280,6 +1286,18 @@ const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullReque
   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
 });
 
+const WsGitResolveIssueRpc = Rpc.make(WS_METHODS.gitResolveIssue, {
+  payload: GitIssueRefInput,
+  success: GitResolveIssueResult,
+  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+});
+
+const WsGitPrepareIssueThreadRpc = Rpc.make(WS_METHODS.gitPrepareIssueThread, {
+  payload: GitPrepareIssueThreadInput,
+  success: GitPrepareIssueThreadResult,
+  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+});
+
 const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   payload: VcsListRefsInput,
   success: VcsListRefsResult,
@@ -1819,6 +1837,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
+  WsGitResolveIssueRpc,
+  WsGitPrepareIssueThreadRpc,
   WsVcsListRefsRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,

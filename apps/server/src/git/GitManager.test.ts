@@ -5,7 +5,9 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -81,6 +83,14 @@ interface FakeGhScenario {
     headRepositoryOwnerLogin?: string | null;
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
+  issue?: {
+    number: number;
+    title: string;
+    body: string | null;
+    url: string;
+    state: "OPEN" | "CLOSED" | "MERGED";
+    isPullRequest?: boolean;
+  };
   failWith?: GitHubCli.GitHubCliError;
   /** Let this many gh calls succeed before failWith kicks in (default 0 = fail immediately). */
   failAfterCalls?: number;
@@ -481,6 +491,27 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       });
     }
 
+    if (args[0] === "issue" && args[1] === "view") {
+      if (!scenario.issue) {
+        return Effect.fail(
+          new GitHubCli.GitHubCliCommandError({
+            command: "gh",
+            cwd: input.cwd,
+            cause: new Error("Could not resolve to an issue"),
+          }),
+        );
+      }
+      const { isPullRequest, ...issue } = scenario.issue;
+      return Effect.succeed(
+        fakeGhOutput(
+          JSON.stringify({
+            ...issue,
+            ...(isPullRequest ? { url: issue.url.replace("/issues/", "/pull/") } : {}),
+          }),
+        ),
+      );
+    }
+
     if (args[0] === "repo" && args[1] === "view") {
       const repository = args[2];
       if (typeof repository === "string" && args.includes("nameWithOwner,url,sshUrl")) {
@@ -654,6 +685,20 @@ function resolvePullRequest(
   input: { cwd: string; reference: string },
 ) {
   return manager.resolvePullRequest(input);
+}
+
+function resolveIssue(
+  manager: GitManager.GitManager["Service"],
+  input: { cwd: string; reference: string },
+) {
+  return manager.resolveIssue(input);
+}
+
+function prepareIssueThread(
+  manager: GitManager.GitManager["Service"],
+  input: { cwd: string; reference: string; threadId?: ThreadId },
+) {
+  return manager.prepareIssueThread(input);
 }
 
 function preparePullRequestThread(
@@ -4568,6 +4613,742 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         state: "open",
       });
       expect(ghCalls.some((call) => call.startsWith("pr view 42 "))).toBe(true);
+    }),
+  );
+
+  it.effect("resolves a GitHub issue by number", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 12,
+            title: "Crash on start",
+            body: null,
+            url: "https://github.com/o/r/issues/12",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* resolveIssue(manager, { cwd: repoDir, reference: "#12" });
+
+      expect(result.issue).toEqual({
+        number: 12,
+        title: "Crash on start",
+        body: null,
+        url: "https://github.com/o/r/issues/12",
+        state: "open",
+      });
+      expect(ghCalls).toContain("issue view 12 --json number,title,body,state,url");
+    }),
+  );
+
+  it.effect("rejects an issue number that belongs to a pull request", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 42,
+            title: "A PR",
+            body: "",
+            url: "https://github.com/o/r/issues/42",
+            state: "OPEN",
+            isPullRequest: true,
+          },
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "42" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("is a pull request, not an issue");
+    }),
+  );
+
+  it.effect("rejects a merged pull request number with the pull request message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 1,
+            title: "oxc stack",
+            body: "",
+            url: "https://github.com/o/r/issues/1",
+            state: "MERGED",
+            isPullRequest: true,
+          },
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "1" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("#1 is a pull request, not an issue.");
+    }),
+  );
+
+  it.effect("reports a missing issue number as not found", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCli.GitHubPullRequestNotFoundError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("Could not resolve to an issue or pull request"),
+          }),
+        },
+      });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "999" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("Issue 999 not found.");
+    }),
+  );
+
+  it.effect("rejects an unparseable issue reference before calling gh", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager, ghCalls } = yield* makeManager({});
+
+      const error = yield* resolveIssue(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/o/r/pull/3",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain("Use an issue number or GitHub issue URL.");
+      expect(ghCalls.filter((call) => call.startsWith("issue "))).toEqual([]);
+    }),
+  );
+
+  it.effect("reports issues as unsupported on hosts other than GitHub", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const provider = yield* GitLabSourceControlProvider.make.pipe(
+        Effect.provide(
+          GitLabCli.layer.pipe(
+            Layer.provide(
+              Layer.mock(VcsProcess.VcsProcess)({
+                run: () => Effect.die("GitLab CLI should not run for issues"),
+              }),
+            ),
+          ),
+        ),
+      );
+      const { manager } = yield* makeManager({ sourceControlProvider: provider });
+
+      const error = yield* resolveIssue(manager, { cwd: repoDir, reference: "5" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("Only GitHub issues are supported.");
+    }),
+  );
+
+  it.effect("creates an issue worktree from the default branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      expect(result.issue.title).toBe("Add dark mode");
+      const worktreeBranch = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(worktreeBranch).toBe("issue/31-add-dark-mode");
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
+    }),
+  );
+
+  it.effect("reuses the issue worktree when the same issue is started again", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const first = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+      const second = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "#31" });
+
+      // Git reports the reused worktree by its resolved path (macOS /var -> /private/var).
+      expect(NodeFS.realpathSync(second.worktreePath)).toBe(
+        NodeFS.realpathSync(first.worktreePath),
+      );
+      expect(second.branch).toBe(first.branch);
+    }),
+  );
+
+  it.effect("checks out an existing issue branch that has no worktree", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["branch", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      const worktreeBranch = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(worktreeBranch).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("refuses an issue branch that is checked out in the main checkout", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const error = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("already checked out in the main repo");
+    }),
+  );
+
+  it.effect("recreates an issue worktree whose folder was deleted", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const first = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+      NodeFS.rmSync(first.worktreePath, { recursive: true, force: true });
+      const second = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(NodeFS.existsSync(second.worktreePath)).toBe(true);
+      const worktreeBranch = (yield* runGit(second.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(worktreeBranch).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("reuses an issue worktree after the issue title changed", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const worktreePath = NodePath.join(yield* makeTempDir("t3code-issue-wt-"), "wt");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "issue/31-old-title", worktreePath]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-old-title");
+      expect(NodeFS.realpathSync(result.worktreePath)).toBe(NodeFS.realpathSync(worktreePath));
+    }),
+  );
+
+  it.effect("finds an issue worktree among more than 100 branches", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      for (let index = 0; index < 120; index += 1) {
+        yield* runGit(repoDir, ["branch", `feature/bulk-${String(index).padStart(3, "0")}`]);
+      }
+      const worktreePath = NodePath.join(yield* makeTempDir("t3code-issue-wt-"), "wt");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "issue/31-old-title", worktreePath]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-old-title");
+    }),
+  );
+
+  it.effect("refuses an issue branch checked out in the main repo when cwd is a subfolder", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      NodeFS.mkdirSync(NodePath.join(repoDir, "packages", "app"), { recursive: true });
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const error = yield* prepareIssueThread(manager, {
+        cwd: NodePath.join(repoDir, "packages", "app"),
+        reference: "31",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain("already checked out in the main repo");
+    }),
+  );
+
+  it.effect("fails instead of branching from the current branch when the default is unknown", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/unrelated"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+          failWith: new GitHubCli.GitHubCliCommandError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("repo view failed"),
+          }),
+          failAfterCalls: 1,
+        },
+      });
+
+      const error = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain("Could not find the default branch");
+      const branches = (yield* runGit(repoDir, ["branch", "--list", "issue/*"])).stdout.trim();
+      expect(branches).toBe("");
+    }),
+  );
+
+  it.effect("serializes two concurrent starts of the same issue", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const [first, second] = yield* Effect.all(
+        [
+          prepareIssueThread(manager, { cwd: repoDir, reference: "31" }),
+          prepareIssueThread(manager, { cwd: repoDir, reference: "31" }),
+        ],
+        { concurrency: 2 },
+      );
+
+      expect(NodeFS.realpathSync(second.worktreePath)).toBe(
+        NodeFS.realpathSync(first.worktreePath),
+      );
+    }),
+  );
+
+  it.effect("starts from a remote issue branch that has no local branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
+      yield* runGit(repoDir, ["add", "dark.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Earlier issue work"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
+      const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(pushedSha);
+    }),
+  );
+
+  it.effect("starts an issue worktree when the default branch exists only on the remote", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-local"]);
+      yield* runGit(repoDir, ["branch", "-D", "main"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
+      const checkedOut = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(checkedOut).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("continues a remote issue branch when the remote name contains a slash", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "team/origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
+      yield* runGit(repoDir, ["add", "dark.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Earlier issue work"]);
+      yield* runGit(repoDir, ["push", "team/origin", "issue/31-add-dark-mode"]);
+      const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(pushedSha);
+    }),
+  );
+
+  it.effect("does not block other repositories while a setup script runs", () =>
+    Effect.gen(function* () {
+      const slowRepo = yield* makeTempDir("t3code-git-manager-");
+      const otherRepo = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(slowRepo);
+      yield* initRepo(otherRepo);
+      const setupStarted = yield* Deferred.make<void>();
+      const releaseSetup = yield* Deferred.make<void>();
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+        setupScriptRunner: {
+          runForThread: () =>
+            Deferred.succeed(setupStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseSetup)),
+              Effect.as({ status: "no-script" as const }),
+            ),
+        },
+      });
+
+      const slow = yield* prepareIssueThread(manager, {
+        cwd: slowRepo,
+        reference: "31",
+        threadId: ThreadId.make("thread:slow-setup"),
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(setupStarted);
+      const other = yield* prepareIssueThread(manager, { cwd: otherRepo, reference: "31" });
+      yield* Deferred.succeed(releaseSetup, undefined);
+      yield* Fiber.join(slow);
+
+      expect(other.branch).toBe("issue/31-add-dark-mode");
+    }),
+  );
+
+  it.effect("serializes starts of one issue from the repository root and a subfolder", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const subDir = NodePath.join(repoDir, "packages", "app");
+      NodeFS.mkdirSync(subDir, { recursive: true });
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const [fromRoot, fromSub] = yield* Effect.all(
+        [
+          prepareIssueThread(manager, { cwd: repoDir, reference: "31" }),
+          prepareIssueThread(manager, { cwd: subDir, reference: "31" }),
+        ],
+        { concurrency: 2 },
+      );
+
+      expect(NodeFS.realpathSync(fromSub.worktreePath)).toBe(
+        NodeFS.realpathSync(fromRoot.worktreePath),
+      );
+    }),
+  );
+
+  it.effect("explains when a branch named issue blocks issue branches", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["branch", "issue"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const error = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
+        Effect.flip,
+      );
+
+      expect(error.message).toContain('A branch named "issue" blocks issue/ branches');
+    }),
+  );
+
+  it.effect("starts from the default branch on a remote not named origin", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "upstream", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "upstream", "main"]);
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-local"]);
+      yield* runGit(repoDir, ["branch", "-D", "main"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      const checkedOut = (yield* runGit(result.worktreePath, [
+        "branch",
+        "--show-current",
+      ])).stdout.trim();
+      expect(checkedOut).toBe("issue/31-add-dark-mode");
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
+    }),
+  );
+
+  it.effect("keeps query strings out of the issue not-found message", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCli.GitHubPullRequestNotFoundError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("Could not resolve to an issue or pull request"),
+          }),
+        },
+      });
+
+      const error = yield* resolveIssue(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/o/r/issues/999?token=secret-value#frag",
+      }).pipe(Effect.flip);
+
+      expect(error.message).toContain("not found");
+      expect(error.message).not.toContain("secret-value");
+    }),
+  );
+
+  it.effect("ignores nested remote branches that only end in the default name", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const decoyDir = yield* createBareRemote();
+      const upstreamDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "aaa", decoyDir]);
+      yield* runGit(repoDir, ["remote", "add", "upstream", upstreamDir]);
+      yield* runGit(repoDir, ["push", "upstream", "main"]);
+      const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "-b", "releases/main"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "release.txt"), "release\n");
+      yield* runGit(repoDir, ["add", "release.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Unrelated release work"]);
+      yield* runGit(repoDir, ["push", "aaa", "releases/main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/only-local"]);
+      yield* runGit(repoDir, ["branch", "-D", "main", "releases/main"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+      expect(worktreeSha).toBe(mainSha);
     }),
   );
 

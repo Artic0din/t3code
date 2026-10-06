@@ -14,13 +14,18 @@ import * as Order from "effect/Order";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import {
   GitActionProgressEvent,
   GitActionProgressPhase,
   GitCommandError,
+  GitIssueRefInput,
+  GitPrepareIssueThreadInput,
+  GitPrepareIssueThreadResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitPullRequestRefInput,
+  GitResolveIssueResult,
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
@@ -37,15 +42,19 @@ import {
   type ThreadId,
   type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
+  type VcsRef,
 } from "@t3tools/contracts";
 import {
   hasProjectSettingsOverrides,
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import {
+  buildIssueBranchName,
+  deriveLocalBranchNameFromRemoteRef,
   detectSourceControlProviderFromGitRemoteUrl,
   mergeGitStatusParts,
   normalizeGitRemoteUrl,
+  parseIssueReference,
   resolveAutoFeatureBranchName,
   sanitizeBranchFragment,
   sanitizeFeatureBranchName,
@@ -133,6 +142,12 @@ export class GitManager extends Context.Service<
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
+    readonly resolveIssue: (
+      input: GitIssueRefInput,
+    ) => Effect.Effect<GitResolveIssueResult, GitManagerServiceError>;
+    readonly prepareIssueThread: (
+      input: GitPrepareIssueThreadInput,
+    ) => Effect.Effect<GitPrepareIssueThreadResult, GitManagerServiceError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
@@ -2349,6 +2364,247 @@ export const make = Effect.gen(function* () {
     return { pullRequest };
   });
 
+  const readIssue = Effect.fn("readIssue")(function* (
+    cwd: string,
+    reference: string,
+    operation: string,
+  ) {
+    const normalized = parseIssueReference(reference);
+    if (normalized === null) {
+      return yield* new GitManagerError({
+        operation,
+        cwd,
+        detail: "Use an issue number or GitHub issue URL.",
+      });
+    }
+    const provider = yield* sourceControlProvider(cwd);
+    if (provider.getIssue === undefined) {
+      return yield* new GitManagerError({
+        operation,
+        cwd,
+        detail: "Only GitHub issues are supported.",
+      });
+    }
+    return yield* provider.getIssue({ cwd, reference: normalized });
+  });
+
+  const resolveIssue: GitManager["Service"]["resolveIssue"] = Effect.fn("resolveIssue")(
+    function* (input) {
+      return { issue: yield* readIssue(input.cwd, input.reference, "resolveIssue") };
+    },
+  );
+
+  // ponytail: never evicted; one entry per repository ever used.
+  const issueThreadLocks = new Map<string, Semaphore.Semaphore>();
+  // Keyed by the repository's shared git directory, so a root and a subfolder project share it.
+  const issueThreadLockFor = (cwd: string) =>
+    gitCore
+      .execute({
+        operation: "GitManager.prepareIssueThread.lockKey",
+        cwd,
+        // No --path-format: Git 2.30 and older reject it. The output may be relative to cwd.
+        args: ["rev-parse", "--git-common-dir"],
+      })
+      .pipe(
+        Effect.map((result) => path.resolve(cwd, result.stdout.trim())),
+        Effect.orElseSucceed(() => cwd),
+        Effect.flatMap(canonicalizeExistingPath),
+      )
+      .pipe(
+        Effect.map((key) => {
+          const existing = issueThreadLocks.get(key);
+          if (existing) return existing;
+          const created = Semaphore.makeUnsafe(1);
+          issueThreadLocks.set(key, created);
+          return created;
+        }),
+      );
+  const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
+    "prepareIssueThread",
+  )(function* (input) {
+    const runSetupScript = (worktreePath: string) =>
+      input.threadId === undefined
+        ? Effect.void
+        : projectSetupScriptRunner
+            .runForThread({ threadId: input.threadId, projectCwd: input.cwd, worktreePath })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("GitManager.prepareIssueThread setup script failed", {
+                  threadId: input.threadId,
+                  worktreePath,
+                  cause,
+                }).pipe(Effect.asVoid),
+              ),
+            );
+    const prepared = yield* Effect.gen(function* () {
+      const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
+      const branch = buildIssueBranchName(issue.number, issue.title);
+
+      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
+      const issueBranchPrefix = `issue/${issue.number}-`;
+      // Filtered by the prefix, so the default page size can never hide the issue's branch.
+      const { refs } = yield* gitCore.listRefs({
+        cwd: input.cwd,
+        query: issueBranchPrefix,
+        refKind: "all",
+        refresh: true,
+      });
+      const localRefs = refs.filter((ref) => !ref.isRemote);
+      // The slug follows the title, so a renamed issue still finds its branch by number.
+      const existing =
+        localRefs.find((ref) => ref.name === branch) ??
+        localRefs.find((ref) => ref.name.startsWith(issueBranchPrefix));
+      if (existing?.worktreePath) {
+        const existingPath = yield* canonicalizeExistingPath(existing.worktreePath);
+        const cwdPath = yield* canonicalizeExistingPath(input.cwd);
+        if (cwdPath === existingPath || cwdPath.startsWith(`${existingPath}${path.sep}`)) {
+          return yield* new GitManagerError({
+            operation: "prepareIssueThread",
+            cwd: input.cwd,
+            detail: `${existing.name} is already checked out in the main repo. Switch the main repo off that branch to start a worktree thread.`,
+          });
+        }
+        return {
+          issue,
+          branch: existing.name,
+          worktreePath: existing.worktreePath,
+          created: false,
+        };
+      }
+
+      const submodules = yield* projectSettingsFor(input).pipe(
+        Effect.map((settings) => settings.worktreeSubmodules),
+        Effect.orElseSucceed(() => null),
+      );
+      const finish = (worktree: VcsCreateWorktreeResult) => ({
+        issue,
+        branch: worktree.worktree.refName,
+        worktreePath: worktree.worktree.path,
+        created: true,
+      });
+      if (existing) {
+        return finish(
+          yield* gitCore.createWorktree(
+            { cwd: input.cwd, refName: existing.name, path: null },
+            { submodules },
+          ),
+        );
+      }
+
+      // Work pushed from another machine lives only on the remote; continue it, never fork it.
+      // Remote names may contain slashes, so strip the exact remote name when git reports it.
+      const localNameOf = (ref: VcsRef) =>
+        ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`)
+          ? ref.name.slice(ref.remoteName.length + 1)
+          : deriveLocalBranchNameFromRemoteRef(ref.name);
+      const remoteRef = refs.find(
+        (ref) => ref.isRemote === true && localNameOf(ref).startsWith(issueBranchPrefix),
+      );
+      if (remoteRef) {
+        return finish(
+          yield* gitCore.createWorktree(
+            {
+              cwd: input.cwd,
+              refName: remoteRef.name,
+              newRefName: localNameOf(remoteRef),
+              path: null,
+            },
+            { submodules },
+          ),
+        );
+      }
+
+      // Git cannot create issue/<n>-… while a branch named exactly "issue" exists.
+      const flatIssueBranch = yield* gitCore.execute({
+        operation: "GitManager.prepareIssueThread.flatIssueBranch",
+        cwd: input.cwd,
+        args: ["rev-parse", "--verify", "--quiet", "refs/heads/issue"],
+        allowNonZeroExit: true,
+      });
+      if (flatIssueBranch.exitCode === 0) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail:
+            'A branch named "issue" blocks issue/ branches. Rename it (git branch -m issue <new-name>) to start work from issues.',
+        });
+      }
+
+      // No fallback to the current branch: it would carry unrelated commits into the issue.
+      const baseBranch = yield* (yield* sourceControlProvider(input.cwd))
+        .getDefaultBranch({ cwd: input.cwd })
+        .pipe(Effect.orElseSucceed(() => null));
+      if (!baseBranch) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: "Could not find the default branch to start the issue worktree from.",
+        });
+      }
+      // Pass an explicit ref: with only origin/<base>, `git worktree add -b` given the bare name
+      // checks out a new local <base> tracking branch instead of the issue branch.
+      const refExists = (ref: string) =>
+        gitCore
+          .execute({
+            operation: "GitManager.prepareIssueThread.baseRef",
+            cwd: input.cwd,
+            args: ["rev-parse", "--verify", "--quiet", ref],
+            allowNonZeroExit: true,
+          })
+          .pipe(Effect.map((result) => result.exitCode === 0));
+      // Any remote may hold it (forks often use "upstream"); origin wins when several do. Match
+      // <remote>/<base> exactly, since a suffix test also accepts e.g. aaa/releases/main.
+      const remoteStartRef = Effect.gen(function* () {
+        const listed = yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.remotes",
+          cwd: input.cwd,
+          args: ["remote"],
+        });
+        const remotes = listed.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((name) => name.length > 0)
+          .toSorted((left, right) => Number(right === "origin") - Number(left === "origin"));
+        for (const remote of remotes) {
+          if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
+            return `${remote}/${baseBranch}`;
+          }
+        }
+        return null;
+      });
+      const startRef = (yield* refExists(`refs/heads/${baseBranch}`))
+        ? baseBranch
+        : yield* remoteStartRef;
+      if (startRef === null) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: `The default branch ${baseBranch} is not available locally or on any remote. Fetch it, then start work again.`,
+        });
+      }
+      return finish(
+        yield* gitCore.createWorktree(
+          {
+            cwd: input.cwd,
+            refName: startRef,
+            newRefName: branch,
+            baseRefName: baseBranch,
+            path: null,
+          },
+          { submodules },
+        ),
+      );
+    }).pipe(
+      // Launching setup only opens its terminal, so it stays inside the lock: a second start of
+      // the same issue must not return before the creator has launched setup.
+      Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
+      (yield* issueThreadLockFor(input.cwd)).withPermits(1),
+      Effect.ensuring(invalidateStatus(input.cwd)),
+    );
+    return { issue: prepared.issue, branch: prepared.branch, worktreePath: prepared.worktreePath };
+  });
+
   const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(
     "preparePullRequestThread",
   )(function* (input) {
@@ -2878,6 +3134,8 @@ export const make = Effect.gen(function* () {
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,
+    resolveIssue,
+    prepareIssueThread,
     runStackedAction,
   });
 });

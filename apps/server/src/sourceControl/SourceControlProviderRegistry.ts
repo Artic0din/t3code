@@ -163,6 +163,11 @@ function bindProviderContext(
   return SourceControlProvider.SourceControlProvider.of({
     kind: provider.kind,
     ...(provider.resolveLink ? { resolveLink: provider.resolveLink } : {}),
+    ...(provider.getIssue
+      ? {
+          getIssue: (input) => provider.getIssue!({ ...input, context: input.context ?? context }),
+        }
+      : {}),
     listChangeRequests: (input) =>
       provider.listChangeRequests({
         ...input,

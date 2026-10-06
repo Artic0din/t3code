@@ -95,6 +95,35 @@ describe("VcsProcess.run", () => {
       }),
   );
 
+  it.effect("classifies a missing GitHub issue as not found", () =>
+    Effect.gen(function* () {
+      const service = yield* VcsProcess.make.pipe(
+        Effect.provideService(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: () =>
+              Effect.succeed({
+                stdout: "",
+                stderr:
+                  "GraphQL: Could not resolve to an issue or pull request with the number of 999999. (repository.issue)",
+                code: ChildProcessSpawner.ExitCode(1),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              }),
+          }),
+        ),
+      );
+      const error = yield* service
+        .run({ ...baseInput, command: "gh", args: ["issue", "view", "999999"] })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, VcsProcessExitError);
+      expect(error.failureKind).toBe("not-found");
+    }),
+  );
+
   it.effect.each(["timeout", "spawn"] as const)(
     "checkpoint commands do not retry %s failures",
     (kind) =>

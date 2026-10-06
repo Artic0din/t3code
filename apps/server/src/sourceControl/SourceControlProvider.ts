@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import type {
   ChangeRequest,
   ChangeRequestState,
+  GitResolvedIssue,
   SourceControlProviderError,
   SourceControlProviderInfo,
   SourceControlProviderKind,
@@ -98,6 +99,12 @@ export class SourceControlProvider extends Context.Service<
     readonly kind: SourceControlProviderKind;
     /** Optional capability for issue and change-request subjects. */
     readonly resolveLink?: ResolveSourceControlLink;
+    /** Optional: read one issue for the "start from issue" flow. Hosts without it are unsupported. */
+    readonly getIssue?: (input: {
+      readonly cwd: string;
+      readonly context?: SourceControlProviderContext;
+      readonly reference: string;
+    }) => Effect.Effect<GitResolvedIssue, SourceControlProviderError>;
     readonly listChangeRequests: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
