@@ -1,5 +1,7 @@
 import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
 
+import { normalizeProjectPathForComparison, normalizeProjectPathForDispatch } from "./path.ts";
+
 type ProjectScriptSettings = Pick<
   ServerSettings,
   | "defaultProjectScripts"
@@ -53,6 +55,36 @@ export function projectScriptCwd(input: {
   worktreePath?: string | null;
 }): string {
   return input.worktreePath ?? input.project.cwd;
+}
+
+/**
+ * Where a project script runs. In a worktree, a project registered at a repository subfolder runs
+ * in the matching subfolder, as it does in its own checkout. Falls back to the worktree root when
+ * the repository root is unknown or does not contain the project.
+ */
+export function projectScriptRunCwd(input: {
+  project: {
+    cwd: string;
+  };
+  repositoryRoot: string | null | undefined;
+  worktreePath?: string | null;
+}): string {
+  const worktreePath = input.worktreePath;
+  if (!worktreePath) return input.project.cwd;
+  if (!input.repositoryRoot) return worktreePath;
+  // Git reports Windows roots with forward slashes and any letter case; compare normalized forms.
+  const root = normalizeProjectPathForComparison(input.repositoryRoot);
+  const projectCwd = normalizeProjectPathForComparison(input.project.cwd);
+  if (projectCwd.length <= root.length || !projectCwd.startsWith(root)) return worktreePath;
+  const relative = normalizeProjectPathForDispatch(input.project.cwd).slice(
+    normalizeProjectPathForDispatch(input.repositoryRoot).length,
+  );
+  if (!/^[\\/]/.test(relative)) return worktreePath;
+  const separator = worktreePath.includes("\\") ? "\\" : "/";
+  return [
+    normalizeProjectPathForDispatch(worktreePath),
+    ...relative.split(/[\\/]+/).filter((segment) => segment.length > 0),
+  ].join(separator);
 }
 
 export function projectScriptRuntimeEnv(

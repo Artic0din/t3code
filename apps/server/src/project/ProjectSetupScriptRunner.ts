@@ -1,6 +1,7 @@
 import { ProjectId, type ProjectScript } from "@t3tools/contracts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
   setupProjectScript,
@@ -11,12 +12,15 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -201,6 +205,9 @@ export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const completionShell = resolveCompletionShell(
     yield* HostProcessPlatform,
     yield* HostProcessEnvironment,
@@ -291,6 +298,34 @@ export const make = Effect.gen(function* () {
       return { completion, unsubscribe };
     });
 
+  // A subfolder project runs setup in the matching worktree subfolder. The repository root comes
+  // from the project's git prefix rather than --show-toplevel, which resolves symlinks.
+  const resolveSetupCwd = (workspaceRoot: string, worktreePath: string) =>
+    git
+      .execute({
+        operation: "ProjectSetupScriptRunner.projectPrefix",
+        cwd: workspaceRoot,
+        args: ["rev-parse", "--show-prefix"],
+      })
+      .pipe(
+        Effect.map(({ stdout }) =>
+          stdout
+            .trim()
+            .split("/")
+            .filter((segment) => segment.length > 0)
+            .reduce((root) => path.dirname(root), workspaceRoot),
+        ),
+        Effect.map((repositoryRoot) =>
+          projectScriptRunCwd({ project: { cwd: workspaceRoot }, repositoryRoot, worktreePath }),
+        ),
+        Effect.flatMap((cwd) =>
+          cwd === worktreePath
+            ? Effect.succeed(cwd)
+            : fileSystem.exists(cwd).pipe(Effect.map((exists) => (exists ? cwd : worktreePath))),
+        ),
+        Effect.orElseSucceed(() => worktreePath),
+      );
+
   const runForThread: ProjectSetupScriptRunner["Service"]["runForThread"] = Effect.fn(
     "ProjectSetupScriptRunner.runForThread",
   )(function* (input) {
@@ -355,7 +390,7 @@ export const make = Effect.gen(function* () {
     }
 
     const terminalId = input.preferredTerminalId ?? `setup-${script.id}`;
-    const cwd = input.worktreePath;
+    const cwd = yield* resolveSetupCwd(project.workspaceRoot, input.worktreePath);
     const env = {
       ...projectScriptRuntimeEnv({
         project: { cwd: project.workspaceRoot },

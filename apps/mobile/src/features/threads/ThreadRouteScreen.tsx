@@ -21,7 +21,7 @@ import {
   type ProjectScript,
 } from "@t3tools/contracts";
 import {
-  projectScriptCwd,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
@@ -755,8 +755,9 @@ function ThreadRouteContent(
         threadShellWorktreePath: selectedThread.worktreePath ?? null,
         threadDetailWorktreePath: selectedThreadDetailWorktreePath,
       });
-      const cwd = projectScriptCwd({
+      const cwd = projectScriptRunCwd({
         project: { cwd: selectedThreadProject.workspaceRoot },
+        repositoryRoot: selectedThreadProject.repositoryIdentity?.rootPath,
         worktreePath: preferredWorktreePath,
       });
       const env = projectScriptRuntimeEnv({

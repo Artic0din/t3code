@@ -125,6 +125,7 @@ import {
 } from "@t3tools/shared/model";
 import {
   projectScriptCwd,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
@@ -4874,6 +4875,8 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath?: string | null;
         preferNewTerminal?: boolean;
         rememberAsLastInvoked?: boolean;
+        /** Run where the agent works (the worktree root) instead of the project's folder. */
+        inAgentCwd?: boolean;
       },
     ) => {
       if (!activeThreadId || !activeProject || !activeThread) return;
@@ -4883,17 +4886,33 @@ export default function ChatView(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
-      const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
+      const targetCwd =
+        options?.cwd ??
+        (options?.inAgentCwd
+          ? (gitCwd ?? activeProject.workspaceRoot)
+          : projectScriptRunCwd({
+              project: { cwd: activeProject.workspaceRoot },
+              repositoryRoot: activeProject.repositoryIdentity?.rootPath,
+              worktreePath: targetWorktreePath,
+            }));
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
-      const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
-      const shouldCreateNewTerminal = wantsNewTerminal;
-      const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
+      // Reopening a terminal in another folder restarts its shell and clears its history, so a
+      // script for a different folder gets its own terminal.
+      const baseTerminalCwd = activeThreadKnownSessions.find(
+        (session) => session.target.terminalId === baseTerminalId,
+      )?.state.summary?.cwd;
+      const isBaseTerminalElsewhere =
+        baseTerminalCwd !== undefined && baseTerminalCwd !== targetCwd;
+      const shouldCreateNewTerminal =
+        Boolean(options?.preferNewTerminal) || isBaseTerminalBusy || isBaseTerminalElsewhere;
 
+      // The drawer keeps opening new terminals where the agent works, not in a script's folder.
       setTerminalUiLaunchContext({
         threadId: activeThreadId,
-        cwd: targetCwd,
+        cwd: options?.cwd ?? targetWorktreePath ?? gitCwd ?? activeProject.workspaceRoot,
         worktreePath: targetWorktreePath,
       });
       setTerminalOpen(true);
@@ -4988,6 +5007,7 @@ export default function ChatView(props: ChatViewProps) {
       activeProject,
       activeThread,
       activeThreadId,
+      activeThreadKnownSessions,
       activeThreadRef,
       gitCwd,
       setTerminalOpen,
@@ -5019,7 +5039,7 @@ export default function ChatView(props: ChatViewProps) {
         icon: "play",
         runOnWorktreeCreate: false,
       },
-      { rememberAsLastInvoked: false },
+      { rememberAsLastInvoked: false, inAgentCwd: true },
     );
   }, []);
 
