@@ -8,7 +8,7 @@ import {
   resolveWorktreeSetupProgress,
 } from "./ChatView.logic";
 import * as DateTime from "effect/DateTime";
-import { restorePlanFollowUpComposer } from "./ChatView.logic";
+import { resolvePreparedWorktreeDraft, restorePlanFollowUpComposer } from "./ChatView.logic";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./chat/queuedMessageEdit";
 import {
@@ -2776,7 +2776,34 @@ export default function ChatView(props: ChatViewProps) {
         projectGroupingSettings,
       );
       const storedDraftSession = getDraftSessionByLogicalProjectKey(logicalProjectKey);
-      if (storedDraftSession) {
+      const activeDraftSession = routeKind === "draft" && draftId ? getDraftSession(draftId) : null;
+      const target = resolvePreparedWorktreeDraft({
+        isServerThread,
+        project: { environmentId: activeProject.environmentId, projectId: activeProject.id },
+        activeDraft:
+          activeDraftSession && draftId
+            ? {
+                draftId,
+                environmentId: activeDraftSession.environmentId,
+                projectId: activeDraftSession.projectId,
+              }
+            : null,
+        storedDraftId: storedDraftSession?.draftId ?? null,
+      });
+
+      if (target.kind === "active" && activeDraftSession) {
+        setDraftThreadContext(target.draftId, input);
+        setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, target.draftId, {
+          threadId: activeDraftSession.threadId,
+          createdAt: activeDraftSession.createdAt,
+          runtimeMode: activeDraftSession.runtimeMode,
+          interactionMode: activeDraftSession.interactionMode,
+          ...input,
+        });
+        return { threadId: activeDraftSession.threadId, draftId: target.draftId };
+      }
+
+      if (target.kind === "stored" && storedDraftSession) {
         setDraftThreadContext(storedDraftSession.draftId, input);
         setLogicalProjectDraftThreadId(
           logicalProjectKey,
@@ -2794,23 +2821,6 @@ export default function ChatView(props: ChatViewProps) {
           });
         }
         return { threadId: storedDraftSession.threadId, draftId: storedDraftSession.draftId };
-      }
-
-      const activeDraftSession = routeKind === "draft" && draftId ? getDraftSession(draftId) : null;
-      if (
-        !isServerThread &&
-        activeDraftSession?.logicalProjectKey === logicalProjectKey &&
-        draftId
-      ) {
-        setDraftThreadContext(draftId, input);
-        setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, draftId, {
-          threadId: activeDraftSession.threadId,
-          createdAt: activeDraftSession.createdAt,
-          runtimeMode: activeDraftSession.runtimeMode,
-          interactionMode: activeDraftSession.interactionMode,
-          ...input,
-        });
-        return { threadId: activeDraftSession.threadId, draftId };
       }
 
       const nextDraftId = newDraftId();

@@ -1,4 +1,8 @@
-import { findRecordedWorktreeSetup, resolveVisibleWorktreeSetup } from "./ChatView.logic";
+import {
+  findRecordedWorktreeSetup,
+  resolvePreparedWorktreeDraft,
+  resolveVisibleWorktreeSetup,
+} from "./ChatView.logic";
 import {
   recallCheckoutIsRepo,
   rememberCheckoutIsRepo,
@@ -2158,5 +2162,58 @@ describe("waitForRevertedMessage", () => {
     await vi.advanceTimersByTimeAsync(50);
     await settled;
     vi.useRealTimers();
+  });
+});
+
+describe("resolvePreparedWorktreeDraft", () => {
+  const project = { environmentId: "env", projectId: "project" };
+  const draftOf = (draftId: string, projectId = "project") => ({
+    draftId,
+    environmentId: "env",
+    projectId,
+  });
+
+  it("keeps the invoking draft when the project maps to a different draft", () => {
+    expect(
+      resolvePreparedWorktreeDraft({
+        isServerThread: false,
+        project,
+        activeDraft: draftOf("invoking"),
+        storedDraftId: "newer",
+      }),
+    ).toEqual({ kind: "active", draftId: "invoking" });
+  });
+
+  it("keeps the invoking draft when nothing is mapped", () => {
+    expect(
+      resolvePreparedWorktreeDraft({
+        isServerThread: false,
+        project,
+        activeDraft: draftOf("invoking"),
+        storedDraftId: null,
+      }),
+    ).toEqual({ kind: "active", draftId: "invoking" });
+  });
+
+  it("reuses the project's mapped draft from a server thread", () => {
+    expect(
+      resolvePreparedWorktreeDraft({
+        isServerThread: true,
+        project,
+        activeDraft: draftOf("promoted"),
+        storedDraftId: "mapped",
+      }),
+    ).toEqual({ kind: "stored", draftId: "mapped" });
+  });
+
+  it("ignores an active draft from another project", () => {
+    expect(
+      resolvePreparedWorktreeDraft({
+        isServerThread: false,
+        project,
+        activeDraft: draftOf("other", "other-project"),
+        storedDraftId: null,
+      }),
+    ).toEqual({ kind: "new" });
   });
 });

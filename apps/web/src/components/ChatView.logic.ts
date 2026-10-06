@@ -456,6 +456,33 @@ export function resolveDraftPromotionNavigationTarget(input: {
   return runStarted || startupStopped || messagePersisted ? input.serverThreadRef : null;
 }
 
+/**
+ * Picks the draft a prepared worktree (PR checkout, issue start) attaches to. The invoking draft
+ * wins over the project's mapped draft, so the setup script, which runs for the invoking thread,
+ * and the navigated draft always agree. Matching is by project, not the stored logical key, which
+ * goes stale when project grouping settings change.
+ */
+export function resolvePreparedWorktreeDraft<TDraftId extends string>(input: {
+  isServerThread: boolean;
+  project: { environmentId: string; projectId: string };
+  activeDraft: { draftId: TDraftId; environmentId: string; projectId: string } | null;
+  storedDraftId: TDraftId | null;
+}):
+  | { kind: "active"; draftId: TDraftId }
+  | { kind: "stored"; draftId: TDraftId }
+  | { kind: "new" } {
+  const activeDraft = input.activeDraft;
+  if (
+    !input.isServerThread &&
+    activeDraft?.environmentId === input.project.environmentId &&
+    activeDraft.projectId === input.project.projectId
+  ) {
+    return { kind: "active", draftId: activeDraft.draftId };
+  }
+  if (input.storedDraftId !== null) return { kind: "stored", draftId: input.storedDraftId };
+  return { kind: "new" };
+}
+
 export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
   const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
   return () => globalThis.clearTimeout(timeoutId);
