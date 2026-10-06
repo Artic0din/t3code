@@ -2981,6 +2981,33 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("gives same-named repositories distinct generated worktree paths", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const createIn = Effect.fn(function* () {
+          const cwd = pathService.join(yield* makeTmpDir(), "web");
+          yield* fileSystem.makeDirectory(cwd);
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          return yield* driver.createWorktree({
+            cwd,
+            path: null,
+            refName: initialBranch,
+            newRefName: "feature/same",
+          });
+        });
+
+        const first = yield* createIn();
+        const second = yield* createIn();
+
+        assert.notEqual(first.worktree.path, second.worktree.path);
+        assert.equal(yield* fileSystem.exists(first.worktree.path), true);
+        assert.equal(yield* fileSystem.exists(second.worktree.path), true);
+      }),
+    );
+
     it.effect("resolves the submodule mode from the option, then t3.json", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
