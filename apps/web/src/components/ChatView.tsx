@@ -2792,14 +2792,9 @@ export default function ChatView(props: ChatViewProps) {
       });
 
       if (target.kind === "active" && activeDraftSession) {
+        // Context only: remapping the project would rebuild this session, dropping an in-flight
+        // promotion, and garbage-collect the mapped draft along with its checkout context.
         setDraftThreadContext(target.draftId, input);
-        setLogicalProjectDraftThreadId(logicalProjectKey, activeProjectRef, target.draftId, {
-          threadId: activeDraftSession.threadId,
-          createdAt: activeDraftSession.createdAt,
-          runtimeMode: activeDraftSession.runtimeMode,
-          interactionMode: activeDraftSession.interactionMode,
-          ...input,
-        });
         return { threadId: activeDraftSession.threadId, draftId: target.draftId };
       }
 
