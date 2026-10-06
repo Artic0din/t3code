@@ -2,6 +2,7 @@ import { assert, describe, it, vi } from "@effect/vitest";
 import { NodeFileSystem, NodePath } from "@effect/platform-node";
 import { GitCommandError, ProjectId } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -94,6 +95,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
         Path.layer,
         ServerSettings.layerTest(),
+        NodeCrypto.layer,
       ),
     ),
   );
@@ -233,6 +235,7 @@ const runSetupForSubfolderProject = (
           gitWithPrefix(prefix),
           NodeFileSystem.layer,
           NodePath.layer,
+          NodeCrypto.layer,
           ServerSettings.layerTest(),
         ),
       ),

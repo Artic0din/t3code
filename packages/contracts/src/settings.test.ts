@@ -987,6 +987,13 @@ describe("ServerSettingsPatch.providerInstances", () => {
 });
 
 describe("ServerSettingsPatch string normalization", () => {
+  it("lowercases GitHub hosts and defaults them to enabled", () => {
+    const patch = decodeServerSettingsPatch({
+      github: { hosts: { " GitHub.com ": { account: "  work  " } } },
+    });
+    expect(patch.github?.hosts).toEqual({ "github.com": { account: "work", enabled: true } });
+  });
+
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
       addProjectBaseDirectory: "  ~/Development  ",
@@ -1085,10 +1092,10 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
 });
 
 describe("branch naming settings", () => {
-  it("defaults existing settings to the t3code static prefix", () => {
+  it("defaults existing settings to the t3 static prefix", () => {
     expect(decodeServerSettings({})).toMatchObject({
       branchNamingMode: "static",
-      branchNamePrefix: "t3code",
+      branchNamePrefix: "t3",
       branchNameInstructions: "",
     });
   });
