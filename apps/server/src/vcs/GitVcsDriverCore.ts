@@ -3344,11 +3344,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   )(function* (input, options) {
     const targetBranch = input.newRefName ?? input.refName;
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
-    // The checkout's path hash keeps same-named repositories from sharing a folder.
+    // The checkout's path hash keeps same-named repositories from sharing a folder. The readable
+    // part is capped (by code point, at most 4 bytes each) so the folder stays under the 255-byte
+    // name limit.
+    const readableRepoName = Array.from(path.basename(input.cwd)).slice(0, 48).join("");
     const generatedRepoFolder = crypto
       .digest("SHA-256", new TextEncoder().encode(path.resolve(input.cwd)))
       .pipe(
-        Effect.map((digest) => `${path.basename(input.cwd)}-${Hex.encode(digest).slice(0, 8)}`),
+        Effect.map((digest) => `${readableRepoName}-${Hex.encode(digest).slice(0, 8)}`),
         Effect.mapError(
           (cause) =>
             new GitCommandError({
