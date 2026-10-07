@@ -202,6 +202,70 @@ it.effect.each([
     }),
 );
 
+it.effect.each([
+  { source: "settings", variable: "GH_TOKEN" },
+  { source: "settings", variable: "GITHUB_TOKEN" },
+  { source: "cli", variable: "GH_TOKEN" },
+  { source: "cli", variable: "GITHUB_TOKEN" },
+])("probes the GHE host from $source with $variable", ({ source, variable }) =>
+  Effect.gen(function* () {
+    const hosts: string[] = [];
+    const discovery = yield* GitHubSourceControlProvider.makeDiscovery.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.ServerSettingsService.layerTest({
+            github: { hosts: source === "settings" ? { "acme.ghe.com": { enabled: true } } : {} },
+          }),
+          Layer.succeed(HostProcessEnvironment, { [variable]: "test-token" }),
+          Layer.mock(VcsProcess.VcsProcess)({
+            run: (input) =>
+              Effect.succeed(
+                processResult(
+                  input.args.includes("status")
+                    ? JSON.stringify({
+                        hosts:
+                          source === "cli"
+                            ? {
+                                "acme.ghe.com": [
+                                  {
+                                    state: "success",
+                                    active: true,
+                                    host: "acme.ghe.com",
+                                    login: "stored-user",
+                                    tokenSource: "keyring",
+                                  },
+                                ],
+                              }
+                            : {},
+                      })
+                    : "gh version 2.90.0",
+                ),
+              ),
+          }),
+          Layer.mock(GitHubApi.GitHubApi)({
+            rest: (input) => {
+              hosts.push(input.host);
+              return input.host === "acme.ghe.com"
+                ? Effect.succeed(restResponse('{"login":"token-user"}'))
+                : Effect.fail(
+                    new GitHubApi.GitHubApiAuthenticationError({
+                      host: input.host,
+                      operation: "discovery",
+                    }),
+                  );
+            },
+          }),
+        ),
+      ),
+    );
+    const result = yield* discovery.probe("/repo");
+    assert.equal(result.auth.status, "authenticated");
+    assert.deepEqual(result.auth.host, Option.some("acme.ghe.com"));
+    assert.deepEqual(result.auth.account, Option.some("token-user"));
+    assert.deepEqual(hosts, ["github.com", "acme.ghe.com"]);
+  }),
+);
+
 it.effect("uses the enterprise quota for a bare issue number read", () =>
   Effect.gen(function* () {
     let requestedHost: string | undefined;

@@ -230,6 +230,8 @@ export const makeDiscovery = Effect.gen(function* () {
           [
             "github.com",
             ...Object.keys(settings.tokens),
+            ...Object.keys(settings.hosts),
+            ...(cli.auth.accounts ?? []).map((account) => account.host),
             environment.GH_HOST?.trim().toLowerCase(),
           ].filter((host): host is string => Boolean(host)),
         ),
