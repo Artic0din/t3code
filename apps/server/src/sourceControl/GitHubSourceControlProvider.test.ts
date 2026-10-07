@@ -5,6 +5,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { VcsProcessSpawnError } from "@t3tools/contracts";
+import * as ServerSettings from "../serverSettings.ts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubApi from "./GitHubApi.ts";
@@ -46,6 +49,222 @@ const restResponse = (body: string): GitHubApi.GitHubRestResponse => ({
   truncated: false,
   invalidUtf8: false,
 });
+
+it.effect.each([
+  { source: "saved", environment: {}, tokens: { "enterprise.test": "test-token" } },
+  {
+    source: "environment",
+    environment: { GH_HOST: "enterprise.test", GH_ENTERPRISE_TOKEN: "test-token" },
+    tokens: {},
+  },
+])("discovers $source enterprise credentials without gh", ({ environment, tokens }) =>
+  Effect.gen(function* () {
+    const hosts: string[] = [];
+    const discovery = yield* GitHubSourceControlProvider.makeDiscovery.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.ServerSettingsService.layerTest({ github: { tokens } }),
+          Layer.succeed(HostProcessEnvironment, environment),
+          Layer.mock(VcsProcess.VcsProcess)({
+            run: () =>
+              Effect.fail(
+                new VcsProcessSpawnError({
+                  operation: "probe",
+                  command: "gh",
+                  cwd: "/repo",
+                  cause: new Error("not installed"),
+                }),
+              ),
+          }),
+          Layer.mock(GitHubApi.GitHubApi)({
+            rest: (input) => {
+              hosts.push(input.host);
+              return Effect.succeed(restResponse('{"login":"enterprise-user"}'));
+            },
+          }),
+        ),
+      ),
+    );
+    const result = yield* discovery.probe("/repo");
+    assert.equal(result.status, "available");
+    assert.equal(result.auth.status, "authenticated");
+    assert.deepEqual(result.auth.host, Option.some("enterprise.test"));
+    assert.deepEqual(hosts, ["enterprise.test"]);
+    const disabled = yield* GitHubSourceControlProvider.makeDiscovery.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.ServerSettingsService.layerTest({
+            github: { tokens, hosts: { "enterprise.test": { enabled: false } } },
+          }),
+          Layer.succeed(HostProcessEnvironment, environment),
+          Layer.mock(VcsProcess.VcsProcess)({
+            run: () =>
+              Effect.fail(
+                new VcsProcessSpawnError({
+                  operation: "probe",
+                  command: "gh",
+                  cwd: "/repo",
+                  cause: new Error("not installed"),
+                }),
+              ),
+          }),
+          Layer.mock(GitHubApi.GitHubApi)({
+            rest: () => Effect.die("Disabled host must not be probed"),
+          }),
+        ),
+      ),
+    );
+    assert.equal((yield* disabled.probe("/repo")).status, "missing");
+  }),
+);
+
+it.effect.each([
+  {
+    tokenHost: "enterprise.test",
+    status: "authenticated",
+    enterpriseFirst: false,
+    accepted: false,
+  },
+  { tokenHost: "github.com", status: "unauthenticated", enterpriseFirst: false, accepted: false },
+  { tokenHost: "enterprise.test", status: "authenticated", enterpriseFirst: true, accepted: false },
+  { tokenHost: "github.com", status: "authenticated", enterpriseFirst: false, accepted: true },
+])(
+  "keeps CLI auth only when the rejected token on $tokenHost does not override it",
+  ({ tokenHost, status, enterpriseFirst, accepted }) =>
+    Effect.gen(function* () {
+      const discovery = yield* GitHubSourceControlProvider.makeDiscovery.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.ServerSettingsService.layerTest({
+              github: {
+                tokens: {
+                  [tokenHost]: "test-token",
+                  ...(accepted ? { "unreachable.test": "test-token" } : {}),
+                },
+              },
+            }),
+            Layer.succeed(HostProcessEnvironment, {}),
+            Layer.mock(VcsProcess.VcsProcess)({
+              run: (input) =>
+                Effect.succeed(
+                  processResult(
+                    input.args.includes("status")
+                      ? JSON.stringify({
+                          hosts: {
+                            ...(enterpriseFirst
+                              ? {
+                                  "enterprise.test": [
+                                    {
+                                      state: "success",
+                                      active: true,
+                                      host: "enterprise.test",
+                                      login: "enterprise-user",
+                                      tokenSource: "keyring",
+                                    },
+                                  ],
+                                }
+                              : {}),
+                            "github.com": [
+                              {
+                                state: "success",
+                                active: true,
+                                host: "github.com",
+                                login: "public-user",
+                                tokenSource: "keyring",
+                                gitProtocol: "ssh",
+                              },
+                            ],
+                          },
+                        })
+                      : "gh version 2.90.0",
+                  ),
+                ),
+            }),
+            Layer.mock(GitHubApi.GitHubApi)({
+              rest: (input) =>
+                input.host === "unreachable.test"
+                  ? Effect.die("Must stop after an authenticated host")
+                  : accepted
+                    ? Effect.succeed(restResponse('{"login":"public-user"}'))
+                    : Effect.fail(
+                        new GitHubApi.GitHubApiAuthenticationError({
+                          host: tokenHost,
+                          operation: "discovery",
+                        }),
+                      ),
+            }),
+          ),
+        ),
+      );
+      const result = yield* discovery.probe("/repo");
+      assert.equal(result.auth.status, status);
+      assert.deepEqual(result.auth.host, Option.some("github.com"));
+    }),
+);
+
+it.effect.each([
+  { source: "settings", variable: "GH_TOKEN" },
+  { source: "settings", variable: "GITHUB_TOKEN" },
+  { source: "cli", variable: "GH_TOKEN" },
+  { source: "cli", variable: "GITHUB_TOKEN" },
+])("probes the GHE host from $source with $variable", ({ source, variable }) =>
+  Effect.gen(function* () {
+    const hosts: string[] = [];
+    const discovery = yield* GitHubSourceControlProvider.makeDiscovery.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ServerSettings.ServerSettingsService.layerTest({
+            github: { hosts: source === "settings" ? { "acme.ghe.com": { enabled: true } } : {} },
+          }),
+          Layer.succeed(HostProcessEnvironment, { [variable]: "test-token" }),
+          Layer.mock(VcsProcess.VcsProcess)({
+            run: (input) =>
+              Effect.succeed(
+                processResult(
+                  input.args.includes("status")
+                    ? JSON.stringify({
+                        hosts:
+                          source === "cli"
+                            ? {
+                                "acme.ghe.com": [
+                                  {
+                                    state: "success",
+                                    active: true,
+                                    host: "acme.ghe.com",
+                                    login: "stored-user",
+                                    tokenSource: "keyring",
+                                  },
+                                ],
+                              }
+                            : {},
+                      })
+                    : "gh version 2.90.0",
+                ),
+              ),
+          }),
+          Layer.mock(GitHubApi.GitHubApi)({
+            rest: (input) => {
+              hosts.push(input.host);
+              return input.host === "acme.ghe.com"
+                ? Effect.succeed(restResponse('{"login":"token-user"}'))
+                : Effect.fail(
+                    new GitHubApi.GitHubApiAuthenticationError({
+                      host: input.host,
+                      operation: "discovery",
+                    }),
+                  );
+            },
+          }),
+        ),
+      ),
+    );
+    const result = yield* discovery.probe("/repo");
+    assert.equal(result.auth.status, "authenticated");
+    assert.deepEqual(result.auth.host, Option.some("acme.ghe.com"));
+    assert.deepEqual(result.auth.account, Option.some("token-user"));
+    assert.deepEqual(hosts, ["github.com", "acme.ghe.com"]);
+  }),
+);
 
 it.effect("uses the enterprise quota for a bare issue number read", () =>
   Effect.gen(function* () {

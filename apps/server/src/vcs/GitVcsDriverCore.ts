@@ -36,7 +36,7 @@ import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import { resolveProjectFileBackedSetting } from "@t3tools/shared/projectSettings";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
-import { resolveWorktreesDirectory } from "../worktreesDirectory.ts";
+import { isFilesystemRoot, resolveWorktreesDirectory } from "../worktreesDirectory.ts";
 import {
   parseRemoteNames,
   parseRemoteNamesInGitOrder,
@@ -3376,7 +3376,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         worktreesDir,
         path,
       );
-      if (parentDir === null) {
+      // Materialize new locations before resolving links, but never create a repo folder at a root.
+      const resolvedParent =
+        parentDir === null
+          ? null
+          : yield* fileSystem.makeDirectory(parentDir, { recursive: true }).pipe(
+              Effect.andThen(fileSystem.realPath(parentDir)),
+              Effect.mapError(
+                (cause) =>
+                  new GitCommandError({
+                    operation: "GitVcsDriver.createWorktree",
+                    command: "fs.realPath",
+                    cwd: input.cwd,
+                    detail: "Could not resolve the worktree location.",
+                    cause,
+                  }),
+              ),
+            );
+      if (parentDir === null || resolvedParent === null || isFilesystemRoot(resolvedParent, path)) {
         return yield* new GitCommandError({
           operation: "GitVcsDriver.createWorktree",
           command: "git worktree add",
