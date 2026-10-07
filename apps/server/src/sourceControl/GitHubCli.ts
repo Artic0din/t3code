@@ -1010,7 +1010,7 @@ export const make = Effect.gen(function* () {
   return GitHubCli.of({
     getIssue: Effect.fn("GitHubCli.getIssue")(function* (input) {
       const reference = input.reference.trim();
-      const match = /^https:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/([1-9]\d*)(?:[/?#].*)?$/.exec(
+      const match = /^https:\/\/([^/]+)\/([^/]+)\/([^/]+)\/issues\/([1-9]\d*)(?:[/?#].*)?$/i.exec(
         reference,
       );
       const number = match?.[4] ?? /^#?([1-9]\d*)$/.exec(reference)?.[1];

@@ -3073,6 +3073,34 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("rejects a worktree parent that resolves to a filesystem root", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const parent = yield* makeTmpDir("root-link-");
+        // Simulate the symlink target without ever allowing Git to write into a real root.
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            realPath: (input) =>
+              input === parent ? Effect.succeed(path.parse(parent).root) : fs.realPath(input),
+          }),
+          Effect.provide(layerServerConfig),
+        );
+        const result = yield* driver
+          .createWorktree(
+            { cwd, path: null, refName: initialBranch, newRefName: "feature/root-link" },
+            { worktreesDirectory: parent },
+          )
+          .pipe(Effect.result);
+        assert.equal(Result.isFailure(result), true);
+        if (Result.isFailure(result)) assert.match(result.failure.detail, /not a drive root/);
+        assert.deepEqual(yield* fs.readDirectory(parent), []);
+      }),
+    );
+
     it.effect("resolves the submodule mode from the option, then t3.json", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;

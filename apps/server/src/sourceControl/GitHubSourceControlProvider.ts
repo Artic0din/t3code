@@ -16,6 +16,7 @@ import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitHubApi from "./GitHubApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import {
   effectiveGitHubAccount,
   findAuthenticatedGitHubAccount,
@@ -183,9 +184,17 @@ const decodeViewer = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ login: Schema.String })),
 );
 
-/** The environment variable gh would take a github.com token from, if one is set. */
-function environmentTokenVariable(environment: NodeJS.ProcessEnv): string | null {
-  return ["GH_TOKEN", "GITHUB_TOKEN"].find((name) => environment[name]?.trim()) ?? null;
+/** The environment variable permitted to supply a token for this host. */
+function environmentTokenVariable(environment: NodeJS.ProcessEnv, host: string): string | null {
+  return (
+    ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].find(
+      (name) =>
+        GitHubCredentials.environmentToken(host, {
+          [name]: environment[name],
+          GH_HOST: environment.GH_HOST,
+        }) !== null,
+    ) ?? null
+  );
 }
 
 /**
@@ -216,49 +225,95 @@ export const makeDiscovery = Effect.gen(function* () {
         spec: { ...discovery, parseAuth: (input) => parseGitHubAuth(input, settings) },
       });
       // A token saved in Settings wins over the environment, which wins over gh.
-      const savedToken = (settings.tokens["github.com"] ?? "").trim() !== "";
-      const variable = environmentTokenVariable(environment);
-      const tokenSource = savedToken ? "the token saved in Settings" : variable;
-      // A host turned off in Settings stays off even with a token.
-      if (tokenSource === null || settings.hosts["github.com"]?.enabled === false) return cli;
-      const viewer = yield* api
-        .rest({ host: "github.com", operation: "discovery", path: "user" })
-        .pipe(Effect.result);
-      const login = Result.isSuccess(viewer)
-        ? Option.getOrUndefined(decodeViewer(viewer.success.body))?.login
-        : undefined;
-      // The per-host logins stay, so the account picker still lists every host gh knows.
-      const accounts = cli.auth.accounts === undefined ? {} : { accounts: cli.auth.accounts };
-      return {
-        ...cli,
-        status: "available" as const,
-        auth: {
-          ...(login !== undefined
-            ? providerAuth({
-                status: "authenticated",
-                account: login,
-                host: "github.com",
-                detail: savedToken
-                  ? "Using the token saved in Settings; it overrides GH_TOKEN and the gh login."
-                  : `Using ${variable} from the server environment; it overrides the account chosen in Settings.`,
-              })
-            : Result.isFailure(viewer) && viewer.failure._tag !== "GitHubApiAuthenticationError"
-              ? // Only a refusal says the token is bad; a network error or a pause says nothing.
-                providerAuth({
-                  status: "unknown",
-                  host: "github.com",
-                  detail: `Could not check ${savedToken ? tokenSource : `the token in ${tokenSource}`}: ${viewer.failure.message}`,
-                })
-              : providerAuth({
-                  status: "unauthenticated",
-                  host: "github.com",
-                  detail: savedToken
-                    ? "GitHub refused the token saved in Settings. Replace or remove it in Settings → Source Control."
-                    : `GitHub refused the token in ${tokenSource}. Replace it, or unset it to use \`gh auth login\`.`,
-                })),
-          ...accounts,
-        },
-      } satisfies SourceControlProviderDiscoveryItem;
+      const hosts = [
+        ...new Set(
+          [
+            "github.com",
+            ...Object.keys(settings.tokens),
+            environment.GH_HOST?.trim().toLowerCase(),
+          ].filter((host): host is string => Boolean(host)),
+        ),
+      ];
+      const probes: SourceControlProviderDiscoveryItem[] = [];
+      for (const host of hosts) {
+        const probe = yield* Effect.gen(function* () {
+          const savedToken = (settings.tokens[host] ?? "").trim() !== "";
+          const variable = environmentTokenVariable(environment, host);
+          const tokenSource = savedToken ? "the token saved in Settings" : variable;
+          // A host turned off in Settings stays off even with a token.
+          if (tokenSource === null || settings.hosts[host]?.enabled === false) return null;
+          const viewer = yield* api
+            .rest({ host, operation: "discovery", path: "user" })
+            .pipe(Effect.result);
+          const login = Result.isSuccess(viewer)
+            ? Option.getOrUndefined(decodeViewer(viewer.success.body))?.login
+            : undefined;
+          // The per-host logins stay, so the account picker still lists every host gh knows.
+          const accounts = cli.auth.accounts === undefined ? {} : { accounts: cli.auth.accounts };
+          return {
+            ...cli,
+            status: "available" as const,
+            auth: {
+              ...(login !== undefined
+                ? providerAuth({
+                    status: "authenticated",
+                    account: login,
+                    host,
+                    detail: savedToken
+                      ? "Using the token saved in Settings; it overrides environment tokens and the gh login."
+                      : `Using ${variable} from the server environment; it overrides the account chosen in Settings.`,
+                  })
+                : Result.isFailure(viewer) && viewer.failure._tag !== "GitHubApiAuthenticationError"
+                  ? // Only a refusal says the token is bad; a network error or a pause says nothing.
+                    providerAuth({
+                      status: "unknown",
+                      host,
+                      detail: `Could not check ${savedToken ? tokenSource : `the token in ${tokenSource}`}: ${viewer.failure.message}`,
+                    })
+                  : providerAuth({
+                      status: "unauthenticated",
+                      host,
+                      detail: savedToken
+                        ? "GitHub refused the token saved in Settings. Replace or remove it in Settings → Source Control."
+                        : `GitHub refused the token in ${tokenSource}. Replace it, or unset it to use \`gh auth login\`.`,
+                    })),
+              ...accounts,
+            },
+          } satisfies SourceControlProviderDiscoveryItem;
+        });
+        if (probe !== null) {
+          if (probe.auth.status === "authenticated") return probe;
+          probes.push(probe);
+        }
+      }
+      // A failed token overrides gh only on its own host, not another host's working login.
+      const cliOverridden = probes.some(
+        (probe) => Option.getOrNull(probe.auth.host) === Option.getOrNull(cli.auth.host),
+      );
+      if (cli.auth.status === "authenticated" && !cliOverridden) return cli;
+      const accounts = (cli.auth.accounts ?? []).map((account) => ({
+        ...account,
+        error: account.error ?? null,
+        environmentVariable: account.environmentVariable ?? null,
+      }));
+      const fallback = [...new Set(accounts.map((account) => account.host))]
+        .filter((host) => !probes.some((probe) => Option.getOrNull(probe.auth.host) === host))
+        .map((host) => effectiveGitHubAccount(host, accounts, settings))
+        .find((account) => account !== undefined);
+      if (fallback) {
+        return {
+          ...cli,
+          auth: {
+            ...providerAuth({
+              status: "authenticated",
+              host: fallback.host,
+              account: fallback.account,
+            }),
+            accounts: authAccounts(accounts),
+          },
+        };
+      }
+      return probes[0] ?? cli;
     }),
     refineUnknownRemote: () => Effect.succeed(null),
   } satisfies SourceControlManagedCliDiscoverySpec;

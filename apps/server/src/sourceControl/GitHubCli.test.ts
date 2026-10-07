@@ -38,6 +38,11 @@ const restResponse = (body: unknown, status = 200): GitHubApi.GitHubRestResponse
 });
 
 it.effect.each([
+  {
+    reference: "HTTPS://GitHub.com/other/project/issues/12",
+    host: "github.com",
+    endpoint: "repos/other/project/issues/12",
+  },
   { reference: "12", host: "enterprise.test", endpoint: "repos/acme/web/issues/12" },
   {
     reference: "https://github.com/other/project/issues/12",
