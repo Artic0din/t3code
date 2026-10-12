@@ -63,24 +63,21 @@ export function attentionViewFromMenuId(id: string): AttentionViewId | null {
   return attentionViewById(id.slice("attention:".length));
 }
 
-export function threadNeedsApproval(thread: AttentionThread): boolean {
+function threadNeedsApproval(thread: AttentionThread): boolean {
   return thread.hasPendingApprovals;
 }
 
-export function threadFailed(thread: AttentionThread): boolean {
+function threadFailed(thread: AttentionThread): boolean {
   return thread.runtime?.status === "failed" && thread.runtime.lastErrorClass !== "usage_limit";
 }
 
-export function threadWaitingForMe(thread: AttentionThread): boolean {
+function threadWaitingForMe(thread: AttentionThread): boolean {
   return (
     thread.hasPendingApprovals || thread.hasPendingUserInput || threadPlanReviewIsWaiting(thread)
   );
 }
 
-export function threadMatchesAttentionView(
-  thread: AttentionThread,
-  view: AttentionViewId,
-): boolean {
+function threadMatchesAttentionView(thread: AttentionThread, view: AttentionViewId): boolean {
   switch (view) {
     case "all":
       return true;

@@ -291,6 +291,13 @@ import {
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, ProviderInstanceEntry> = new Map();
 // Collapsed shelves share one empty list so a route change alone does not
 // give the sidebar list a new identity.
+const attentionViewStorageSchema = Schema.Literals([
+  "all",
+  "needs-approval",
+  "failed",
+  "waiting-for-me",
+]);
+
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
@@ -2345,7 +2352,7 @@ export default function Sidebar() {
   const [attentionView, setAttentionView] = useLocalStorage(
     "t3code.sidebarAttentionView",
     "all" as AttentionViewId,
-    Schema.Literals(["all", "needs-approval", "failed", "waiting-for-me"]),
+    attentionViewStorageSchema,
   );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const {
