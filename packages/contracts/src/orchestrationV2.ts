@@ -916,6 +916,7 @@ export const OrchestrationV2HistoricalMessage = Schema.Struct({
   providerThreadId: Schema.NullOr(ProviderThreadId),
   status: Schema.String,
   kind: Schema.String,
+  planId: Schema.optional(PlanId),
 });
 export type OrchestrationV2HistoricalMessage = typeof OrchestrationV2HistoricalMessage.Type;
 

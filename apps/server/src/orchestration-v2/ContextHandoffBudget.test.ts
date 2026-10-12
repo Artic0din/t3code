@@ -306,6 +306,73 @@ describe("handoff budget", () => {
     const text = selected.messages.map((entry) => entry.text).join("\n");
     assert.include(text, "running: LIVE_STEP keep this update");
     assert.notInclude(text, "STALE_STEP drop this update");
+    assert.include(selected.omittedItemIds, TurnItemId.make("item:todo-old"));
+    assert.equal(selected.omittedItems, 1);
+  });
+
+  it("keeps the newest distinct plan when older plans fill a tight budget", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY", 1),
+        todoTurn({
+          id: "item:todo-old-plan",
+          planId: "plan:old",
+          ordinal: 2,
+          steps: [{ status: "completed", text: `OLD_PLAN ${"x".repeat(2_500)}` }],
+        }),
+        todoTurn({
+          id: "item:todo-new-plan",
+          planId: "plan:new",
+          ordinal: 3,
+          steps: [{ status: "running", text: `NEW_PLAN ${"y".repeat(2_500)}` }],
+        }),
+        userTurn("item:latest", "LATEST", 4),
+      ]),
+      coverage: "History",
+      budget: 4_500,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "NEW_PLAN");
+    assert.notInclude(text, "OLD_PLAN");
+    assert.include(text, "LATEST");
+  });
+
+  it("coalesces durable plan updates that still carry planId", () => {
+    const first = selectHistory({
+      messages: historyFrom([
+        userTurn("item:user", "Continue", 1),
+        todoTurn({
+          id: "item:todo-old",
+          planId: "plan:migration",
+          ordinal: 2,
+          steps: [{ status: "pending", text: "STALE_STEP" }],
+        }),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const second = selectHistory({
+      messages: historyFrom([
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:migration",
+          ordinal: 3,
+          steps: [{ status: "running", text: "LIVE_STEP" }],
+        }),
+        assistantTurn("item:assistant", "DONE", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const selected = selectHistory({
+      messages: [...first.messages, ...second.messages],
+      coverage: "Combined",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "LIVE_STEP");
+    assert.notInclude(text, "STALE_STEP");
+    assert.ok(first.messages.some((entry) => entry.planId === PlanId.make("plan:migration")));
   });
 
   it("retains short conversations verbatim in role and order", () => {
