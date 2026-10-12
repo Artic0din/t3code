@@ -106,6 +106,7 @@ import { SettingsProjectOverviewRouteScreen } from "./features/settings/Settings
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
+import { SettingsExternalSessionsRouteScreen } from "./features/settings/SettingsExternalSessionsRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./features/settings/SettingsThreadsRouteScreen";
@@ -349,6 +350,13 @@ const SettingsContentStack = createNativeStackNavigator({
       linking: "client-storage",
       options: {
         title: "Client Storage",
+      },
+    }),
+    SettingsExternalSessions: createNativeStackScreen({
+      screen: SettingsExternalSessionsRouteScreen,
+      linking: "external-sessions",
+      options: {
+        title: "External sessions",
       },
     }),
     SettingsDiagnostics: createNativeStackScreen({
