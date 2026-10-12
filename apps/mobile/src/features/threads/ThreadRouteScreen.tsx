@@ -21,7 +21,8 @@ import {
   type ProjectScript,
 } from "@t3tools/contracts";
 import {
-  projectScriptCwd,
+  projectScriptActionTerminalId,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
@@ -744,20 +745,37 @@ function ThreadRouteContent(
         return;
       }
 
-      const targetTerminalId = resolveProjectScriptTerminalId({
-        existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-        hasRunningTerminal: terminalMenuSessions.some(
-          (session) => session.status === "running" || session.status === "starting",
-        ),
-      });
       const preferredWorktreePath = resolvePreferredThreadWorktreePath({
         threadShellWorktreePath: selectedThread.worktreePath ?? null,
         threadDetailWorktreePath: selectedThreadDetailWorktreePath,
       });
-      const cwd = projectScriptCwd({
-        project: { cwd: selectedThreadProject.workspaceRoot },
+      const cwd = projectScriptRunCwd({
+        project: {
+          cwd: selectedThreadProject.workspaceRoot,
+          repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix ?? null,
+        },
         worktreePath: preferredWorktreePath,
       });
+      if (cwd === null) {
+        terminalDebugLog("project-script:abort", {
+          scriptId: script.id,
+          reason: "repository-prefix-unresolved",
+        });
+        return;
+      }
+      const dedicatedTerminalId = projectScriptActionTerminalId({
+        scriptId: script.id,
+        cwd,
+        worktreePath: preferredWorktreePath,
+      });
+      const targetTerminalId =
+        dedicatedTerminalId ??
+        resolveProjectScriptTerminalId({
+          existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
+          hasRunningTerminal: terminalMenuSessions.some(
+            (session) => session.status === "running" || session.status === "starting",
+          ),
+        });
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
         worktreePath: preferredWorktreePath,

@@ -1,5 +1,7 @@
 import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
 
+import { normalizeProjectPathForComparison } from "./path.ts";
+
 type ProjectScriptSettings = Pick<
   ServerSettings,
   | "defaultProjectScripts"
@@ -53,6 +55,45 @@ export function projectScriptCwd(input: {
   worktreePath?: string | null;
 }): string {
   return input.worktreePath ?? input.project.cwd;
+}
+
+function sameProjectPath(left: string, right: string): boolean {
+  return normalizeProjectPathForComparison(left) === normalizeProjectPathForComparison(right);
+}
+
+function joinRepositoryPrefix(root: string, prefix: string): string | null {
+  const segments = prefix.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  if (segments.some((segment) => segment === "." || segment === "..")) return null;
+  if (segments.length === 0) return root;
+  const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+  const base = root.replace(/[\\/]+$/g, "");
+  return `${base}${separator}${segments.join(separator)}`;
+}
+
+export function projectScriptRunCwd(input: {
+  project: {
+    cwd: string;
+    repositoryRelativePrefix?: string | null;
+  };
+  worktreePath?: string | null;
+}): string | null {
+  const worktreePath = input.worktreePath ?? null;
+  if (worktreePath === null || sameProjectPath(worktreePath, input.project.cwd)) {
+    return input.project.cwd;
+  }
+  const prefix = input.project.repositoryRelativePrefix;
+  if (prefix == null) return null;
+  return joinRepositoryPrefix(worktreePath, prefix);
+}
+
+export function projectScriptActionTerminalId(input: {
+  scriptId: string;
+  cwd: string;
+  worktreePath?: string | null;
+}): string | null {
+  const worktreePath = input.worktreePath ?? null;
+  if (worktreePath === null || sameProjectPath(worktreePath, input.cwd)) return null;
+  return `action-${input.scriptId}`;
 }
 
 export function projectScriptRuntimeEnv(

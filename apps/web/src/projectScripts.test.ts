@@ -2,7 +2,9 @@ import { MAX_SCRIPT_ID_LENGTH } from "@t3tools/contracts";
 import { shortcutLabelForCommand } from "./keybindings";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  projectScriptActionTerminalId,
   projectScriptCwd,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   setupProjectScript,
 } from "@t3tools/shared/projectScripts";
@@ -169,5 +171,71 @@ describe("projectScripts helpers", () => {
         worktreePath: null,
       }),
     ).toBe("/repo");
+  });
+
+  it("runs a subfolder action in the matching worktree directory", () => {
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app/",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo", repositoryRelativePrefix: "" },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app",
+        },
+        worktreePath: null,
+      }),
+    ).toBe("/repo/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: null,
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "dev",
+        cwd: "/worktree/packages/app",
+        worktreePath: "/worktree",
+      }),
+    ).toBe("action-dev");
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "lint",
+        cwd: "/worktree/packages/app",
+        worktreePath: "/worktree",
+      }),
+    ).toBe("action-lint");
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "dev",
+        cwd: "/worktree",
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
   });
 });

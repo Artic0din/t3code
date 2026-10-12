@@ -21,14 +21,22 @@ function retainRepositoryIdentity(
   previous: OrchestrationProjectShell | undefined,
   next: OrchestrationProjectShell,
 ): OrchestrationProjectShell {
+  let project = next;
   if (
     next.repositoryIdentity == null &&
     previous?.repositoryIdentity != null &&
     previous.workspaceRoot === next.workspaceRoot
   ) {
-    return { ...next, repositoryIdentity: previous.repositoryIdentity };
+    project = { ...project, repositoryIdentity: previous.repositoryIdentity };
   }
-  return next;
+  if (
+    next.repositoryRelativePrefix === undefined &&
+    previous?.repositoryRelativePrefix !== undefined &&
+    previous.workspaceRoot === next.workspaceRoot
+  ) {
+    project = { ...project, repositoryRelativePrefix: previous.repositoryRelativePrefix };
+  }
+  return project;
 }
 
 export interface MergeShellSnapshotOptions {
@@ -73,7 +81,13 @@ export function mergeShellSnapshotProjects(
           return project;
         }
         if (resolvedRootSet?.has(project.workspaceRoot) === true) {
-          return { ...project, repositoryIdentity: candidate.repositoryIdentity };
+          return {
+            ...project,
+            repositoryIdentity: candidate.repositoryIdentity,
+            ...(candidate.repositoryRelativePrefix !== undefined
+              ? { repositoryRelativePrefix: candidate.repositoryRelativePrefix }
+              : {}),
+          };
         }
         if (project.repositoryIdentity == null && candidate.repositoryIdentity != null) {
           return { ...project, repositoryIdentity: candidate.repositoryIdentity };

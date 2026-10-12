@@ -124,7 +124,9 @@ import {
   resolveSelectableModel,
 } from "@t3tools/shared/model";
 import {
+  projectScriptActionTerminalId,
   projectScriptCwd,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
@@ -843,6 +845,15 @@ interface TerminalLaunchContext {
 
 type PersistentTerminalLaunchContext = Pick<TerminalLaunchContext, "cwd" | "worktreePath">;
 
+type ScriptTerminalLaunch = {
+  readonly cwd: string;
+  readonly worktreePath: string | null;
+};
+
+function scriptTerminalLaunchKey(threadId: string, terminalId: string): string {
+  return `${threadId}\u0000${terminalId}`;
+}
+
 function useLocalDispatchState(input: {
   activeThread: Thread | undefined;
   activeLatestRun: Thread["latestRun"] | null;
@@ -957,6 +968,7 @@ interface PersistentThreadTerminalDrawerProps {
   threadId: ThreadId;
   active: boolean;
   launchContext: PersistentTerminalLaunchContext | null;
+  scriptTerminalLaunches: Map<string, ScriptTerminalLaunch>;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
   splitVerticalShortcutLabel: string | undefined;
@@ -971,6 +983,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   threadId,
   active,
   launchContext,
+  scriptTerminalLaunches,
   focusRequestId,
   splitShortcutLabel,
   splitVerticalShortcutLabel,
@@ -1038,15 +1051,21 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       return next;
     }
 
-    for (const session of drawerTerminalSessions) {
-      const summary = session.state.summary;
-      if (!summary) {
-        continue;
-      }
-      const worktreePathForLaunch =
-        launchContext !== null ? launchContext.worktreePath : summary.worktreePath;
-      next.set(session.target.terminalId, {
-        cwd: launchContext?.cwd ?? summary.cwd,
+    const terminalIds = new Set<string>([
+      ...drawerTerminalSessions.map((session) => session.target.terminalId),
+      ...terminalUiState.terminalIds,
+    ]);
+    for (const terminalId of terminalIds) {
+      const summary =
+        drawerTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
+          .summary ?? null;
+      const recorded = scriptTerminalLaunches.get(scriptTerminalLaunchKey(threadId, terminalId));
+      if (!summary && !recorded) continue;
+      const worktreePathForLaunch = summary?.worktreePath ?? recorded?.worktreePath ?? null;
+      const cwd = summary?.cwd ?? recorded?.cwd;
+      if (!cwd) continue;
+      next.set(terminalId, {
+        cwd,
         worktreePath: worktreePathForLaunch,
         runtimeEnv: projectScriptRuntimeEnv({
           project: { cwd: project.workspaceRoot },
@@ -1056,7 +1075,13 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     }
 
     return next;
-  }, [drawerTerminalSessions, launchContext, project]);
+  }, [
+    drawerTerminalSessions,
+    project,
+    scriptTerminalLaunches,
+    terminalUiState.terminalIds,
+    threadId,
+  ]);
   const serverOrderedTerminalIds = useMemo(
     () => drawerTerminalSessions.map((session) => session.target.terminalId),
     [drawerTerminalSessions],
@@ -1332,6 +1357,7 @@ interface PersistentThreadTerminalPanelProps {
   threadRef: ScopedThreadRef;
   surface: Extract<RightPanelSurface, { kind: "terminal" }>;
   launchContext: PersistentTerminalLaunchContext | null;
+  scriptTerminalLaunches: Map<string, ScriptTerminalLaunch>;
   focusRequestId: number;
   keybindings: ResolvedKeybindingsConfig;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
@@ -1351,6 +1377,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
   threadRef,
   surface,
   launchContext,
+  scriptTerminalLaunches,
   focusRequestId,
   keybindings,
   onAddTerminalContext,
@@ -1380,19 +1407,26 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
   const activeSummary =
     knownTerminalSessions.find((session) => session.target.terminalId === surface.activeTerminalId)
       ?.state.summary ?? null;
+  const activeRecordedLaunch = scriptTerminalLaunches.get(
+    scriptTerminalLaunchKey(threadRef.threadId, surface.activeTerminalId),
+  );
   const worktreePath =
-    launchContext?.worktreePath ?? activeSummary?.worktreePath ?? threadWorktreePath;
+    activeSummary?.worktreePath ??
+    activeRecordedLaunch?.worktreePath ??
+    launchContext?.worktreePath ??
+    threadWorktreePath;
   const cwd = useMemo(
     () =>
-      launchContext?.cwd ??
       activeSummary?.cwd ??
+      activeRecordedLaunch?.cwd ??
+      launchContext?.cwd ??
       (project
         ? projectScriptCwd({
             project: { cwd: project.workspaceRoot },
             worktreePath,
           })
         : null),
-    [activeSummary?.cwd, launchContext?.cwd, project, worktreePath],
+    [activeRecordedLaunch?.cwd, activeSummary?.cwd, launchContext?.cwd, project, worktreePath],
   );
   const runtimeEnv = useMemo(
     () =>
@@ -1427,11 +1461,18 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
       const summary =
         knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
           .summary ?? null;
+      const recorded = scriptTerminalLaunches.get(
+        scriptTerminalLaunchKey(threadRef.threadId, terminalId),
+      );
       const terminalWorktreePath =
-        launchContext?.worktreePath ?? summary?.worktreePath ?? threadWorktreePath;
+        summary?.worktreePath ??
+        recorded?.worktreePath ??
+        launchContext?.worktreePath ??
+        threadWorktreePath;
       const terminalCwd =
-        launchContext?.cwd ??
         summary?.cwd ??
+        recorded?.cwd ??
+        launchContext?.cwd ??
         (project
           ? projectScriptCwd({
               project: { cwd: project.workspaceRoot },
@@ -1454,7 +1495,9 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     launchContext?.cwd,
     launchContext?.worktreePath,
     project,
+    scriptTerminalLaunches,
     surface.terminalIds,
+    threadRef.threadId,
     threadWorktreePath,
   ]);
 
@@ -1901,6 +1944,8 @@ export default function ChatView(props: ChatViewProps) {
     useState<PullRequestDialogState | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
     useState<TerminalLaunchContext | null>(null);
+  const scriptTerminalLaunchesRef = useRef(new Map<string, ScriptTerminalLaunch>());
+  const scriptTerminalLaunches = scriptTerminalLaunchesRef.current;
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
     Record<string, string[]>
   >({});
@@ -4904,19 +4949,34 @@ export default function ChatView(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
-      const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
+      const mappedCwd = projectScriptRunCwd({
+        project: {
+          cwd: activeProject.workspaceRoot,
+          repositoryRelativePrefix: activeProject.repositoryRelativePrefix ?? null,
+        },
+        worktreePath: targetWorktreePath,
+      });
+      const targetCwd = options?.cwd ?? mappedCwd;
+      if (!targetCwd) return;
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
       const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
       const shouldCreateNewTerminal = wantsNewTerminal;
-      const targetWorktreePath = options?.worktreePath ?? activeThread.worktreePath ?? null;
-
-      setTerminalUiLaunchContext({
-        threadId: activeThreadId,
+      const dedicatedTerminalId = projectScriptActionTerminalId({
+        scriptId: script.id,
         cwd: targetCwd,
         worktreePath: targetWorktreePath,
       });
+
+      if (dedicatedTerminalId === null) {
+        setTerminalUiLaunchContext({
+          threadId: activeThreadId,
+          cwd: targetCwd,
+          worktreePath: targetWorktreePath,
+        });
+      }
       setTerminalOpen(true);
       if (!activeThreadRef) {
         return;
@@ -4930,28 +4990,36 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: targetWorktreePath,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
-      const targetTerminalId = shouldCreateNewTerminal
-        ? nextTerminalId(allocatableActiveTerminalIds)
-        : baseTerminalId;
-      const openTerminalInput: TerminalOpenInput = shouldCreateNewTerminal
-        ? {
-            threadId: activeThreadId,
-            terminalId: targetTerminalId,
-            cwd: targetCwd,
-            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
-            env: runtimeEnv,
-            cols: SCRIPT_TERMINAL_COLS,
-            rows: SCRIPT_TERMINAL_ROWS,
-          }
-        : {
-            threadId: activeThreadId,
-            terminalId: targetTerminalId,
-            cwd: targetCwd,
-            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
-            env: runtimeEnv,
-          };
+      const targetTerminalId =
+        dedicatedTerminalId ??
+        (shouldCreateNewTerminal ? nextTerminalId(allocatableActiveTerminalIds) : baseTerminalId);
+      scriptTerminalLaunchesRef.current.set(
+        scriptTerminalLaunchKey(activeThreadId, targetTerminalId),
+        {
+          cwd: targetCwd,
+          worktreePath: targetWorktreePath,
+        },
+      );
+      const openTerminalInput: TerminalOpenInput =
+        dedicatedTerminalId !== null || shouldCreateNewTerminal
+          ? {
+              threadId: activeThreadId,
+              terminalId: targetTerminalId,
+              cwd: targetCwd,
+              ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
+              env: runtimeEnv,
+              cols: SCRIPT_TERMINAL_COLS,
+              rows: SCRIPT_TERMINAL_ROWS,
+            }
+          : {
+              threadId: activeThreadId,
+              terminalId: targetTerminalId,
+              cwd: targetCwd,
+              ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
+              env: runtimeEnv,
+            };
 
-      if (shouldCreateNewTerminal) {
+      if (dedicatedTerminalId !== null || shouldCreateNewTerminal) {
         storeNewTerminal(activeThreadRef, targetTerminalId);
       } else {
         storeSetActiveTerminal(activeThreadRef, targetTerminalId);
@@ -5010,7 +5078,6 @@ export default function ChatView(props: ChatViewProps) {
       activeThread,
       activeThreadId,
       activeThreadRef,
-      gitCwd,
       setTerminalOpen,
       setThreadError,
       storeNewTerminal,
@@ -10727,6 +10794,7 @@ export default function ChatView(props: ChatViewProps) {
         threadRef={activeThreadRef}
         surface={renderedRightPanelSurface}
         launchContext={activeTerminalLaunchContext ?? null}
+        scriptTerminalLaunches={scriptTerminalLaunches}
         focusRequestId={terminalFocusRequestId}
         keybindings={keybindings}
         onAddTerminalContext={addTerminalContextToDraft}
@@ -11659,6 +11727,7 @@ export default function ChatView(props: ChatViewProps) {
             launchContext={
               mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
             }
+            scriptTerminalLaunches={scriptTerminalLaunches}
             focusRequestId={mountedThreadKey === activeThreadKey ? terminalFocusRequestId : 0}
             splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
             splitVerticalShortcutLabel={splitTerminalVerticalShortcutLabel ?? undefined}

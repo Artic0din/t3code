@@ -725,6 +725,10 @@ const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
               project: {
                 ...project,
                 repositoryIdentity: enrichment.repositoryIdentity,
+                ...(enrichment.repositoryRelativePrefixResolved &&
+                enrichment.repositoryRelativePrefix !== null
+                  ? { repositoryRelativePrefix: enrichment.repositoryRelativePrefix }
+                  : {}),
               },
               repositoryIdentityResolved: enrichment.repositoryIdentityResolved,
             })),
@@ -1054,15 +1058,28 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           const identities = new Map(
             Array.from(changes, (change) => [
               change.workspaceRoot,
-              change.enrichment.repositoryIdentity,
+              {
+                repositoryIdentity: change.enrichment.repositoryIdentity,
+                repositoryRelativePrefix: change.enrichment.repositoryRelativePrefixResolved
+                  ? change.enrichment.repositoryRelativePrefix
+                  : undefined,
+              },
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const changedProjects = (yield* projects.listShells()).flatMap((project) =>
-            identities.has(project.workspaceRoot)
-              ? [{ ...project, repositoryIdentity: identities.get(project.workspaceRoot) ?? null }]
-              : [],
-          );
+          const changedProjects = (yield* projects.listShells()).flatMap((project) => {
+            const enrichment = identities.get(project.workspaceRoot);
+            if (enrichment === undefined) return [];
+            return [
+              {
+                ...project,
+                repositoryIdentity: enrichment.repositoryIdentity,
+                ...(typeof enrichment.repositoryRelativePrefix === "string"
+                  ? { repositoryRelativePrefix: enrichment.repositoryRelativePrefix }
+                  : {}),
+              },
+            ];
+          });
           return shellStreamItemFromEnrichmentRefresh({
             snapshot: {
               schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,

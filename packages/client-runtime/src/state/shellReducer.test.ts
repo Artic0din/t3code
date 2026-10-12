@@ -247,6 +247,37 @@ describe("applyShellStreamEvent", () => {
     expect(next.projects[0]?.repositoryIdentity).toEqual(repositoryIdentity);
   });
 
+  it("keeps a resolved repository prefix across enrichment and a later shell without it", () => {
+    const previous = {
+      ...v2ShellSnapshot,
+      snapshotSequence: 5,
+      projects: [{ ...v2Project, repositoryIdentity: null }],
+    };
+    const enriched = mergeShellSnapshotProjects(
+      previous,
+      {
+        ...v2ShellSnapshot,
+        snapshotSequence: 4,
+        projects: [
+          {
+            ...v2Project,
+            repositoryIdentity: null,
+            repositoryRelativePrefix: "packages/app",
+          },
+        ],
+      },
+      { resolvedRepositoryIdentityRoots: [v2Project.workspaceRoot] },
+    );
+    expect(enriched.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+
+    const refreshed = mergeShellSnapshotProjects(enriched, {
+      ...v2ShellSnapshot,
+      snapshotSequence: 6,
+      projects: [{ ...v2Project, repositoryIdentity: null }],
+    });
+    expect(refreshed.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+  });
+
   it("treats higher-sequence compact enrichment as metadata-only", () => {
     const previous = {
       ...v2ShellSnapshot,
