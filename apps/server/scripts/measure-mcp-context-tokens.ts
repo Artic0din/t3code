@@ -490,7 +490,7 @@ if (!wantClaude && !wantCodex) {
   console.error(
     [
       "Live token measurement skipped: missing provider credentials.",
-      "Set ANTHROPIC_API_KEY for Claude, and/or ensure ~/.codex/auth.json has ChatGPT tokens for Codex.",
+      "Set ANTHROPIC_API_KEY for Claude, and/or ensure Codex credentials via ~/.codex/auth.json (ChatGPT tokens or API key) or OPENAI_API_KEY.",
       "Refusing to invent live token numbers.",
     ].join("\n"),
   );
@@ -523,7 +523,9 @@ try {
       rows.push(await measureCodex(true, codexVersion, mcp));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
-      console.error("Codex live measurement skipped: ~/.codex/auth.json tokens are missing.");
+      console.error(
+        "Codex live measurement skipped: no ChatGPT tokens, auth_mode=apikey, or OPENAI_API_KEY.",
+      );
     }
   });
 } catch (error) {
