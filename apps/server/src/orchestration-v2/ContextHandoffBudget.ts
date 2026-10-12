@@ -7,6 +7,7 @@ import type {
   OrchestrationV2HistoricalMessage,
   OrchestrationV2ProviderThread,
   OrchestrationV2TurnItem,
+  TurnItemId,
 } from "@t3tools/contracts";
 
 import * as Config from "effect/Config";
@@ -200,10 +201,10 @@ function planReplayKey(message: OrchestrationV2HistoricalMessage): string | null
 
 function latestPlanStates(messages: ReadonlyArray<OrchestrationV2HistoricalMessage>): {
   readonly messages: ReadonlyArray<OrchestrationV2HistoricalMessage>;
-  readonly supersededItemIds: ReadonlyArray<string>;
+  readonly supersededItemIds: ReadonlyArray<TurnItemId>;
 } {
   const latestIndex = new Map<string, number>();
-  const supersededItemIds: string[] = [];
+  const supersededItemIds: TurnItemId[] = [];
   messages.forEach((message, index) => {
     const key = planReplayKey(message);
     if (key === null) return;
