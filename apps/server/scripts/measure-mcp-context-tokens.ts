@@ -531,7 +531,7 @@ try {
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
       console.error(
-        "Codex live measurement skipped: no ChatGPT tokens, auth_mode=apikey, or OPENAI_API_KEY.",
+        "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
       );
     }
   });
