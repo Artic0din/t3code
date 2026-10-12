@@ -100,6 +100,8 @@ export type AgentSessionScanResult = typeof AgentSessionScanResult.Type;
 export const AgentSessionImportInput = Schema.Struct({
   projectId: ProjectId,
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  providerSessionId: Schema.optional(TrimmedNonEmptyString),
 });
 export type AgentSessionImportInput = typeof AgentSessionImportInput.Type;
 

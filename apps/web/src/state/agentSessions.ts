@@ -27,4 +27,8 @@ export const agentSessionImport = createEnvironmentRpcCommand(connectionAtomRunt
 export const refreshAgentSessionScan = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:agent-sessions:refresh",
   tag: WS_METHODS.agentSessionsScan,
+  concurrency: {
+    mode: "singleFlight",
+    key: (input) => String(input.environmentId),
+  },
 });

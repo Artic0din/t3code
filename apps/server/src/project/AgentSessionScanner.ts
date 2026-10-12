@@ -196,6 +196,10 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      sessionFilter?: {
+        readonly providerInstanceId: ProviderInstanceId;
+        readonly providerSessionId: string;
+      },
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -645,8 +649,14 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
-  const baseDir = path.resolve(serverConfig.baseDir);
-  const worktreesDir = path.resolve(serverConfig.worktreesDir);
+  // Resolve through realpath so macOS `/var` vs `/private/var` aliases match
+  // candidate realpaths used by the T3-managed worktree filter.
+  const baseDir = yield* fileSystem
+    .realPath(path.resolve(serverConfig.baseDir))
+    .pipe(Effect.orElseSucceed(() => path.resolve(serverConfig.baseDir)));
+  const worktreesDir = yield* fileSystem
+    .realPath(path.resolve(serverConfig.worktreesDir))
+    .pipe(Effect.orElseSucceed(() => path.resolve(serverConfig.worktreesDir)));
   // Windows filesystems are case-insensitive, so path prefix checks there
   // must case fold.
   const foldWorktreeCase = (yield* HostProcessPlatform) === "win32";
@@ -679,7 +689,16 @@ export const make = Effect.gen(function* () {
     isT3ManagedWorktree(candidatePath, worktreesDir, foldWorktreeCase);
 
   const listDirectory = (directory: string) =>
-    fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+    fileSystem.readDirectory(directory).pipe(
+      Effect.map((entries) => ({ entries, incomplete: false as const })),
+      Effect.catchTags({
+        PlatformError: (error) =>
+          Effect.succeed({
+            entries: [] as ReadonlyArray<string>,
+            incomplete: error.reason._tag !== "NotFound",
+          }),
+      }),
+    );
 
   const statOption = (target: string) =>
     fileSystem.stat(target).pipe(Effect.asSome, Effect.orElseSucceed(Option.none));
@@ -802,7 +821,7 @@ export const make = Effect.gen(function* () {
             };
             const absorb = (line: string) => {
               const meta = extractLineMeta(line.trim());
-              if (meta === null) return false;
+              if (meta === null) return;
               if (foundCwd === null && meta.cwd !== null) foundCwd = meta.cwd;
               if (sessionId === null && meta.sessionId !== null) sessionId = meta.sessionId;
               if (
@@ -811,7 +830,6 @@ export const make = Effect.gen(function* () {
               ) {
                 observedActivityAtMs = meta.observedActivityAtMs;
               }
-              return foundCwd !== null;
             };
             const finish = () =>
               foundCwd === null ? null : { cwd: foundCwd, sessionId, observedActivityAtMs };
@@ -846,7 +864,7 @@ export const make = Effect.gen(function* () {
 
               for (const line of lines) {
                 if (!reserveRecord()) return finish();
-                if (absorb(line)) return finish();
+                absorb(line);
               }
             }
 
@@ -978,14 +996,17 @@ export const make = Effect.gen(function* () {
       const projectsDir = path.join(homePath, "projects");
       let operationsRemaining = operationBudget;
       let truncated = false;
-      const readDirectory = (directory: string) => {
-        if (operationsRemaining <= 0) {
-          truncated = true;
-          return Effect.succeed<ReadonlyArray<string>>([]);
-        }
-        operationsRemaining -= 1;
-        return listDirectory(directory);
-      };
+      const readDirectory = (directory: string) =>
+        Effect.gen(function* () {
+          if (operationsRemaining <= 0) {
+            truncated = true;
+            return [] as ReadonlyArray<string>;
+          }
+          operationsRemaining -= 1;
+          const listed = yield* listDirectory(directory);
+          if (listed.incomplete) truncated = true;
+          return listed.entries;
+        });
       const projectDirectories = yield* readDirectory(projectsDir);
       const transcripts: Array<TranscriptCandidate> = [];
 
@@ -1032,14 +1053,17 @@ export const make = Effect.gen(function* () {
       const transcripts: Array<TranscriptCandidate> = [];
       let operationsRemaining = operationBudget;
       let truncated = false;
-      const readDirectory = (directory: string) => {
-        if (operationsRemaining <= 0) {
-          truncated = true;
-          return Effect.succeed<ReadonlyArray<string>>([]);
-        }
-        operationsRemaining -= 1;
-        return listDirectory(directory);
-      };
+      const readDirectory = (directory: string) =>
+        Effect.gen(function* () {
+          if (operationsRemaining <= 0) {
+            truncated = true;
+            return [] as ReadonlyArray<string>;
+          }
+          operationsRemaining -= 1;
+          const listed = yield* listDirectory(directory);
+          if (listed.incomplete) truncated = true;
+          return listed.entries;
+        });
       // Date-partitioned directories sort chronologically, so walking them in
       // reverse spends each home's share of the operation budget on recent sessions.
       for (const year of (yield* readDirectory(sessionsDir)).toSorted().toReversed()) {
@@ -1310,6 +1334,8 @@ export const make = Effect.gen(function* () {
       sessionId: string;
       observedActivityAtMs: number | null;
     }> = [];
+    const worktreePaths = new Map<string, string>();
+    const onboardingKeys = new Map<string, boolean>();
 
     for (const candidate of raw) {
       const expanded = expandHomePath(candidate.cwd.trim());
@@ -1333,11 +1359,13 @@ export const make = Effect.gen(function* () {
           key = "";
         } else {
           const gitIdentity = yield* readGitIdentity(resolved);
+          key = yield* directoryIdentity(resolved, stats.value);
           if (gitIdentity._tag === "Worktree") {
-            key = "";
+            worktreePaths.set(key, resolved);
+            onboardingKeys.set(key, false);
           } else {
-            key = yield* directoryIdentity(resolved, stats.value);
             gitIdentities.set(key, gitIdentity._tag === "Repository" ? gitIdentity.git : null);
+            onboardingKeys.set(key, true);
           }
         }
         directoryKeys.set(resolved, key);
@@ -1353,6 +1381,8 @@ export const make = Effect.gen(function* () {
           observedActivityAtMs: transcript.observedActivityAtMs,
         });
       }
+
+      if (onboardingKeys.get(key) === false) continue;
 
       const existing = merged.get(key);
       if (!existing) {
@@ -1426,6 +1456,17 @@ export const make = Effect.gen(function* () {
         repository: entry.git?.repository ?? null,
       });
     }
+    for (const [key, worktreePath] of worktreePaths) {
+      if (locations.has(key)) continue;
+      const importedProject =
+        importedProjectsByRoot.get(normalizeProjectPathForComparison(worktreePath)) ??
+        importedProjectsByRoot.get(key);
+      locations.set(key, {
+        projectPath: importedProject?.workspaceRoot ?? worktreePath,
+        ...(importedProject === undefined ? {} : { projectId: importedProject.id }),
+        repository: null,
+      });
+    }
 
     // Newest first, undated candidates last.
     candidates.sort((left, right) => {
@@ -1489,6 +1530,10 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    sessionFilter?: {
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly providerSessionId: string;
+    },
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1505,6 +1550,12 @@ export const make = Effect.gen(function* () {
       readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
     }> = [];
     for (const candidate of candidates) {
+      if (
+        sessionFilter !== undefined &&
+        candidate.providerInstanceId !== sessionFilter.providerInstanceId
+      ) {
+        continue;
+      }
       const expanded = expandHomePath(candidate.cwd.trim());
       if (!path.isAbsolute(expanded)) continue;
       const resolved = path.resolve(expanded);
@@ -1515,6 +1566,13 @@ export const make = Effect.gen(function* () {
           transcript.mtimeMs === null ||
           transcript.mtimeMs < cutoffMs ||
           transcript.mtimeMs > nowMs
+        ) {
+          continue;
+        }
+        if (
+          sessionFilter !== undefined &&
+          transcript.sessionId !== null &&
+          transcript.sessionId !== sessionFilter.providerSessionId
         ) {
           continue;
         }
@@ -1621,6 +1679,13 @@ export const make = Effect.gen(function* () {
           if (parsedThread === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
+          if (
+            sessionFilter !== undefined &&
+            (parsedThread.providerInstanceId !== sessionFilter.providerInstanceId ||
+              parsedThread.providerSessionId !== sessionFilter.providerSessionId)
+          ) {
+            return Option.none<AgentSessionRecentThread>();
+          }
 
           const source: AgentSessionImportSource = {
             ...identity,
@@ -1648,7 +1713,8 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    sessionFilter,
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, sessionFilter));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

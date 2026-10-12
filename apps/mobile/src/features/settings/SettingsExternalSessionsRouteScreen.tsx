@@ -1,23 +1,26 @@
+import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   presentExternalSessionActivity,
   type ExternalSessionActivityRefresh,
   type ExternalSessionActivityRow,
 } from "@t3tools/shared/externalSessionActivity";
+import { AsyncResult } from "effect/reactivity";
 import { useNavigation } from "@react-navigation/native";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
+import { useArchivedThreadSnapshots } from "../archive/useArchivedThreadSnapshots";
 import { useThreadShells } from "../../state/entities";
-import {
-  importAgentSession,
-  readExternalSessionActivityEnabled,
-  refreshAgentSessionScan,
-  writeExternalSessionActivityEnabled,
-} from "../../state/external-session-activity";
+import { importAgentSession, refreshAgentSessionScan } from "../../state/external-session-activity";
+import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  AndroidSettingsEnvironmentFilter,
+  SettingsEnvironmentFilterHeader,
+} from "./components/SettingsEnvironmentFilterHeader";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
@@ -45,10 +48,19 @@ export function SettingsExternalSessionsRouteScreen() {
   const { selectedTargets } = useSettingsEnvironmentFilter();
   const environmentId =
     selectedTargets.length === 1 ? (selectedTargets[0]?.environmentId ?? null) : null;
-  const [enabled, setEnabled] = useState(() => readExternalSessionActivityEnabled());
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const enabled = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value.externalSessionActivityEnabled === true
+    : false;
   const [refresh, setRefresh] = useState<ExternalSessionActivityRefresh>({ _tag: "never" });
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const refreshGeneration = useRef(0);
   const threads = useThreadShells();
+  const { snapshots: archivedSnapshots } = useArchivedThreadSnapshots(
+    environmentId === null ? [] : [environmentId],
+  );
   const refreshScan = useAtomCommand(refreshAgentSessionScan, { reportFailure: false });
   const importSession = useAtomCommand(importAgentSession, { reportFailure: false });
   const knownThreadIds = useMemo(() => {
@@ -57,8 +69,14 @@ export function SettingsExternalSessionsRouteScreen() {
     for (const thread of threads) {
       if (thread.environmentId === environmentId) ids.add(thread.id);
     }
+    for (const entry of archivedSnapshots) {
+      if (entry.environmentId !== environmentId) continue;
+      for (const thread of entry.snapshot.threads) {
+        ids.add(thread.id);
+      }
+    }
     return ids;
-  }, [environmentId, threads]);
+  }, [archivedSnapshots, environmentId, threads]);
   const view = presentExternalSessionActivity({ enabled, refresh, knownThreadIds });
   const previous =
     view.status === "shown"
@@ -66,6 +84,13 @@ export function SettingsExternalSessionsRouteScreen() {
       : view.status === "refreshFailed"
         ? view.previous
         : null;
+
+  useEffect(() => {
+    refreshGeneration.current += 1;
+    setRefresh({ _tag: "never" });
+    setActionMessage(null);
+    setRefreshPending(false);
+  }, [environmentId]);
 
   const onRefresh = () => {
     if (environmentId === null) {
@@ -76,8 +101,14 @@ export function SettingsExternalSessionsRouteScreen() {
       });
       return;
     }
+    if (refreshPending) return;
     const kept = previous;
-    void refreshScan({ environmentId, input: {} }).then((result) => {
+    const env = environmentId;
+    const generation = ++refreshGeneration.current;
+    setRefreshPending(true);
+    void refreshScan({ environmentId: env, input: {} }).then((result) => {
+      if (generation !== refreshGeneration.current) return;
+      setRefreshPending(false);
       if (result._tag === "Success") {
         setActionMessage(null);
         setRefresh({ _tag: "succeeded", result: result.value });
@@ -109,6 +140,8 @@ export function SettingsExternalSessionsRouteScreen() {
       input: {
         projectId: row.action.projectId,
         expectedWorkspaceRoot: row.action.expectedWorkspaceRoot,
+        providerInstanceId: row.action.providerInstanceId,
+        providerSessionId: row.action.providerSessionId,
       },
     }).then((result) => {
       if (result._tag === "Failure") {
@@ -130,56 +163,62 @@ export function SettingsExternalSessionsRouteScreen() {
     view.status === "shown" ? view.snapshot.scannedAt : (previous?.scannedAt ?? null);
 
   return (
-    <SettingsScreen title="External sessions">
-      <ScrollView className="flex-1" contentContainerClassName="gap-4 px-5 pt-4 pb-8">
-        <SettingsSection title="External sessions">
-          <SettingsSwitchRow
-            icon="clock"
-            label="Recent external sessions"
-            subtitle="Off until you turn this on. Refresh reads Claude and Codex sessions. Nothing is imported until you ask."
-            value={enabled}
-            onValueChange={(next) => {
-              setEnabled(next);
-              writeExternalSessionActivityEnabled(next);
-            }}
-          />
-          {enabled ? (
-            <SettingsRow icon="arrow.clockwise" label="Refresh" onPress={onRefresh} />
-          ) : null}
-        </SettingsSection>
-        {view.status === "idle" ? (
-          <Text className="px-1 text-base text-foreground-muted">
-            Refresh to read recent sessions. T3 does not scan in the background.
-          </Text>
-        ) : null}
-        {detail !== null ? (
-          <Text className="px-1 text-base text-foreground-muted">{detail}</Text>
-        ) : null}
-        {scannedAt !== null ? (
-          <Text className="px-1 text-base text-foreground-muted">Last scan {scannedAt}</Text>
-        ) : null}
-        {actionMessage !== null ? (
-          <Text className="px-1 text-base text-foreground-muted">{actionMessage}</Text>
-        ) : null}
-        {rows.length > 0 ? (
-          <SettingsSection title="Sessions">
-            {rows.map((row) => (
-              <View key={`${row.providerLabel}:${row.providerSessionId}`}>
-                <SettingsRow
-                  icon="doc.text"
-                  label={`${row.providerLabel} ${row.providerSessionId}`}
-                  value={
-                    row.action.kind === "explain"
-                      ? rowDetail(row)
-                      : `${row.action.kind === "open" ? "Open" : "Import"} · ${rowDetail(row)}`
-                  }
-                  onPress={row.action.kind === "explain" ? undefined : () => onAction(row)}
-                />
-              </View>
-            ))}
+    <>
+      <SettingsEnvironmentFilterHeader />
+      <SettingsScreen title="External sessions" trailing={<AndroidSettingsEnvironmentFilter />}>
+        <ScrollView className="flex-1" contentContainerClassName="gap-4 px-5 pt-4 pb-8">
+          <SettingsSection title="External sessions">
+            <SettingsSwitchRow
+              icon="clock"
+              label="Recent external sessions"
+              subtitle="Off until you turn this on. Refresh reads Claude and Codex sessions. Nothing is imported until you ask."
+              value={enabled}
+              onValueChange={(next) => {
+                savePreferences({ externalSessionActivityEnabled: next });
+              }}
+            />
+            {enabled ? (
+              <SettingsRow
+                icon="arrow.clockwise"
+                label="Refresh"
+                onPress={refreshPending ? undefined : onRefresh}
+              />
+            ) : null}
           </SettingsSection>
-        ) : null}
-      </ScrollView>
-    </SettingsScreen>
+          {view.status === "idle" ? (
+            <Text className="px-1 text-base text-foreground-muted">
+              Refresh to read recent sessions. T3 does not scan in the background.
+            </Text>
+          ) : null}
+          {detail !== null ? (
+            <Text className="px-1 text-base text-foreground-muted">{detail}</Text>
+          ) : null}
+          {scannedAt !== null ? (
+            <Text className="px-1 text-base text-foreground-muted">Last scan {scannedAt}</Text>
+          ) : null}
+          {actionMessage !== null ? (
+            <Text className="px-1 text-base text-foreground-muted">{actionMessage}</Text>
+          ) : null}
+          {rows.length > 0 ? (
+            <SettingsSection title="Sessions">
+              {rows.map((row) => (
+                <View key={`${row.providerInstanceId}:${row.providerSessionId}`}>
+                  <SettingsRow
+                    icon="doc.text"
+                    label={`${row.providerLabel} ${row.providerSessionId}`}
+                    value={
+                      row.action.kind === "explain"
+                        ? rowDetail(row)
+                        : `${row.action.kind === "open" ? "Open" : "Import"} · ${rowDetail(row)}`
+                    }
+                    onPress={row.action.kind === "explain" ? undefined : () => onAction(row)}
+                  />
+                </View>
+              ))}
+            </SettingsSection>
+          ) : null}
+        </ScrollView>
+      </SettingsScreen>
+    </>
   );
 }

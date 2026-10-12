@@ -3,12 +3,15 @@ import type {
   AgentSessionScanResult,
   AgentSessionSourceReport,
   ProjectId,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 
 export interface ExternalSessionImportAction {
   readonly kind: "import";
   readonly projectId: ProjectId;
   readonly expectedWorkspaceRoot: string;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerSessionId: string;
 }
 
 export interface ExternalSessionOpenAction {
@@ -28,6 +31,7 @@ export type ExternalSessionActivityAction =
 
 export interface ExternalSessionActivityRow {
   readonly providerLabel: "Claude" | "Codex";
+  readonly providerInstanceId: ProviderInstanceId;
   readonly providerSessionId: string;
   readonly projectPath: string | null;
   readonly repository: string | null;
@@ -101,6 +105,8 @@ function sessionAction(
       kind: "import",
       projectId: observation.projectId,
       expectedWorkspaceRoot: observation.projectPath,
+      providerInstanceId: observation.providerInstanceId,
+      providerSessionId: observation.providerSessionId,
     };
   }
   return { kind: "explain", reason: ADD_PROJECT_REASON };
@@ -153,6 +159,7 @@ function snapshotFromScan(
     detail: notes.length === 0 ? null : notes.join(" "),
     rows: result.sessions.map((observation) => ({
       providerLabel: providerLabel(observation.provider),
+      providerInstanceId: observation.providerInstanceId,
       providerSessionId: observation.providerSessionId,
       projectPath: observation.projectPath,
       repository: observation.repository,

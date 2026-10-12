@@ -8,8 +8,9 @@ import {
 } from "@t3tools/shared/externalSessionActivity";
 import { useNavigate } from "@tanstack/react-router";
 import { Atom } from "effect/reactivity";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { agentSessionImport, refreshAgentSessionScan } from "../../state/agentSessions";
 import {
   readExternalSessionActivityEnabled,
@@ -51,14 +52,27 @@ export function ExternalSessionActivitySection() {
   const [enabled, setEnabled] = useState(() => readExternalSessionActivityEnabled());
   const [refresh, setRefresh] = useState<ExternalSessionActivityRefresh>({ _tag: "never" });
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const refreshGeneration = useRef(0);
   const threads = useAtomValue(
     environmentId === null
       ? NO_THREADS
       : environmentThreadShells.environmentThreadsAtom(environmentId),
   );
+  const { snapshots: archivedSnapshots } = useArchivedThreadSnapshots(
+    environmentId === null ? [] : [environmentId],
+  );
   const refreshScan = useAtomCommand(refreshAgentSessionScan, { reportFailure: false });
   const importSession = useAtomCommand(agentSessionImport, { reportFailure: false });
-  const knownThreadIds = useMemo(() => new Set(threads.map((thread) => thread.id)), [threads]);
+  const knownThreadIds = useMemo(() => {
+    const ids = new Set(threads.map((thread) => thread.id));
+    for (const entry of archivedSnapshots) {
+      for (const thread of entry.snapshot.threads) {
+        ids.add(thread.id);
+      }
+    }
+    return ids;
+  }, [archivedSnapshots, threads]);
   const view = presentExternalSessionActivity({ enabled, refresh, knownThreadIds });
   const previous =
     view.status === "shown"
@@ -66,6 +80,13 @@ export function ExternalSessionActivitySection() {
       : view.status === "refreshFailed"
         ? view.previous
         : null;
+
+  useEffect(() => {
+    refreshGeneration.current += 1;
+    setRefresh({ _tag: "never" });
+    setActionMessage(null);
+    setRefreshPending(false);
+  }, [environmentId]);
 
   const onRefresh = () => {
     if (environmentId === null) {
@@ -76,8 +97,14 @@ export function ExternalSessionActivitySection() {
       });
       return;
     }
+    if (refreshPending) return;
     const kept = previous;
-    void refreshScan({ environmentId, input: {} }).then((result) => {
+    const env = environmentId;
+    const generation = ++refreshGeneration.current;
+    setRefreshPending(true);
+    void refreshScan({ environmentId: env, input: {} }).then((result) => {
+      if (generation !== refreshGeneration.current) return;
+      setRefreshPending(false);
       if (result._tag === "Success") {
         setActionMessage(null);
         setRefresh({ _tag: "succeeded", result: result.value });
@@ -109,6 +136,8 @@ export function ExternalSessionActivitySection() {
       input: {
         projectId: row.action.projectId,
         expectedWorkspaceRoot: row.action.expectedWorkspaceRoot,
+        providerInstanceId: row.action.providerInstanceId,
+        providerSessionId: row.action.providerSessionId,
       },
     }).then((result) => {
       if (result._tag === "Failure") {
@@ -135,7 +164,13 @@ export function ExternalSessionActivitySection() {
       title="External sessions"
       headerAction={
         enabled ? (
-          <Button type="button" size="sm" variant="outline" onClick={onRefresh}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={refreshPending}
+            onClick={onRefresh}
+          >
             Refresh
           </Button>
         ) : null
@@ -166,7 +201,7 @@ export function ExternalSessionActivitySection() {
       {actionMessage !== null ? <SettingsRow title="Import" description={actionMessage} /> : null}
       {rows.map((row) => (
         <SettingsRow
-          key={`${row.providerLabel}:${row.providerSessionId}`}
+          key={`${row.providerInstanceId}:${row.providerSessionId}`}
           title={`${row.providerLabel} ${row.providerSessionId}`}
           description={rowDescription(row)}
           control={

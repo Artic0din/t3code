@@ -21,4 +21,18 @@ describe("external session activity preference", () => {
     writeExternalSessionActivityEnabled(false, storage);
     expect(readExternalSessionActivityEnabled(storage)).toBe(false);
   });
+
+  it("treats blocked storage as off without throwing", () => {
+    const storage = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+
+    expect(readExternalSessionActivityEnabled(storage)).toBe(false);
+    expect(() => writeExternalSessionActivityEnabled(true, storage)).not.toThrow();
+  });
 });

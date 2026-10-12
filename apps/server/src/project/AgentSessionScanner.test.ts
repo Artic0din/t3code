@@ -949,6 +949,59 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("keeps sessions from manually created git worktrees", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const repo = yield* makeTempDir("t3code-workspace-repo-");
+        const worktree = yield* makeTempDir("t3code-workspace-worktree-");
+
+        yield* fileSystem.makeDirectory(path.join(repo, ".git"));
+        yield* fileSystem.writeFileString(
+          path.join(repo, ".git", "config"),
+          '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:pingdotgg/t3code.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+        );
+        yield* fileSystem.writeFileString(
+          path.join(worktree, ".git"),
+          `gitdir: ${path.join(repo, ".git", "worktrees", "wt")}\n`,
+        );
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-worktree", "a.jsonl"),
+          contents: `${JSON.stringify({ type: "user", cwd: worktree, sessionId: "worktree-session" })}\n`,
+          mtimeMs: Date.parse("2026-01-02T00:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-repo", "a.jsonl"),
+          contents: `${JSON.stringify({ type: "user", cwd: repo, sessionId: "repo-session" })}\n`,
+          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          importedWorkspaceRoots: [worktree],
+        });
+
+        expect(result.candidates.map((candidate) => candidate.path)).toEqual([repo]);
+        expect(result.sessions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              providerSessionId: "worktree-session",
+              projectPath: worktree,
+              projectId: ProjectId.make("project-1"),
+            }),
+            expect.objectContaining({
+              providerSessionId: "repo-session",
+              projectPath: repo,
+            }),
+          ]),
+        );
+      }),
+    );
+
     it.effect("excludes sandboxes under the configured worktrees dir without .t3 in the path", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -1439,6 +1492,46 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           },
         ]);
         expect(JSON.stringify(result.sessions)).not.toContain(secret);
+      }),
+    );
+
+    it.effect("keeps scanning for later activity after the first record names cwd", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-activity-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-activity-codex-");
+        const workspace = yield* makeTempDir("t3code-activity-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "session.jsonl"),
+          contents: [
+            JSON.stringify({
+              type: "user",
+              cwd: workspace,
+              sessionId: "activity-session",
+              timestamp: "2026-04-01T00:00:00.000Z",
+            }),
+            JSON.stringify({
+              type: "assistant",
+              timestamp: "2026-04-01T02:00:00.000Z",
+            }),
+            "",
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-01T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+
+        expect(result.sessions).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "activity-session",
+            projectPath: workspace,
+            repository: null,
+            lastObservedActivityAt: "2026-04-01T02:00:00.000Z",
+          },
+        ]);
       }),
     );
 

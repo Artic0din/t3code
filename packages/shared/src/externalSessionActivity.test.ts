@@ -85,6 +85,7 @@ describe("presentExternalSessionActivity", () => {
         rows: [
           {
             providerLabel: "Codex",
+            providerInstanceId: codex,
             providerSessionId: "session-1",
             projectPath: "/projects/repo",
             repository: "pingdotgg/t3code",
@@ -93,6 +94,8 @@ describe("presentExternalSessionActivity", () => {
               kind: "import",
               projectId: "project-1",
               expectedWorkspaceRoot: "/projects/repo",
+              providerInstanceId: codex,
+              providerSessionId: "session-1",
             },
           },
         ],
@@ -107,6 +110,7 @@ describe("presentExternalSessionActivity", () => {
         rows: [
           {
             providerLabel: "Codex",
+            providerInstanceId: codex,
             providerSessionId: "session-1",
             projectPath: "/projects/repo",
             repository: "pingdotgg/t3code",
