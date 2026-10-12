@@ -54,9 +54,12 @@ const ALL_RUNTIME_MODES = [
 const ALL_INTERACTION_MODES = ["default", "plan"] as const;
 
 export function createPromptPresetId(): string {
-  // Click handlers need a sync id. Effect Crypto is async.
-  // @effect-diagnostics-next-line cryptoRandomUUID:off
-  return globalThis.crypto.randomUUID();
+  // getRandomValues works on non-secure LAN HTTP; crypto.randomUUID() does not.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function promptPresetCapabilitiesFromProviders(
@@ -64,7 +67,10 @@ export function promptPresetCapabilitiesFromProviders(
     readonly instanceId: ProviderInstanceId;
     readonly enabled: boolean;
     readonly availability?: string | undefined;
-    readonly models: ReadonlyArray<{ readonly slug: string }>;
+    readonly models: ReadonlyArray<{
+      readonly slug: string;
+      readonly aliases?: ReadonlyArray<string> | undefined;
+    }>;
     readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode> | undefined;
     readonly showInteractionModeToggle?: boolean | undefined;
   }>,
@@ -74,7 +80,7 @@ export function promptPresetCapabilitiesFromProviders(
       if (!provider.enabled || provider.availability === "unavailable") return [];
       const capability: PromptPresetProviderCapability = {
         instanceId: provider.instanceId,
-        models: provider.models.map((model) => model.slug),
+        models: provider.models.flatMap((model) => [model.slug, ...(model.aliases ?? [])]),
         ...(provider.supportedRuntimeModes && provider.supportedRuntimeModes.length > 0
           ? { runtimeModes: provider.supportedRuntimeModes }
           : {}),

@@ -87,6 +87,7 @@ import { listContinuationForEnter, listIndentForTab } from "../../composer-list-
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
+  getStartedThreadModelChangeBlockReason,
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
@@ -1579,6 +1580,7 @@ export interface ChatComposerProps {
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
+  supportsProviderSwitchingViaHandoff?: boolean;
   providerStatuses: ServerProvider[];
   /** False until the environment's server config has arrived at least once. */
   providerCatalogKnown: boolean;
@@ -1728,6 +1730,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     runtimeMode,
     interactionMode: requestedInteractionMode,
     lockedProvider,
+    supportsProviderSwitchingViaHandoff = false,
     providerStatuses,
     providerCatalogKnown,
     activeProjectDefaultModelSelection,
@@ -1825,6 +1828,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     threadRef: composerDraftTarget,
     draft: composerDraft,
     providers: providerStatuses,
+    modelChangeGuard: ({
+      currentProviderInstanceId,
+      currentModel,
+      nextProviderInstanceId,
+      nextModel,
+    }) => {
+      if (!currentProviderInstanceId || !currentModel) return null;
+      const reason = getStartedThreadModelChangeBlockReason({
+        providers: providerStatuses,
+        hasStartedSession: activeThread?.runtime != null,
+        supportsProviderSwitchingViaHandoff,
+        currentModelSelection: createModelSelection(currentProviderInstanceId, currentModel),
+        currentProviderInstanceId: activeThread?.runtime?.providerInstanceId ?? null,
+        nextModelSelection: createModelSelection(nextProviderInstanceId, nextModel),
+      });
+      return reason ? `${reason.description} Start a new thread to use this preset's model.` : null;
+    },
   });
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;

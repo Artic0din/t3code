@@ -1,5 +1,5 @@
 import { createModelSelection } from "@t3tools/shared/model";
-import type { PromptPreset, ServerProvider } from "@t3tools/contracts";
+import type { PromptPreset, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
 
 import {
   applyPromptPreset,
@@ -36,6 +36,13 @@ export function composerDraftToPromptPresetDraft(
   };
 }
 
+export type PromptPresetModelChangeGuard = (input: {
+  readonly currentProviderInstanceId: ProviderInstanceId | null;
+  readonly currentModel: string | null;
+  readonly nextProviderInstanceId: ProviderInstanceId;
+  readonly nextModel: string;
+}) => string | null;
+
 export function applyPromptPresetToComposer(input: {
   readonly threadRef: ComposerThreadTarget;
   readonly draft: ComposerThreadDraftState;
@@ -43,6 +50,7 @@ export function applyPromptPresetToComposer(input: {
   readonly presetId: string;
   readonly disposition: PromptPresetApplyDisposition;
   readonly providers: readonly ServerProvider[];
+  readonly modelChangeGuard?: PromptPresetModelChangeGuard | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
   const current = composerDraftToPromptPresetDraft(input.draft);
   const result = applyPromptPreset({
@@ -53,6 +61,28 @@ export function applyPromptPresetToComposer(input: {
     capabilities: promptPresetCapabilitiesFromProviders(input.providers),
   });
   if (!result.ok) return result;
+
+  if (
+    input.modelChangeGuard &&
+    result.value.providerInstanceId &&
+    result.value.model &&
+    (result.value.providerInstanceId !== current.providerInstanceId ||
+      result.value.model !== current.model)
+  ) {
+    const message = input.modelChangeGuard({
+      currentProviderInstanceId: current.providerInstanceId,
+      currentModel: current.model,
+      nextProviderInstanceId: result.value.providerInstanceId,
+      nextModel: result.value.model,
+    });
+    if (message) {
+      return {
+        ok: false,
+        code: "provider",
+        message,
+      };
+    }
+  }
 
   const store = useComposerDraftStore.getState();
   if (result.value.text !== current.text) {

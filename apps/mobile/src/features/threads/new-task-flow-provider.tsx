@@ -67,6 +67,7 @@ import {
   useComposerDraft,
   useStickyComposerModelSelection,
 } from "../../state/use-composer-drafts";
+import { setActiveNewTaskDraftTarget } from "./active-new-task-draft-target";
 import {
   capturePendingTaskEditorWriteBaseline,
   flushPendingTaskEditorWrite,
@@ -1268,6 +1269,24 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (
+      selectedProjectDraftKey !== null &&
+      selectedEnvironmentId !== null &&
+      isNewTaskDraftKey(selectedProjectDraftKey)
+    ) {
+      setActiveNewTaskDraftTarget({
+        draftKey: selectedProjectDraftKey,
+        environmentId: selectedEnvironmentId,
+      });
+      return () => {
+        setActiveNewTaskDraftTarget(null);
+      };
+    }
+    setActiveNewTaskDraftTarget(null);
+    return undefined;
+  }, [selectedEnvironmentId, selectedProjectDraftKey]);
 
   const value = useMemo<NewTaskFlowContextValue>(
     () => ({

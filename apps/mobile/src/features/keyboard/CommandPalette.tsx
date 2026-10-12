@@ -48,12 +48,14 @@ import { applyPromptPresetToMobileDraft } from "./applyPromptPresetToDraft";
 import {
   buildPromptPreset,
   createPromptPresetId,
+  deletePromptPreset,
   savePromptPreset,
 } from "@t3tools/client-runtime/promptPresets";
 import { getComposerDraftSnapshot } from "../../state/use-composer-drafts";
 import { mobileDraftToPromptPresetDraft } from "./applyPromptPresetToDraft";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useActiveNewTaskDraftTarget } from "../threads/active-new-task-draft-target";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
   "commandPalette",
@@ -161,6 +163,7 @@ export function CommandPalette(props: {
   const threads = useThreadShells();
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
+  const activeNewTaskDraft = useActiveNewTaskDraftTarget();
   const serverConfigs = useServerConfigs();
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "server settings update",
@@ -362,12 +365,16 @@ export function CommandPalette(props: {
           run: () => selectThread(thread),
         };
       });
-    const presetConfig = activeThread ? serverConfigs.get(activeThread.environmentId) : undefined;
+    const presetEnvironmentId =
+      activeThread?.environmentId ?? activeNewTaskDraft?.environmentId ?? null;
+    const presetConfig =
+      presetEnvironmentId === null ? undefined : serverConfigs.get(presetEnvironmentId);
     const presetKey = activeThread
       ? scopedThreadKey(activeThread.environmentId, activeThread.id)
-      : null;
+      : (activeNewTaskDraft?.draftKey ?? null);
     const presets = presetConfig?.settings.promptPresets ?? [];
-    if (presetKey && presetConfig && activeThread) {
+    if (presetKey && presetConfig && presetEnvironmentId) {
+      const environmentId = presetEnvironmentId;
       actions.push({
         key: "savePromptPreset",
         kind: "action",
@@ -383,13 +390,15 @@ export function CommandPalette(props: {
             includeAgentSettings: true,
             draft: mobileDraftToPromptPresetDraft(draft),
           });
-          const saved = savePromptPreset(presets, next);
+          const currentPresets =
+            serverConfigs.get(environmentId)?.settings.promptPresets ?? presets;
+          const saved = savePromptPreset(currentPresets, next);
           if (!saved.ok) {
             Alert.alert("Prompt preset", saved.message);
             return;
           }
           void updateSettings({
-            environmentId: activeThread.environmentId,
+            environmentId,
             input: { patch: { promptPresets: [...saved.value] } },
           });
         },
@@ -440,6 +449,33 @@ export function CommandPalette(props: {
               if (!result.ok) Alert.alert("Prompt preset", result.message);
             },
           },
+          {
+            key: `prompt-preset-delete:${preset.id}`,
+            kind: "action",
+            title: `Delete ${preset.name}`,
+            searchTerms: [preset.name, "preset", "delete", "remove"],
+            run: () => {
+              Alert.alert("Delete prompt preset", `Remove "${preset.name}"?`, [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Delete",
+                  style: "destructive",
+                  onPress: () => {
+                    const currentPresets =
+                      serverConfigs.get(environmentId)?.settings.promptPresets ?? presets;
+                    void updateSettings({
+                      environmentId,
+                      input: {
+                        patch: {
+                          promptPresets: [...deletePromptPreset(currentPresets, preset.id)],
+                        },
+                      },
+                    });
+                  },
+                },
+              ]);
+            },
+          },
         );
       }
     }
@@ -448,6 +484,7 @@ export function CommandPalette(props: {
     activeThread,
     activeThreadRef,
     navigation,
+    activeNewTaskDraft,
     projects,
     runCommand,
     savedConnectionsById,

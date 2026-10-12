@@ -12,6 +12,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyPromptPreset,
   buildPromptPreset,
+  createPromptPresetId,
   deletePromptPreset,
   promptPresetCapabilitiesFromProviders,
   savePromptPreset,
@@ -289,6 +290,34 @@ describe("prompt preset records", () => {
         },
       ]).providers,
     ).toEqual([]);
+  });
+
+  it("accepts catalog aliases when validating preset models", () => {
+    const aliased = promptPresetCapabilitiesFromProviders([
+      {
+        instanceId: codex,
+        enabled: true,
+        models: [{ slug: "gpt-5", aliases: ["gpt-5-legacy"] }],
+      },
+    ]);
+    const result = applyPromptPreset({
+      draft: draft({ model: "gpt-5" }),
+      presets: [preset({ model: "gpt-5-legacy" })],
+      presetId: "plan",
+      disposition: "insert",
+      capabilities: aliased,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.model).toBe("gpt-5-legacy");
+  });
+});
+
+describe("createPromptPresetId", () => {
+  it("returns an RFC 4122 version-4 UUID from getRandomValues", () => {
+    expect(createPromptPresetId()).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 });
 
