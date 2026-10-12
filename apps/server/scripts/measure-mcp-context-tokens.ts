@@ -1,5 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - Host-side measurement script shells out to provider CLIs and prints JSON rows.
-// Run: PATH="/opt/homebrew/opt/node@24/bin:$PATH" node --experimental-strip-types apps/server/scripts/measure-mcp-context-tokens.ts
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
@@ -34,9 +33,14 @@ import * as McpSessionRegistry from "../src/mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../src/mcp/PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../src/preview/PreviewBrowser.ts";
 import { measureT3CodeMcpContextBaseline } from "../src/mcp/mcpContextBaseline.ts";
+import {
+  buildCodexAdditionalContext,
+  buildCodexDeveloperInstructions,
+} from "../src/provider/CodexDeveloperInstructions.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../src/provider/T3OrchestrationInstructions.ts";
 
 const TRIVIAL_PROMPT = "Reply with exactly: ok";
+const CODEX_MEASURE_MODEL = process.env.T3_MCP_MEASURE_CODEX_MODEL?.trim() || "gpt-5.4";
 
 type LiveTokenRow = {
   readonly provider: "claude" | "codex";
@@ -102,19 +106,28 @@ function runCommand(
   command: string,
   args: ReadonlyArray<string>,
   options: { readonly env?: NodeJS.ProcessEnv; readonly cwd?: string } = {},
-): { readonly stdout: string; readonly stderr: string; readonly status: number | null } {
-  const result = NodeChildProcess.spawnSync(command, [...args], {
-    encoding: "utf8",
-    env: options.env ?? process.env,
-    cwd: options.cwd ?? process.cwd(),
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+): Promise<{ readonly stdout: string; readonly stderr: string; readonly status: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = NodeChildProcess.spawn(command, [...args], {
+      env: options.env ?? process.env,
+      cwd: options.cwd ?? process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => {
+      resolve({ stdout, stderr, status });
+    });
   });
-  return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    status: result.status,
-  };
 }
 
 function parseClaudeInputTokens(stdout: string): { inputTokens: number; model: string } {
@@ -143,9 +156,11 @@ function parseClaudeInputTokens(stdout: string): { inputTokens: number; model: s
   return { inputTokens, model };
 }
 
-function parseCodexInputTokens(stdout: string): { inputTokens: number; model: string } {
+function parseCodexInputTokens(
+  stdout: string,
+  pinnedModel: string,
+): { inputTokens: number; model: string } {
   let inputTokens: number | undefined;
-  let model = "unknown";
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) continue;
@@ -154,13 +169,6 @@ function parseCodexInputTokens(stdout: string): { inputTokens: number; model: st
       event = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
       continue;
-    }
-    const type = typeof event.type === "string" ? event.type : "";
-    if (
-      (type === "thread.started" || type === "turn.started" || type === "item.completed") &&
-      typeof event.model === "string"
-    ) {
-      model = event.model;
     }
     const usage = event.usage as Record<string, unknown> | undefined;
     if (usage && typeof usage.input_tokens === "number") {
@@ -179,7 +187,19 @@ function parseCodexInputTokens(stdout: string): { inputTokens: number; model: st
   if (inputTokens === undefined) {
     throw new Error("Codex JSONL output did not include input_tokens");
   }
-  return { inputTokens, model };
+  return { inputTokens, model: pinnedModel };
+}
+
+function buildCodexMeasureDeveloperInstructions(model: string): string {
+  const collaboration = buildCodexDeveloperInstructions("default");
+  const additional = buildCodexAdditionalContext(
+    { model, reasoningEffort: "medium" },
+    { browser: true, device: false },
+  );
+  const additionalBlocks = Object.entries(additional).map(
+    ([key, entry]) => `<${key}>\n${entry.value}\n</${key}>`,
+  );
+  return [collaboration, ...additionalBlocks].join("\n\n");
 }
 
 async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>): Promise<A> {
@@ -235,7 +255,7 @@ async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>):
   );
 }
 
-function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
+async function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise<LiveTokenRow> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
   try {
     const args = [
@@ -268,7 +288,7 @@ function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow 
       args.push("--mcp-config", mcpConfigPath);
       args.push("--append-system-prompt", T3_CODE_ORCHESTRATION_INSTRUCTIONS);
     }
-    const result = runCommand("claude", args, {
+    const result = await runCommand("claude", args, {
       cwd: tempDir,
       env: {
         ...process.env,
@@ -296,7 +316,7 @@ function redactSecrets(text: string): string {
     .replace(/Authorization["']?\s*[:=]\s*["'][^"']+["']/giu, 'Authorization:"[redacted]"');
 }
 
-function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
+async function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise<LiveTokenRow> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-codex-"));
   try {
     const args = [
@@ -305,6 +325,8 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
       "--sandbox",
       "read-only",
       "--skip-git-repo-check",
+      "--model",
+      CODEX_MEASURE_MODEL,
       TRIVIAL_PROMPT,
     ];
     // Both sides use an isolated CODEX_HOME so the user's global MCP servers
@@ -322,7 +344,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
       }
       const authorization = mcp.authorizationHeader.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
       configLines.push(
-        `developer_instructions = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS)}`,
+        `developer_instructions = ${JSON.stringify(buildCodexMeasureDeveloperInstructions(CODEX_MEASURE_MODEL))}`,
         "",
         "[mcp_servers.t3-code]",
         `url = ${JSON.stringify(mcp.url)}`,
@@ -333,7 +355,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
       );
     }
     NodeFS.writeFileSync(NodePath.join(isolatedHome, "config.toml"), configLines.join("\n"));
-    const result = runCommand("codex", args, {
+    const result = await runCommand("codex", args, {
       cwd: tempDir,
       env: { ...process.env, CODEX_HOME: isolatedHome },
     });
@@ -341,7 +363,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
       throw new Error(redactSecrets(result.stderr || `codex exited ${result.status}`));
     }
     try {
-      const parsed = parseCodexInputTokens(result.stdout);
+      const parsed = parseCodexInputTokens(result.stdout, CODEX_MEASURE_MODEL);
       return {
         provider: "codex",
         withT3CodeMcp,
@@ -391,17 +413,17 @@ const rows: LiveTokenRow[] = [];
 try {
   await withEphemeralMcpServer(async (mcp) => {
     if (wantClaude) {
-      rows.push(measureClaude(false));
+      rows.push(await measureClaude(false));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(measureClaude(true, mcp));
+      rows.push(await measureClaude(true, mcp));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
       console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
     }
     if (wantCodex) {
-      rows.push(measureCodex(false));
+      rows.push(await measureCodex(false));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(measureCodex(true, mcp));
+      rows.push(await measureCodex(true, mcp));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
       console.error("Codex live measurement skipped: ~/.codex/auth.json tokens are missing.");
