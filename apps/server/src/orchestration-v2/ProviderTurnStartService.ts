@@ -987,6 +987,16 @@ export const layer: Layer.Layer<
       const deliveredItemIds = new Set(
         settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
       );
+      // Prefer the text that was actually injected. Pre-cap handoffs stored the
+      // full command body; post-cap handoffs store the shortened stub.
+      const deliveredMessageText = new Map<string, string>();
+      for (const handoff of settledHandoffs) {
+        for (const message of handoff.history?.messages ?? []) {
+          if (deliveredItemIds.has(message.itemId)) {
+            deliveredMessageText.set(message.itemId, message.text);
+          }
+        }
+      }
       const coveredItemIds = new Set([
         ...deliveredItemIds,
         ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
@@ -1041,11 +1051,11 @@ export const layer: Layer.Layer<
                 (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
               )
                 return sum;
-              // Handoff-injected items were capped near 8 KiB. Count that
-              // injected size, not the unabridged durable log.
-              const historical = historicalMessage(item, {
-                truncateCommandOutput: deliveredItemIds.has(item.id),
-              });
+              const deliveredText = deliveredMessageText.get(item.id);
+              const historical =
+                deliveredText !== undefined
+                  ? { text: deliveredText }
+                  : historicalMessage(item, { truncateCommandOutput: false });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

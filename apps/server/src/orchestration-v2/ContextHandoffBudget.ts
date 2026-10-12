@@ -179,13 +179,14 @@ function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id
   if (jsonEncodedBytes(lineCapped) <= COMMAND_OUTPUT_BYTE_CAP) return lineCapped;
   const marker = `\n${commandTruncationMarker(itemId)}\n`;
   const source = Buffer.from(lineCapped);
+  const markerBuffer = Buffer.from(marker);
   let retain = Math.max(0, COMMAND_OUTPUT_BYTE_CAP - jsonEncodedBytes(marker));
   while (retain >= 0) {
     const headBytes = Math.floor(retain / 2);
     const tailBytes = retain - headBytes;
     const candidate = Buffer.concat([
       source.subarray(0, headBytes),
-      Buffer.from(marker),
+      markerBuffer,
       source.subarray(Math.max(0, source.length - tailBytes)),
     ]).toString();
     if (jsonEncodedBytes(candidate) <= COMMAND_OUTPUT_BYTE_CAP) return candidate;
