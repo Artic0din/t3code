@@ -18,6 +18,7 @@ import { threadEnvironment } from "~/state/threads";
 import { useIssueResolution } from "~/state/sourceControlActions";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 
 function messageFromUnknown(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("message" in error)) return null;
@@ -48,7 +49,11 @@ export function ThreadIssueRow(props: {
 }) {
   const navigate = useNavigate();
   const snapshot = useAtomValue(threadEnvironment.snapshotAtom(props.environmentId));
-  const threads = [...(snapshot?.threads ?? []), ...(snapshot?.archivedThreads ?? [])];
+  const archived = useArchivedThreadSnapshots([props.environmentId]);
+  const archivedShells =
+    archived.snapshots.find((entry) => entry.environmentId === props.environmentId)?.snapshot
+      .threads ?? [];
+  const threads = [...(snapshot?.threads ?? []), ...archivedShells];
   const linkIssue = useAtomCommand(threadEnvironment.linkIssue, { reportFailure: false });
   const unlinkIssue = useAtomCommand(threadEnvironment.unlinkIssue, { reportFailure: false });
   const [reference, setReference] = useState("");
@@ -74,6 +79,11 @@ export function ThreadIssueRow(props: {
       ? issueAvailabilityFromFailure(resolutionDetail)
       : null;
   const parsedFailure = unavailable === null ? null : parseGitHubIssueUrl(reference);
+  const canSubmit =
+    props.cwd !== null &&
+    reference.trim().length > 0 &&
+    !resolution.isPending &&
+    (resolved !== null || parsedFailure !== null);
 
   const linkResolved = async (requestedEnvironmentId: EnvironmentId) => {
     if (props.cwd === null || resolved === null) return;
@@ -155,15 +165,20 @@ export function ThreadIssueRow(props: {
             onClick={() => {
               const issue = props.linkedIssue;
               if (issue === null) return;
-              void unlinkIssue({
-                environmentId: props.environmentId,
-                input: {
-                  threadId: props.threadId,
-                  host: issue.host,
-                  repository: issue.repository,
-                  number: issue.number,
-                },
-              });
+              void (async () => {
+                const result = await unlinkIssue({
+                  environmentId: props.environmentId,
+                  input: {
+                    threadId: props.threadId,
+                    host: issue.host,
+                    repository: issue.repository,
+                    number: issue.number,
+                  },
+                });
+                if (result._tag === "Failure") {
+                  setSubmitError("Could not unlink the issue.");
+                }
+              })();
             }}
           >
             Unlink
@@ -220,12 +235,7 @@ export function ThreadIssueRow(props: {
             setSubmitError(null);
           }}
         />
-        <Button
-          type="submit"
-          size="sm"
-          variant="outline"
-          disabled={props.cwd === null || reference.trim().length === 0}
-        >
+        <Button type="submit" size="sm" variant="outline" disabled={!canSubmit}>
           {props.linkedIssue === null ? "Link" : "Relink"}
         </Button>
       </form>

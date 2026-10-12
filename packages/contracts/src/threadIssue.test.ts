@@ -43,6 +43,12 @@ describe("thread issue identity", () => {
       number: 14,
       url: "https://www.github.com/artic0din/t3code/issues/14",
     });
+    expect(parseGitHubIssueUrl("https://github.example.com/Acme/Web/issues/12")).toMatchObject({
+      host: "github.example.com",
+      repository: "acme/web",
+      number: 12,
+      url: "https://github.example.com/acme/web/issues/12",
+    });
     expect(parseGitHubIssueUrl("https://github.com/Artic0din/t3code/pull/14")).toBeNull();
   });
 

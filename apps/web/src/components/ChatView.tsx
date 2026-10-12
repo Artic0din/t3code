@@ -2913,6 +2913,10 @@ export default function ChatView(props: ChatViewProps) {
       if (next.prefill === undefined) issuePrefillByDraftRef.current.delete(preparedDraftId);
       else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
       setComposerDraftPrompt(preparedDraftId, next.prompt);
+      const supportsThreadIssueLinks =
+        appAtomRegistry.get(environmentServerConfigsAtom).get(input.environmentId)?.environment
+          .capabilities.threadIssueLinks === true;
+      if (!supportsThreadIssueLinks) return;
       const currentIssue = useComposerDraftStore
         .getState()
         .getDraftSession(preparedDraftId)?.linkedIssue;
@@ -9244,6 +9248,10 @@ export default function ChatView(props: ChatViewProps) {
       }),
     );
     const issueLaunchFields = (() => {
+      const supportsThreadIssueLinks =
+        appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+          .capabilities.threadIssueLinks === true;
+      if (!supportsThreadIssueLinks) return {};
       const linkedIssue = durableIssueForSend({
         linkedIssue: isLocalDraftThread ? localDraftThread?.linkedIssue : null,
         cancelled: false,

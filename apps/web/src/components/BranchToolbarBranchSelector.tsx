@@ -279,8 +279,9 @@ export function BranchToolbarBranchSelector({
     prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
   const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
   // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
-  const supportsIssueThreads =
-    useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
+  const environmentCapabilities = useServerConfigs().get(environmentId)?.environment.capabilities;
+  const supportsIssueThreads = environmentCapabilities?.issueThreads === true;
+  const supportsThreadIssueLinks = environmentCapabilities?.threadIssueLinks === true;
   const startFromIssueItemValue =
     issueReference &&
     onCheckoutPullRequestRequest &&
@@ -819,7 +820,7 @@ export function BranchToolbarBranchSelector({
             onActed={() => branchStatusQuery.refresh()}
           />
         ) : null}
-        {displayMode === "panel" && serverThread ? (
+        {displayMode === "panel" && serverThread && supportsThreadIssueLinks ? (
           <ThreadIssueRow
             environmentId={environmentId}
             threadId={serverThread.id}

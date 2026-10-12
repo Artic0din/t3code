@@ -1622,6 +1622,8 @@ function createDraftThreadState(
       : options.startFromOrigin;
   const environmentSelection =
     options?.environmentSelection ?? existingThread?.environmentSelection;
+  const logicalProjectChanged =
+    existingThread !== undefined && existingThread.logicalProjectKey !== logicalProjectKey;
   return {
     threadId,
     environmentId: projectRef.environmentId,
@@ -1646,7 +1648,7 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
-    ...(existingThread?.linkedIssue !== undefined
+    ...(existingThread?.linkedIssue !== undefined && !logicalProjectChanged
       ? { linkedIssue: existingThread.linkedIssue }
       : {}),
     promotedTo: null,

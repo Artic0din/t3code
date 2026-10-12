@@ -9,6 +9,7 @@ import {
 import * as Haptics from "expo-haptics";
 import { Linking, Pressable, Text, View } from "react-native";
 
+import { useArchivedThreadSnapshots } from "../archive/useArchivedThreadSnapshots";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -36,11 +37,15 @@ export function ThreadIssueBanner(props: {
 }) {
   const navigation = useNavigation();
   const snapshot = useAtomValue(threadEnvironment.snapshotAtom(props.environmentId));
+  const archived = useArchivedThreadSnapshots([props.environmentId]);
+  const archivedShells =
+    archived.snapshots.find((entry) => entry.environmentId === props.environmentId)?.snapshot
+      .threads ?? [];
   const unlinkIssue = useAtomCommand(threadEnvironment.unlinkIssue, "unlink issue");
   if (props.linkedIssue === null) return null;
   const issue = props.linkedIssue;
   const related = relatedIssueThreads(
-    [...(snapshot?.threads ?? []), ...(snapshot?.archivedThreads ?? [])],
+    [...(snapshot?.threads ?? []), ...archivedShells],
     issue,
     props.threadId,
   );

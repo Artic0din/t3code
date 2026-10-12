@@ -359,6 +359,10 @@ describe("parseIssueReference", () => {
       "https://github.com/pingdotgg/t3code/issues/11067#issuecomment-1",
       "https://github.com/pingdotgg/t3code/issues/11067#issuecomment-1",
     ],
+    [
+      "https://github.example.com/acme/web/issues/12",
+      "https://github.example.com/acme/web/issues/12",
+    ],
   ])("parses %s", (input, expected) => {
     expect(parseIssueReference(input)).toBe(expected);
   });
