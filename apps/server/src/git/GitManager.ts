@@ -2580,7 +2580,6 @@ export const make = Effect.gen(function* () {
           branch: existing.name,
           worktreePath: existing.worktreePath,
           created: false,
-          recordRepository: false,
         };
       }
 
@@ -2588,25 +2587,19 @@ export const make = Effect.gen(function* () {
         Effect.map((settings) => settings.worktreeSubmodules),
         Effect.orElseSucceed(() => null),
       );
-      const finish = (
-        worktree: VcsCreateWorktreeResult,
-        options: { readonly recordRepository: boolean },
-      ) => ({
+      const finish = (worktree: VcsCreateWorktreeResult) => ({
         issue,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
         created: true,
-        recordRepository: options.recordRepository,
       });
       const worktreesDirectory = yield* readWorktreesDirectory;
       if (existing) {
-        // Existing local refs may be pre-upgrade and unrecorded; do not claim them for this issue.
         return finish(
           yield* gitCore.createWorktree(
             { cwd: input.cwd, refName: existing.name, path: null },
             { submodules, worktreesDirectory },
           ),
-          { recordRepository: false },
         );
       }
 
@@ -2635,7 +2628,6 @@ export const make = Effect.gen(function* () {
             },
             { submodules, worktreesDirectory },
           ),
-          { recordRepository: true },
         );
       }
 
@@ -2728,16 +2720,11 @@ export const make = Effect.gen(function* () {
           },
           { submodules, worktreesDirectory },
         ),
-        { recordRepository: true },
       );
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
-      Effect.tap((result) =>
-        result.recordRepository
-          ? rememberIssueRepository(result.branch, result.issue.url)
-          : Effect.void,
-      ),
+      Effect.tap((result) => rememberIssueRepository(result.branch, result.issue.url)),
       Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),
