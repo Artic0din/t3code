@@ -12,7 +12,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, type Toolkit } from "effect/ai";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { HttpBody, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { OrchestratorMcpFailure, PreviewAutomationError } from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
@@ -141,6 +141,57 @@ export const normalizeMcpHttpResponse = (
     : response;
 };
 
+const LISTED_TOOL_CAPABILITY = [
+  ["t3_preview_", "preview"],
+  ["preview_", "preview"],
+  ["device_", "device"],
+] as const satisfies ReadonlyArray<readonly [string, McpInvocationContext.McpCapability]>;
+
+const capabilityForListedTool = (name: string): McpInvocationContext.McpCapability | undefined => {
+  for (const [prefix, capability] of LISTED_TOOL_CAPABILITY) {
+    if (name.startsWith(prefix)) return capability;
+  }
+  return undefined;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * `EnabledWhen` also drops the tool from `tools/call`, which would replace
+ * the capability refusal with tool-not-found. Filter the list here instead.
+ */
+const omitUngrantedListedTools = (
+  response: HttpServerResponse.HttpServerResponse,
+  capabilities: ReadonlySet<McpInvocationContext.McpCapability>,
+): HttpServerResponse.HttpServerResponse => {
+  if (response.body._tag !== "Uint8Array") return response;
+  const raw = response.body.text ?? new TextDecoder().decode(response.body.body);
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") || !trimmed.includes('"tools"')) return response;
+  let message: unknown;
+  try {
+    message = JSON.parse(trimmed);
+  } catch {
+    return response;
+  }
+  if (!isRecord(message) || !isRecord(message.result) || !Array.isArray(message.result.tools)) {
+    return response;
+  }
+  const tools = message.result.tools.filter((tool) => {
+    if (!isRecord(tool) || typeof tool.name !== "string") return true;
+    const required = capabilityForListedTool(tool.name);
+    return required === undefined || capabilities.has(required);
+  });
+  if (tools.length === message.result.tools.length) return response;
+  const next = JSON.stringify({ ...message, result: { ...message.result, tools } });
+  const framed = raw.endsWith("\n") ? `${next}\n` : next;
+  return HttpServerResponse.setBody(
+    response,
+    HttpBody.uint8Array(Buffer.from(framed), response.body.contentType),
+  );
+};
+
 // Session tokens are `<payload>.<signature>`; registry tokens are a bare base64url secret.
 const looksLikeProviderToken = (token: string) => token.length > 0 && !token.includes(".");
 
@@ -174,7 +225,9 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     }
     return yield* httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-      Effect.map(normalizeMcpHttpResponse),
+      Effect.map((response) =>
+        normalizeMcpHttpResponse(omitUngrantedListedTools(response, invocation.capabilities)),
+      ),
     );
   }) satisfies McpAuthMiddleware;
 }).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
