@@ -22,10 +22,13 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
+  type AgentSessionHomeState,
   type AgentSessionImportSource,
+  type AgentSessionObservation,
   type AgentSessionProjectCandidate,
   type AgentSessionProjectGit,
   type AgentSessionScanResult,
+  type AgentSessionSourceReport,
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -94,6 +97,7 @@ const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
+const MAX_RECENT_SESSION_OBSERVATIONS = 40;
 
 const TranscriptContentBlock = Schema.Struct({
   type: Schema.optional(Schema.String),
@@ -208,6 +212,8 @@ interface RawCandidate {
   readonly transcripts: ReadonlyArray<{
     readonly filePath: string;
     readonly mtimeMs: number | null;
+    readonly sessionId: string | null;
+    readonly observedActivityAtMs: number | null;
   }>;
 }
 
@@ -562,8 +568,23 @@ function isT3ManagedWorktree(
   );
 }
 
-/** Extract `cwd` from a session-meta record, tolerating the shapes each CLI writes. */
-function extractCwd(line: string): string | null {
+interface TranscriptLineMeta {
+  readonly cwd: string | null;
+  readonly sessionId: string | null;
+  readonly observedActivityAtMs: number | null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function timestampMillis(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const parsed = DateTime.make(value);
+  return Option.isNone(parsed) ? null : DateTime.toEpochMillis(parsed.value);
+}
+
+function extractLineMeta(line: string): TranscriptLineMeta | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -573,18 +594,22 @@ function extractCwd(line: string): string | null {
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
-  if (typeof record.cwd === "string" && record.cwd.trim().length > 0) {
-    return record.cwd;
-  }
-  // Codex nests session metadata under `payload`.
-  const payload = record.payload;
-  if (typeof payload === "object" && payload !== null) {
-    const nested = (payload as Record<string, unknown>).cwd;
-    if (typeof nested === "string" && nested.trim().length > 0) {
-      return nested;
-    }
-  }
-  return null;
+  const payload =
+    typeof record.payload === "object" && record.payload !== null
+      ? (record.payload as Record<string, unknown>)
+      : null;
+  const cwd = nonEmptyString(record.cwd) ?? (payload === null ? null : nonEmptyString(payload.cwd));
+  const sessionId =
+    nonEmptyString(record.sessionId) ??
+    (payload === null ? null : (nonEmptyString(payload.id) ?? nonEmptyString(payload.session_id)));
+  const observedActivityAtMs = timestampMillis(record.timestamp);
+  if (cwd === null && sessionId === null && observedActivityAtMs === null) return null;
+  return { cwd, sessionId, observedActivityAtMs };
+}
+
+/** Extract `cwd` from a session-meta record, tolerating the shapes each CLI writes. */
+function extractCwd(line: string): string | null {
+  return extractLineMeta(line)?.cwd ?? null;
 }
 
 function transcriptIdentity(filePath: string, stats: FileSystem.File.Info) {
@@ -663,6 +688,18 @@ export const make = Effect.gen(function* () {
 
   const statOption = (target: string) =>
     fileSystem.stat(target).pipe(Effect.asSome, Effect.orElseSucceed(Option.none));
+
+  const classifyDirectory = (target: string) =>
+    fileSystem.stat(target).pipe(
+      Effect.map((stats): AgentSessionHomeState =>
+        stats.type === "Directory" ? "present" : "unreadable",
+      ),
+      Effect.catchTag("PlatformError", (error) =>
+        Effect.succeed<AgentSessionHomeState>(
+          error.reason._tag === "NotFound" ? "missing" : "unreadable",
+        ),
+      ),
+    );
 
   /** Match directory aliases without assuming the host volume is case-insensitive. */
   const directoryIdentity = Effect.fn("AgentSessionScanner.directoryIdentity")(function* (
@@ -751,6 +788,9 @@ export const make = Effect.gen(function* () {
             let remaining = "";
             let bytesRead = 0;
             let recordsRead = 0;
+            let foundCwd: string | null = null;
+            let sessionId: string | null = null;
+            let observedActivityAtMs: number | null = null;
             const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
             const reserveRecord = () => {
               if (
@@ -764,15 +804,32 @@ export const make = Effect.gen(function* () {
               budget.recordsRemaining -= 1;
               return true;
             };
+            const absorb = (line: string) => {
+              const meta = extractLineMeta(line.trim());
+              if (meta === null) return false;
+              if (foundCwd === null && meta.cwd !== null) foundCwd = meta.cwd;
+              if (sessionId === null && meta.sessionId !== null) sessionId = meta.sessionId;
+              if (
+                meta.observedActivityAtMs !== null &&
+                (observedActivityAtMs === null || meta.observedActivityAtMs > observedActivityAtMs)
+              ) {
+                observedActivityAtMs = meta.observedActivityAtMs;
+              }
+              return foundCwd !== null;
+            };
+            const finish = () =>
+              foundCwd === null ? null : { cwd: foundCwd, sessionId, observedActivityAtMs };
             const readLastRecord = () => {
               const record = remaining + decoder.decode();
-              return record.length === 0 || !reserveRecord() ? null : extractCwd(record.trim());
+              if (record.length === 0 || !reserveRecord()) return finish();
+              absorb(record);
+              return finish();
             };
 
             while (bytesRead < maxBytes) {
               if (budget.bytesRemaining === 0 || budget.operationsRemaining === 0) {
                 budget.truncated = true;
-                return null;
+                return finish();
               }
               const readSize = Math.min(
                 METADATA_READ_BYTES,
@@ -792,15 +849,14 @@ export const make = Effect.gen(function* () {
               remaining = lines.pop() ?? "";
 
               for (const line of lines) {
-                if (!reserveRecord()) return null;
-                const cwd = extractCwd(line.trim());
-                if (cwd !== null) return cwd;
+                if (!reserveRecord()) return finish();
+                if (absorb(line)) return finish();
               }
             }
 
             if (bytesRead < transcript.size) {
               budget.truncated = true;
-              return null;
+              return finish();
             }
             return readLastRecord();
           }),
@@ -1050,24 +1106,38 @@ export const make = Effect.gen(function* () {
         cwd: string;
         providerInstanceId: ProviderInstanceId;
         lastActiveAtMs: number;
-        transcripts: Array<{ filePath: string; mtimeMs: number }>;
+        transcripts: Array<{
+          filePath: string;
+          mtimeMs: number;
+          sessionId: string | null;
+          observedActivityAtMs: number | null;
+        }>;
       }
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(transcript, budget);
-      if (cwd === null) continue;
-      const key = `${transcript.providerInstanceId}\0${cwd}`;
+      const meta = yield* readCwd(transcript, budget);
+      if (meta === null) continue;
+      const sessionId =
+        meta.sessionId ??
+        (source === "claudeAgent" ? path.basename(transcript.filePath, ".jsonl") : null);
+      const record = {
+        filePath: transcript.filePath,
+        mtimeMs: transcript.mtimeMs,
+        sessionId,
+        observedActivityAtMs: meta.observedActivityAtMs,
+      };
+      const key = `${transcript.providerInstanceId}\0${meta.cwd}`;
       const existing = byOwnerAndCwd.get(key);
       if (existing) {
         existing.lastActiveAtMs = Math.max(existing.lastActiveAtMs, transcript.mtimeMs);
-        existing.transcripts.push(transcript);
+        existing.transcripts.push(record);
       } else {
         byOwnerAndCwd.set(key, {
-          cwd,
+          cwd: meta.cwd,
           providerInstanceId: transcript.providerInstanceId,
           lastActiveAtMs: transcript.mtimeMs,
-          transcripts: [transcript],
+          transcripts: [record],
         });
       }
     }
@@ -1088,6 +1158,7 @@ export const make = Effect.gen(function* () {
     );
 
     const raw: Array<RawCandidate> = [];
+    const sourceReports: Array<AgentSessionSourceReport> = [];
     let truncated = false;
 
     for (const source of ["claudeAgent", "codex"] as const) {
@@ -1163,14 +1234,31 @@ export const make = Effect.gen(function* () {
       const extraOperationBudgets = MAX_DISCOVERY_OPERATIONS_PER_SOURCE % Math.max(1, homes.length);
       for (const [index, home] of homes.entries()) {
         const operationBudget = baseOperationBudget + (index < extraOperationBudgets ? 1 : 0);
-        if (operationBudget === 0) {
-          truncated = true;
+        const homeState = yield* classifyDirectory(home.homePath);
+        const transcriptRoot = path.join(
+          home.homePath,
+          source === "claudeAgent" ? "projects" : "sessions",
+        );
+        const rootState =
+          homeState === "present" ? yield* classifyDirectory(transcriptRoot) : homeState;
+        const reportState: AgentSessionHomeState =
+          homeState !== "present" ? homeState : rootState === "missing" ? "present" : rootState;
+        const report: AgentSessionSourceReport = {
+          provider: source,
+          providerInstanceId: home.providerInstanceId,
+          homeState: reportState,
+          truncated: operationBudget === 0,
+        };
+        if (reportState !== "present" || operationBudget === 0) {
+          if (operationBudget === 0) truncated = true;
+          sourceReports.push(report);
           continue;
         }
         const discovered = yield* source === "claudeAgent"
           ? discoverClaudeTranscripts(home.homePath, home.providerInstanceId, operationBudget)
           : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
         truncated ||= discovered.truncated;
+        sourceReports.push({ ...report, truncated: report.truncated || discovered.truncated });
         transcriptCandidates.push(...discovered.transcripts);
       }
 
@@ -1193,13 +1281,16 @@ export const make = Effect.gen(function* () {
       truncated ||= metadataBudget.truncated;
     }
 
-    return { candidates: raw, truncated };
+    return { candidates: raw, truncated, sourceReports };
   });
 
   let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
-    const { candidates: raw, truncated } = yield* collectCandidates();
+    const collected = yield* collectCandidates();
+    const raw = collected.candidates;
+    let truncated = collected.truncated;
+    const sourceReports = collected.sourceReports.map((report) => ({ ...report }));
     cachedCandidates = raw;
 
     // Filesystem identity merges symlinks and case aliases without collapsing
@@ -1216,6 +1307,13 @@ export const make = Effect.gen(function* () {
     >();
     const directoryKeys = new Map<string, string>();
     const gitIdentities = new Map<string, AgentSessionProjectGit | null>();
+    const sessionFacts: Array<{
+      key: string;
+      provider: AgentSessionSource;
+      providerInstanceId: ProviderInstanceId;
+      sessionId: string;
+      observedActivityAtMs: number | null;
+    }> = [];
 
     for (const candidate of raw) {
       const expanded = expandHomePath(candidate.cwd.trim());
@@ -1249,6 +1347,16 @@ export const make = Effect.gen(function* () {
         directoryKeys.set(resolved, key);
       }
       if (key === "") continue;
+      for (const transcript of candidate.transcripts) {
+        if (transcript.sessionId === null) continue;
+        sessionFacts.push({
+          key,
+          provider: candidate.source,
+          providerInstanceId: candidate.providerInstanceId,
+          sessionId: transcript.sessionId,
+          observedActivityAtMs: transcript.observedActivityAtMs,
+        });
+      }
 
       const existing = merged.get(key);
       if (!existing) {
@@ -1288,6 +1396,14 @@ export const make = Effect.gen(function* () {
     }
 
     const candidates: Array<AgentSessionProjectCandidate> = [];
+    const locations = new Map<
+      string,
+      {
+        projectPath: string;
+        projectId?: AgentSessionProjectCandidate["projectId"];
+        repository: string | null;
+      }
+    >();
     for (const [key, entry] of merged.entries()) {
       // Keep the path key for missing roots and use filesystem identity for
       // aliases that resolve to the same directory.
@@ -1308,6 +1424,11 @@ export const make = Effect.gen(function* () {
         alreadyImported: importedProject !== undefined,
         git: entry.git,
       });
+      locations.set(key, {
+        projectPath: candidatePath,
+        ...(importedProject === undefined ? {} : { projectId: importedProject.id }),
+        repository: entry.git?.repository ?? null,
+      });
     }
 
     // Newest first, undated candidates last.
@@ -1318,10 +1439,54 @@ export const make = Effect.gen(function* () {
       return right.lastActiveAt.localeCompare(left.lastActiveAt);
     });
 
+    const sessionsById = new Map<string, (typeof sessionFacts)[number]>();
+    for (const fact of sessionFacts) {
+      const id = `${fact.providerInstanceId}\0${fact.sessionId}`;
+      const existing = sessionsById.get(id);
+      if (existing === undefined) {
+        sessionsById.set(id, fact);
+        continue;
+      }
+      const next = fact.observedActivityAtMs;
+      const previous = existing.observedActivityAtMs;
+      if (next !== null && (previous === null || next > previous)) {
+        sessionsById.set(id, fact);
+      }
+    }
+    const orderedSessions = Array.from(sessionsById.values()).sort((left, right) => {
+      if (left.observedActivityAtMs === right.observedActivityAtMs) {
+        return left.sessionId.localeCompare(right.sessionId);
+      }
+      if (left.observedActivityAtMs === null) return 1;
+      if (right.observedActivityAtMs === null) return -1;
+      return right.observedActivityAtMs - left.observedActivityAtMs;
+    });
+    const keptSessions = orderedSessions.slice(0, MAX_RECENT_SESSION_OBSERVATIONS);
+    const sessionsTruncated = orderedSessions.length > keptSessions.length;
+
+    const sessions: Array<AgentSessionObservation> = keptSessions.map((fact) => {
+      const location = locations.get(fact.key);
+      return {
+        provider: fact.provider,
+        providerInstanceId: fact.providerInstanceId,
+        providerSessionId: fact.sessionId,
+        projectPath: location?.projectPath ?? null,
+        ...(location?.projectId === undefined ? {} : { projectId: location.projectId }),
+        repository: location?.repository ?? null,
+        lastObservedActivityAt:
+          fact.observedActivityAtMs === null
+            ? null
+            : DateTime.formatIso(DateTime.makeUnsafe(fact.observedActivityAtMs)),
+      };
+    });
+
     return {
       candidates,
       scannedAt: DateTime.formatIso(yield* DateTime.now),
       ...(truncated ? { truncated: true } : {}),
+      ...(sessionsTruncated ? { sessionsTruncated: true } : {}),
+      sessions,
+      sourceReports,
     };
   });
 

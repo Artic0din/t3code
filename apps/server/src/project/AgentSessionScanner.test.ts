@@ -1345,6 +1345,293 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         expect(result.scannedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
       }),
     );
+
+    it.effect("reports a missing home instead of an authoritative empty session list", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const root = yield* makeTempDir("t3code-missing-session-home-");
+
+        const result = yield* runScan({
+          claudeHomePath: path.join(root, "no-claude"),
+          codexHomePath: path.join(root, "no-codex"),
+        });
+
+        expect(result.sessions).toEqual([]);
+        expect(result.sourceReports).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            homeState: "missing",
+            truncated: false,
+          },
+          {
+            provider: "codex",
+            providerInstanceId: "codex",
+            homeState: "missing",
+            truncated: false,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("reports an unreadable provider home", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-unreadable-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-unreadable-codex-");
+        yield* fileSystem.writeFileString(path.join(claudeHomePath, "projects"), "not-a-directory");
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+
+        expect(result.sessions).toEqual([]);
+        expect(result.sourceReports).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            homeState: "unreadable",
+            truncated: false,
+          },
+          {
+            provider: "codex",
+            providerInstanceId: "codex",
+            homeState: "present",
+            truncated: false,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("reads recorded activity from a partial transcript and ignores the prompt text", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-partial-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-partial-codex-");
+        const workspace = yield* makeTempDir("t3code-partial-workspace-");
+        const secret = "SECRET PROMPT SHOULD NOT LEAK";
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "partial.jsonl"),
+          contents: [
+            "{not-json",
+            JSON.stringify({
+              type: "user",
+              cwd: workspace,
+              sessionId: "partial-session",
+              timestamp: "2026-04-01T01:00:00.000Z",
+              message: { role: "user", content: secret },
+            }),
+            "",
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-01T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+
+        expect(result.sessions).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "partial-session",
+            projectPath: workspace,
+            repository: null,
+            lastObservedActivityAt: "2026-04-01T01:00:00.000Z",
+          },
+        ]);
+        expect(JSON.stringify(result.sessions)).not.toContain(secret);
+      }),
+    );
+
+    it.effect("keeps one session when a transcript rotates and uses the recorded time", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-rotation-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-rotation-codex-");
+        const workspace = yield* makeTempDir("t3code-rotation-workspace-");
+        const line = (timestamp: string) =>
+          `${JSON.stringify({
+            type: "user",
+            cwd: workspace,
+            sessionId: "rotated-session",
+            timestamp,
+          })}\n`;
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "older-file.jsonl"),
+          contents: line("2026-05-01T00:00:00.000Z"),
+          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "newer-file.jsonl"),
+          contents: line("2026-02-01T00:00:00.000Z"),
+          mtimeMs: Date.parse("2026-06-01T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+
+        expect(result.sessions).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "rotated-session",
+            projectPath: workspace,
+            repository: null,
+            lastObservedActivityAt: "2026-05-01T00:00:00.000Z",
+          },
+        ]);
+        expect(result.candidates[0]?.lastActiveAt).toBe("2026-06-01T00:00:00.000Z");
+      }),
+    );
+
+    it.effect("omits sessions from disabled providers", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-enabled-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-enabled-codex-");
+        const disabledHome = yield* makeTempDir("t3code-disabled-codex-");
+        const enabledWorkspace = yield* makeTempDir("t3code-enabled-workspace-");
+        const disabledWorkspace = yield* makeTempDir("t3code-disabled-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "enabled.jsonl"),
+          contents: `${JSON.stringify({
+            type: "user",
+            cwd: enabledWorkspace,
+            sessionId: "enabled-session",
+            timestamp: "2026-03-01T00:00:00.000Z",
+          })}\n`,
+          mtimeMs: Date.parse("2026-03-01T00:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(
+            disabledHome,
+            "sessions",
+            "2026",
+            "03",
+            "02",
+            "rollout-disabled.jsonl",
+          ),
+          contents: `${JSON.stringify({
+            timestamp: "2026-03-02T00:00:00.000Z",
+            type: "session_meta",
+            payload: { id: "disabled-session", cwd: disabledWorkspace },
+          })}\n`,
+          mtimeMs: Date.parse("2026-03-02T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: false,
+              config: { homePath: disabledHome },
+            },
+          },
+        });
+
+        expect(result.sessions).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "enabled-session",
+            projectPath: enabledWorkspace,
+            repository: null,
+            lastObservedActivityAt: "2026-03-01T00:00:00.000Z",
+          },
+        ]);
+        expect(result.sourceReports?.map((report) => report.providerInstanceId)).toEqual([
+          "claudeAgent",
+        ]);
+      }),
+    );
+
+    it.effect("bounds the session list and marks the scan partial", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-bounded-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-bounded-codex-");
+        const workspace = yield* makeTempDir("t3code-bounded-workspace-");
+
+        for (let index = 0; index < 41; index += 1) {
+          const stamp = `2026-01-${String((index % 28) + 1).padStart(2, "0")}T00:00:00.000Z`;
+          yield* writeTranscript({
+            filePath: path.join(
+              claudeHomePath,
+              "projects",
+              "-slug",
+              `session-${String(index).padStart(2, "0")}.jsonl`,
+            ),
+            contents: `${JSON.stringify({
+              type: "user",
+              cwd: workspace,
+              sessionId: `bounded-${index}`,
+              timestamp: stamp,
+            })}\n`,
+            mtimeMs: Date.parse("2026-07-01T00:00:00.000Z") + index,
+          });
+        }
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+
+        expect(result.sessions).toHaveLength(40);
+        expect(result.sessionsTruncated).toBe(true);
+        expect(result.truncated).toBeUndefined();
+        expect(result.sourceReports).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            homeState: "present",
+            truncated: false,
+          },
+          {
+            provider: "codex",
+            providerInstanceId: "codex",
+            homeState: "present",
+            truncated: false,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("marks an imported project on the session without importing it", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-imported-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-imported-codex-");
+        const workspace = yield* makeTempDir("t3code-imported-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "imported.jsonl"),
+          contents: `${JSON.stringify({
+            type: "user",
+            cwd: workspace,
+            sessionId: "imported-session",
+            timestamp: "2026-04-02T00:00:00.000Z",
+          })}\n`,
+          mtimeMs: Date.parse("2026-04-02T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          importedWorkspaceRoots: [workspace],
+        });
+
+        expect(result.sessions).toEqual([
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "imported-session",
+            projectPath: workspace,
+            projectId: "project-1",
+            repository: null,
+            lastObservedActivityAt: "2026-04-02T00:00:00.000Z",
+          },
+        ]);
+      }),
+    );
   });
 
   describe("recentThreads", () => {

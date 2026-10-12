@@ -33,4 +33,59 @@ describe("AgentSessionScanResult", () => {
 
     expect(result.candidates[0]?.git).toEqual(git);
   });
+
+  it("keeps a scan that predates session reports free of an empty session list", () => {
+    const result = decodeScanResult({
+      candidates: [candidate],
+      scannedAt: "2026-08-22T12:00:00.000Z",
+    });
+
+    expect(result.sessions).toBeUndefined();
+    expect(result.sourceReports).toBeUndefined();
+  });
+
+  it("decodes session observations separately from scan time", () => {
+    const result = decodeScanResult({
+      candidates: [],
+      scannedAt: "2026-08-22T12:00:00.000Z",
+      sessions: [
+        {
+          provider: "codex",
+          providerInstanceId: "codex",
+          providerSessionId: "session-1",
+          projectPath: "/projects/repo",
+          repository: "pingdotgg/t3code",
+          lastObservedActivityAt: "2026-08-20T12:00:00.000Z",
+        },
+      ],
+      sourceReports: [
+        {
+          provider: "codex",
+          providerInstanceId: "codex",
+          homeState: "present",
+          truncated: false,
+        },
+      ],
+    });
+
+    expect(result.sessions).toEqual([
+      {
+        provider: "codex",
+        providerInstanceId: "codex",
+        providerSessionId: "session-1",
+        projectPath: "/projects/repo",
+        repository: "pingdotgg/t3code",
+        lastObservedActivityAt: "2026-08-20T12:00:00.000Z",
+      },
+    ]);
+    expect(result.scannedAt).toBe("2026-08-22T12:00:00.000Z");
+    expect(result.sourceReports).toEqual([
+      {
+        provider: "codex",
+        providerInstanceId: "codex",
+        homeState: "present",
+        truncated: false,
+      },
+    ]);
+  });
 });
