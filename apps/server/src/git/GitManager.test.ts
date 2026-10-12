@@ -5010,6 +5010,81 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("checks out project submodules for an unpersisted issue draft", () =>
+    Effect.gen(function* () {
+      const subRepo = yield* makeTempDir("t3code-submodule-");
+      yield* initRepo(subRepo);
+      NodeFS.writeFileSync(NodePath.join(subRepo, "marker.txt"), "nested\n");
+      yield* runGit(subRepo, ["add", "marker.txt"]);
+      yield* runGit(subRepo, ["commit", "-m", "Add submodule marker"]);
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        subRepo,
+        "vendor",
+      ]);
+      yield* runGit(repoDir, ["commit", "-m", "Add vendor submodule"]);
+      const projectId = ProjectId.make("project:issue-submodules");
+      const createdAt = DateTime.makeUnsafe("2026-09-27T00:00:00.000Z");
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          worktreeSubmodules: "none",
+          projectSettingsOverrides: {
+            [projectId]: { worktreeSubmodules: "recursive" },
+          },
+        },
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+        seed: Effect.gen(function* () {
+          yield* (yield* ProjectStore.ProjectStoreV2).apply({
+            sequence: 1,
+            eventId: EventId.make("event:issue-submodules:project"),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: DateTime.formatIso(createdAt),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "project.created",
+            payload: {
+              projectId,
+              title: "Issue submodules",
+              workspaceRoot: repoDir,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: DateTime.formatIso(createdAt),
+              updatedAt: DateTime.formatIso(createdAt),
+            },
+          });
+        }),
+      });
+
+      const result = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "31",
+        threadId: ThreadId.make("thread:unpersisted-issue-draft"),
+      });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      expect(
+        NodeFS.readFileSync(NodePath.join(result.worktreePath, "vendor", "marker.txt"), "utf8"),
+      ).toBe("nested\n");
+    }),
+  );
+
   it.effect("finds an issue worktree among more than 100 branches", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
