@@ -52,11 +52,11 @@ const WINDOW_MARKERS: ReadonlyArray<readonly [QuotaWindow, RegExp]> = [
   ["monthly", /\bmonthly\b|\bper month\b/i],
 ];
 
-export function isAccountScopedQuota(signal: ModelFallbackSignal): boolean {
+function isAccountScopedQuota(signal: ModelFallbackSignal): boolean {
   return /\b(spend limit|monthly spend|account)\b/i.test(signal.message);
 }
 
-export function explicitQuotaExhaustion(signal: ModelFallbackSignal | null): boolean {
+function explicitQuotaExhaustion(signal: ModelFallbackSignal | null): boolean {
   if (signal === null) return false;
   if (signal.class !== null && NON_QUOTA_CLASSES.has(signal.class)) return false;
   if (signal.class === "usage_limit") return true;
@@ -143,7 +143,7 @@ function runIsLater(run: FallbackRunEvidence, other: FallbackRunEvidence): boole
 }
 
 /** Models already burned in the current quota chain, newest first, stopping at a non-quota run. */
-export function quotaChain(runs: readonly FallbackRunEvidence[]): {
+function quotaChain(runs: readonly FallbackRunEvidence[]): {
   readonly signal: ModelFallbackSignal | null;
   readonly current: ModelSelection | null;
   readonly tried: readonly ModelSelection[];
