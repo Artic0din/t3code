@@ -1088,7 +1088,7 @@ const listedOk = Effect.succeed({ ok: true });
 
 const listScope = (
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
-): McpInvocationContext.McpInvocationScope => ({
+): McpInvocationContext.McpThreadInvocationScope => ({
   environmentId,
   requestNamespace: "provider-session",
   thread: {
