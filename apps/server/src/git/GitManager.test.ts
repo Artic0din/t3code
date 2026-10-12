@@ -2,7 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
-import { fileURLToPath } from "node:url";
+import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -5557,7 +5557,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const tempDir = yield* makeTempDir("t3code-git-manager-ssh-env-");
       yield* initRepo(repoDir);
       const sshLogPath = NodePath.join(tempDir, "ssh-env.txt");
-      const sshWrapperPath = fileURLToPath(
+      const sshWrapperPath = NodeURL.fileURLToPath(
         new URL("../vcs/testing/GitVcsDriverCore.fixture.sh", import.meta.url),
       );
       const envKeys = [
