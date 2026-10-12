@@ -4959,17 +4959,18 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
+      const alphaIssue = {
+        number: 31,
+        title: "Alpha work",
+        body: "From alpha",
+        url: "https://github.com/alpha/one/issues/31",
+        state: "OPEN" as const,
+      };
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
           issues: [
-            {
-              number: 31,
-              title: "Alpha work",
-              body: "From alpha",
-              url: "https://github.com/alpha/one/issues/31",
-              state: "OPEN",
-            },
+            alphaIssue,
             {
               number: 31,
               title: "Beta work",
@@ -4985,16 +4986,24 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         cwd: repoDir,
         reference: "https://github.com/alpha/one/issues/31",
       });
+      alphaIssue.title = "Alpha work renamed";
+      const renamed = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/alpha/one/issues/31",
+      });
       const beta = yield* prepareIssueThread(manager, {
         cwd: repoDir,
         reference: "https://github.com/beta/two/issues/31",
       });
 
       expect(alpha.branch).toBe("issue/31-alpha-work");
-      expect(alpha.issue.url).toBe("https://github.com/alpha/one/issues/31");
+      expect(renamed.branch).toBe("issue/31-alpha-work");
+      expect(NodeFS.realpathSync(renamed.worktreePath)).toBe(
+        NodeFS.realpathSync(alpha.worktreePath),
+      );
+      expect(beta.branch).toBe("issue/31-beta-work");
       expect(beta.issue.title).toBe("Beta work");
       expect(beta.issue.url).toBe("https://github.com/beta/two/issues/31");
-      expect(beta.branch).not.toBe(alpha.branch);
       expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
         NodeFS.realpathSync(alpha.worktreePath),
       );

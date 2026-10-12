@@ -268,6 +268,31 @@ export function pullRequestRepositoryKey(value: string): string | null {
   }
 }
 
+const issueBranchRepositoryConfig = "t3code-issue-repository";
+
+function issueRepositoryKey(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const match = /^(.*)\/issues\/\d+(?:\/.*)?$/iu.exec(url.pathname);
+    if (match?.[1] === undefined) return null;
+    url.pathname = match[1];
+    url.search = "";
+    url.hash = "";
+    return normalizeGitRemoteUrl(url.toString());
+  } catch {
+    return null;
+  }
+}
+
+function hostedRepositoryKey(remoteUrl: string): string | null {
+  const segments = normalizeGitRemoteUrl(remoteUrl)
+    .split("/")
+    .filter((segment) => segment.length > 0);
+  const host = segments[0];
+  if (!host || !host.includes(".") || segments.length < 3) return null;
+  return segments.join("/");
+}
+
 function parseRepositoryNameFromPullRequestUrl(url: string): string | null {
   const trimmed = url.trim();
   const match = /^https?:\/\/[^/]+\/[^/]+\/([^/]+)\/pull\/\d+(?:\/.*)?$/i.exec(trimmed);
@@ -2433,6 +2458,31 @@ export const make = Effect.gen(function* () {
   const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
     "prepareIssueThread",
   )(function* (input) {
+    const readIssueBranchRepository = (branchName: string) =>
+      gitCore
+        .execute({
+          operation: "GitManager.prepareIssueThread.issueRepository",
+          cwd: input.cwd,
+          args: ["config", "--get", `branch.${branchName}.${issueBranchRepositoryConfig}`],
+          allowNonZeroExit: true,
+        })
+        .pipe(Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : "")));
+    const rememberIssueRepository = (branchName: string, issueUrl: string) =>
+      Effect.gen(function* () {
+        const repositoryKey = issueRepositoryKey(issueUrl);
+        if (repositoryKey === null) return;
+        if ((yield* readIssueBranchRepository(branchName)).length > 0) return;
+        yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.recordIssueRepository",
+          cwd: input.cwd,
+          args: [
+            "config",
+            "--local",
+            `branch.${branchName}.${issueBranchRepositoryConfig}`,
+            repositoryKey,
+          ],
+        });
+      });
     const runSetupScript = (worktreePath: string) =>
       input.threadId === undefined
         ? Effect.void
@@ -2450,6 +2500,32 @@ export const make = Effect.gen(function* () {
     const prepared = yield* Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
+      const repositoryKey = issueRepositoryKey(issue.url);
+      const hostedRemoteRepository = (remoteName: string) =>
+        gitCore
+          .execute({
+            operation: "GitManager.prepareIssueThread.remoteRepository",
+            cwd: input.cwd,
+            args: ["config", "--get", `remote.${remoteName}.url`],
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) =>
+              result.exitCode === 0 ? hostedRepositoryKey(result.stdout.trim()) : null,
+            ),
+          );
+      // A recorded repository must match. A branch with no record stays reusable, including after
+      // a title change. A hosted remote URL is the record for a branch that exists only there.
+      const matchesIssueRepository = (branchName: string, remoteName?: string) =>
+        Effect.gen(function* () {
+          if (repositoryKey === null) return true;
+          const recorded = yield* readIssueBranchRepository(branchName);
+          if (recorded.length > 0) return recorded === repositoryKey;
+          if (remoteName === undefined) return true;
+          const remoteKey = yield* hostedRemoteRepository(remoteName);
+          if (remoteKey === null) return true;
+          return remoteKey === repositoryKey;
+        });
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
@@ -2462,10 +2538,24 @@ export const make = Effect.gen(function* () {
         refresh: true,
       });
       const localRefs = refs.filter((ref) => !ref.isRemote);
+      const firstForThisIssue = (
+        candidates: ReadonlyArray<VcsRef>,
+        nameOf: (ref: VcsRef) => string,
+      ) =>
+        Effect.gen(function* () {
+          const ordered = [
+            ...candidates.filter((ref) => nameOf(ref) === branch),
+            ...candidates.filter(
+              (ref) => nameOf(ref) !== branch && nameOf(ref).startsWith(issueBranchPrefix),
+            ),
+          ];
+          for (const ref of ordered) {
+            if (yield* matchesIssueRepository(nameOf(ref), ref.remoteName)) return ref;
+          }
+          return undefined;
+        });
       // The slug follows the title, so a renamed issue still finds its branch by number.
-      const existing =
-        localRefs.find((ref) => ref.name === branch) ??
-        localRefs.find((ref) => ref.name.startsWith(issueBranchPrefix));
+      const existing = yield* firstForThisIssue(localRefs, (ref) => ref.name);
       if (existing?.worktreePath) {
         const existingPath = yield* canonicalizeExistingPath(existing.worktreePath);
         const cwdPath = yield* canonicalizeExistingPath(input.cwd);
@@ -2510,8 +2600,9 @@ export const make = Effect.gen(function* () {
         ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`)
           ? ref.name.slice(ref.remoteName.length + 1)
           : deriveLocalBranchNameFromRemoteRef(ref.name);
-      const remoteRef = refs.find(
-        (ref) => ref.isRemote === true && localNameOf(ref).startsWith(issueBranchPrefix),
+      const remoteRef = yield* firstForThisIssue(
+        refs.filter((ref) => ref.isRemote === true),
+        localNameOf,
       );
       if (remoteRef) {
         return finish(
@@ -2600,7 +2691,10 @@ export const make = Effect.gen(function* () {
           {
             cwd: input.cwd,
             refName: startRef,
-            newRefName: branch,
+            newRefName:
+              repositoryKey !== null && !(yield* matchesIssueRepository(branch))
+                ? `${issueBranchPrefix}${sanitizeBranchFragment(repositoryKey).replace(/[/.]/g, "-")}`
+                : branch,
             baseRefName: baseBranch,
             path: null,
           },
@@ -2610,6 +2704,7 @@ export const make = Effect.gen(function* () {
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
+      Effect.tap((result) => rememberIssueRepository(result.branch, result.issue.url)),
       Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),
