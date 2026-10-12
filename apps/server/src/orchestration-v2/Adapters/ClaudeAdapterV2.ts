@@ -3068,7 +3068,15 @@ export function makeClaudeAdapterV2(
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
+        const latestPlanByKind = yield* Ref.make(
+          new Map<
+            string,
+            {
+              readonly plan: OrchestrationV2PlanArtifact;
+              readonly turnItem: OrchestrationV2TurnItem;
+            }
+          >(),
+        );
         const planIdsByNativeItem = yield* Ref.make(
           new Map<string, OrchestrationV2PlanArtifact["id"]>(),
         );
@@ -4603,20 +4611,27 @@ export function makeClaudeAdapterV2(
                   streaming: false,
                 };
           const latestPlanKey = `${input.context.input.threadId}:${input.kind}`;
-          const previousPlan = (yield* Ref.get(latestPlanByKind)).get(latestPlanKey);
+          const previous = (yield* Ref.get(latestPlanByKind)).get(latestPlanKey);
+          const supersedePrevious =
+            previous !== undefined &&
+            previous.plan.id !== plan.id &&
+            previous.plan.status !== "completed";
           yield* Effect.all(
             [
-              ...(previousPlan === undefined ||
-              previousPlan.id === plan.id ||
-              previousPlan.status === "completed"
-                ? []
-                : [
+              ...(supersedePrevious
+                ? [
                     emitProviderEvent({
                       type: "plan.updated" as const,
                       driver: CLAUDE_PROVIDER,
-                      plan: { ...previousPlan, status: "superseded" as const },
+                      plan: { ...previous.plan, status: "superseded" as const },
                     }),
-                  ]),
+                    emitProviderEvent({
+                      type: "turn_item.updated" as const,
+                      driver: CLAUDE_PROVIDER,
+                      turnItem: { ...previous.turnItem, status: "cancelled", updatedAt },
+                    }),
+                  ]
+                : []),
               emitProviderEvent({ type: "node.updated", driver: CLAUDE_PROVIDER, node }),
               emitProviderEvent({ type: "plan.updated", driver: CLAUDE_PROVIDER, plan }),
               emitProviderEvent({ type: "turn_item.updated", driver: CLAUDE_PROVIDER, turnItem }),
@@ -4625,7 +4640,7 @@ export function makeClaudeAdapterV2(
           );
           yield* Ref.update(latestPlanByKind, (current) => {
             const updated = new Map(current);
-            updated.set(latestPlanKey, plan);
+            updated.set(latestPlanKey, { plan, turnItem });
             return updated;
           });
         });
