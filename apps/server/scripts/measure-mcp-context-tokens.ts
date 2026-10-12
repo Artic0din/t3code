@@ -75,11 +75,19 @@ function hasAnthropicApiKey(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
 }
 
+function ambientCodexHome(): string {
+  const fromEnv = process.env.CODEX_HOME?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  return NodePath.join(NodeOS.homedir(), ".codex");
+}
+
 function hasCodexCredentials(): boolean {
   if (process.env.OPENAI_API_KEY?.trim()) {
     return true;
   }
-  const authPath = NodePath.join(NodeOS.homedir(), ".codex", "auth.json");
+  const authPath = NodePath.join(ambientCodexHome(), "auth.json");
   try {
     const raw = NodeFS.readFileSync(authPath, "utf8");
     const parsed = JSON.parse(raw) as {
@@ -412,13 +420,12 @@ async function measureCodex(
       TRIVIAL_PROMPT,
     ];
     // Both sides use an isolated CODEX_HOME so the user's global MCP servers
-    // and developer instructions do not contaminate the delta.
+    // and developer instructions do not contaminate the delta. Seed auth from
+    // the ambient CODEX_HOME (or ~/.codex) captured before isolation.
+    const sourceAuthPath = NodePath.join(ambientCodexHome(), "auth.json");
     const isolatedHome = NodePath.join(tempDir, "codex-home");
     NodeFS.mkdirSync(isolatedHome, { recursive: true });
-    NodeFS.symlinkSync(
-      NodePath.join(NodeOS.homedir(), ".codex", "auth.json"),
-      NodePath.join(isolatedHome, "auth.json"),
-    );
+    NodeFS.symlinkSync(sourceAuthPath, NodePath.join(isolatedHome, "auth.json"));
     // Same developer_instructions on both sides so the live delta isolates MCP
     // tool schemas. CLI config cannot replace Codex's built-in collaboration
     // prompt the way the app-server path does; absolute totals are still not
@@ -490,7 +497,7 @@ if (!wantClaude && !wantCodex) {
   console.error(
     [
       "Live token measurement skipped: missing provider credentials.",
-      "Set ANTHROPIC_API_KEY for Claude, and/or ensure Codex credentials via ~/.codex/auth.json (ChatGPT tokens or API key) or OPENAI_API_KEY.",
+      "Set ANTHROPIC_API_KEY for Claude, and/or ensure Codex credentials via $CODEX_HOME/auth.json (or ~/.codex/auth.json) or OPENAI_API_KEY.",
       "Refusing to invent live token numbers.",
     ].join("\n"),
   );
