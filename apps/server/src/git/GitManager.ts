@@ -8,6 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -2514,22 +2515,29 @@ export const make = Effect.gen(function* () {
               result.exitCode === 0 ? hostedRepositoryKey(result.stdout.trim()) : null,
             ),
           );
-      // A recorded repository must match. A branch with no record stays reusable, including after
-      // a title change. A hosted remote URL is the record for a branch that exists only there.
+      // Local refs use branch config. Remote refs use that remote's URL. Missing either stays
+      // reusable so a title change still finds the branch.
+      const issueBranchPrefix = `issue/${issue.number}-`;
       const matchesIssueRepository = (branchName: string, remoteName?: string) =>
         Effect.gen(function* () {
           if (repositoryKey === null) return true;
+          if (remoteName !== undefined) {
+            const remoteKey = yield* hostedRemoteRepository(remoteName);
+            if (remoteKey === null) return true;
+            return remoteKey === repositoryKey;
+          }
           const recorded = yield* readIssueBranchRepository(branchName);
           if (recorded.length > 0) return recorded === repositoryKey;
-          if (remoteName === undefined) return true;
-          const remoteKey = yield* hostedRemoteRepository(remoteName);
-          if (remoteKey === null) return true;
-          return remoteKey === repositoryKey;
+          return true;
         });
+      const distinctIssueBranchName = (key: string) =>
+        crypto.digest("SHA-256", new TextEncoder().encode(key)).pipe(
+          Effect.map((digest) => `${issueBranchPrefix}${Hex.encode(digest).slice(0, 12)}`),
+          Effect.orDie,
+        );
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
-      const issueBranchPrefix = `issue/${issue.number}-`;
       // Filtered by the prefix, so the default page size can never hide the issue's branch.
       const { refs } = yield* gitCore.listRefs({
         cwd: input.cwd,
@@ -2605,12 +2613,16 @@ export const make = Effect.gen(function* () {
         localNameOf,
       );
       if (remoteRef) {
+        const remoteLocalName = localNameOf(remoteRef);
         return finish(
           yield* gitCore.createWorktree(
             {
               cwd: input.cwd,
               refName: remoteRef.name,
-              newRefName: localNameOf(remoteRef),
+              newRefName:
+                repositoryKey !== null && !(yield* matchesIssueRepository(remoteLocalName))
+                  ? yield* distinctIssueBranchName(repositoryKey)
+                  : remoteLocalName,
               path: null,
             },
             { submodules, worktreesDirectory },
@@ -2693,7 +2705,7 @@ export const make = Effect.gen(function* () {
             refName: startRef,
             newRefName:
               repositoryKey !== null && !(yield* matchesIssueRepository(branch))
-                ? `${issueBranchPrefix}${sanitizeBranchFragment(repositoryKey).replace(/[/.]/g, "-")}`
+                ? yield* distinctIssueBranchName(repositoryKey)
                 : branch,
             baseRefName: baseBranch,
             path: null,
