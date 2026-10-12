@@ -183,9 +183,10 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-`OrchestratorToolkit` defines sixteen tools. Five of them have no section
-below. They are `schedule_task`, `list_scheduled_tasks`,
-`update_scheduled_task`, `delete_scheduled_task`, and `request_secret`.
+The tool surface is `OrchestratorToolkit` in
+`apps/server/src/mcp/toolkits/orchestrator/tools.ts`. Sections below cover
+tools that need prose beyond their schema. Tools without a section still
+exist on that toolkit.
 
 ### `orchestrator_capabilities`
 
