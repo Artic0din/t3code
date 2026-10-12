@@ -1,14 +1,7 @@
-// Measure first-turn input tokens with and without the t3-code MCP server.
-// Static source baseline always prints. Live provider turns run only when
-// ANTHROPIC_API_KEY (Claude) and/or Codex credentials (~/.codex/auth.json) exist.
-//
-// Run from repo root:
-//   PATH="/opt/homebrew/opt/node@24/bin:$PATH" node --experimental-strip-types \
-//     apps/server/scripts/measure-mcp-context-tokens.ts
 import * as NodeCrypto from "node:crypto";
-import * as NodeFs from "node:fs";
+import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
-import * as NodeOs from "node:os";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 
@@ -76,9 +69,9 @@ function hasAnthropicApiKey(): boolean {
 }
 
 function hasCodexCredentials(): boolean {
-  const authPath = NodePath.join(NodeOs.homedir(), ".codex", "auth.json");
+  const authPath = NodePath.join(NodeOS.homedir(), ".codex", "auth.json");
   try {
-    const raw = NodeFs.readFileSync(authPath, "utf8");
+    const raw = NodeFS.readFileSync(authPath, "utf8");
     const parsed = JSON.parse(raw) as { tokens?: unknown };
     return parsed.tokens != null && typeof parsed.tokens === "object";
   } catch {
@@ -241,7 +234,7 @@ async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>):
 }
 
 function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
-  const tempDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-mcp-measure-claude-"));
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
   try {
     const args = [
       "-p",
@@ -256,7 +249,7 @@ function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow 
         throw new Error("Claude with-MCP measurement requires an MCP endpoint");
       }
       const mcpConfigPath = NodePath.join(tempDir, "mcp.json");
-      NodeFs.writeFileSync(
+      NodeFS.writeFileSync(
         mcpConfigPath,
         JSON.stringify({
           mcpServers: {
@@ -291,7 +284,7 @@ function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow 
       model: parsed.model,
     };
   } finally {
-    NodeFs.rmSync(tempDir, { recursive: true, force: true });
+    NodeFS.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -302,7 +295,7 @@ function redactSecrets(text: string): string {
 }
 
 function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
-  const tempDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-mcp-measure-codex-"));
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-codex-"));
   try {
     const args = [
       "exec",
@@ -315,9 +308,9 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
     // Both sides use an isolated CODEX_HOME so the user's global MCP servers
     // and developer instructions do not contaminate the delta.
     const isolatedHome = NodePath.join(tempDir, "codex-home");
-    NodeFs.mkdirSync(isolatedHome, { recursive: true });
-    NodeFs.symlinkSync(
-      NodePath.join(NodeOs.homedir(), ".codex", "auth.json"),
+    NodeFS.mkdirSync(isolatedHome, { recursive: true });
+    NodeFS.symlinkSync(
+      NodePath.join(NodeOS.homedir(), ".codex", "auth.json"),
       NodePath.join(isolatedHome, "auth.json"),
     );
     const configLines: string[] = [];
@@ -337,7 +330,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
         "",
       );
     }
-    NodeFs.writeFileSync(NodePath.join(isolatedHome, "config.toml"), configLines.join("\n"));
+    NodeFS.writeFileSync(NodePath.join(isolatedHome, "config.toml"), configLines.join("\n"));
     const result = runCommand("codex", args, {
       cwd: tempDir,
       env: { ...process.env, CODEX_HOME: isolatedHome },
@@ -362,7 +355,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
       );
     }
   } finally {
-    NodeFs.rmSync(tempDir, { recursive: true, force: true });
+    NodeFS.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 

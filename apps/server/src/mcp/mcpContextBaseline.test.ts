@@ -55,7 +55,6 @@ const decodeToolsListPayload = Schema.decodeUnknownEffect(ToolsListPayload);
 
 it("records the static t3-code MCP context baseline from source", () => {
   const baseline = measureT3CodeMcpContextBaseline();
-  // Pin the #26 source baseline so a toolkit or instruction change is visible.
   expect(baseline.toolCount).toBe(80);
   expect(baseline.toolNames).toHaveLength(80);
   expect(baseline.toolNames).toContain("delegate_task");
