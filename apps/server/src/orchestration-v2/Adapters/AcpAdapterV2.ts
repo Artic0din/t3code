@@ -3588,7 +3588,7 @@ export function makeAcpAdapterV2(
               nativeItemRef,
               parentItemId: null,
               ordinal,
-              status: completed ? "completed" : "running",
+              status: update.kind === "removed" ? "cancelled" : completed ? "completed" : "running",
               title: null,
               startedAt: planState.startedAt,
               completedAt: completed ? now : null,

@@ -310,6 +310,37 @@ describe("handoff budget", () => {
     assert.equal(selected.omittedItems, 1);
   });
 
+  it("omits a removed todo plan while keeping a completed live plan", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        {
+          ...todoTurn({
+            id: "item:todo-removed",
+            planId: "plan:removed",
+            ordinal: 1,
+            steps: [{ status: "pending", text: "OBSOLETE_STEP" }],
+          }),
+          status: "cancelled",
+        },
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:live",
+          ordinal: 2,
+          steps: [{ status: "completed", text: "LIVE_STEP" }],
+        }),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.notInclude(text, "OBSOLETE_STEP");
+    assert.include(text, "completed: LIVE_STEP");
+    assert.deepEqual(
+      selected.messages.map((entry) => entry.itemId),
+      [TurnItemId.make("item:todo-live")],
+    );
+  });
+
   it("keeps the newest distinct plan when older plans fill a tight budget", () => {
     const selected = selectHistory({
       messages: historyFrom([

@@ -148,6 +148,9 @@ function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list"
 export function historicalMessage(
   item: OrchestrationV2TurnItem,
 ): OrchestrationV2HistoricalMessage | null {
+  if ((item.type === "todo_list" || item.type === "proposed_plan") && item.status === "cancelled") {
+    return null;
+  }
   let text: string;
   switch (item.type) {
     case "user_message":
