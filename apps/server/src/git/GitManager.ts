@@ -2537,18 +2537,25 @@ export const make = Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
       const repositoryKey = issueRepositoryKey(issue.url);
+      // Fetch uses the first configured URL; `config --get` returns the last. Prefer the first
+      // `config --get-all` value over `remote get-url`, which rewrites through url.*.insteadOf.
       const hostedRemoteRepository = (remoteName: string) =>
         gitCore
           .execute({
             operation: "GitManager.prepareIssueThread.remoteRepository",
             cwd: input.cwd,
-            args: ["config", "--get", `remote.${remoteName}.url`],
+            args: ["config", "--get-all", `remote.${remoteName}.url`],
             allowNonZeroExit: true,
           })
           .pipe(
-            Effect.map((result) =>
-              result.exitCode === 0 ? hostedRepositoryKey(result.stdout.trim()) : null,
-            ),
+            Effect.map((result) => {
+              if (result.exitCode !== 0) return null;
+              const firstUrl = result.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .find((line) => line.length > 0);
+              return firstUrl === undefined ? null : hostedRepositoryKey(firstUrl);
+            }),
           );
       // A recorded repository must match. A branch with no record stays reusable, including after
       // a title change. A hosted remote URL is the record for a branch that exists only there.
@@ -2588,6 +2595,7 @@ export const make = Effect.gen(function* () {
             "fetch",
             "--quiet",
             "--no-tags",
+            "--prune",
             remote,
             `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
           ],
@@ -2601,13 +2609,6 @@ export const make = Effect.gen(function* () {
         fetchFailureDetail ??=
           issueFetchFailureDetail(fetched.stderr) ??
           `Could not fetch issue branches from ${remote}.`;
-      }
-      if (fetchFailureDetail !== undefined && !fetchedAnyRemote) {
-        return yield* new GitManagerError({
-          operation: "prepareIssueThread",
-          cwd: input.cwd,
-          detail: fetchFailureDetail,
-        });
       }
       // Filtered by the prefix, so the default page size can never hide the issue's branch.
       const { refs } = yield* gitCore.listRefs({
@@ -2635,6 +2636,13 @@ export const make = Effect.gen(function* () {
         });
       // The slug follows the title, so a renamed issue still finds its branch by number.
       const existing = yield* firstForThisIssue(localRefs, (ref) => ref.name);
+      if (existing === undefined && fetchFailureDetail !== undefined && !fetchedAnyRemote) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: fetchFailureDetail,
+        });
+      }
       if (existing?.worktreePath) {
         const existingPath = yield* canonicalizeExistingPath(existing.worktreePath);
         const cwdPath = yield* canonicalizeExistingPath(input.cwd);
