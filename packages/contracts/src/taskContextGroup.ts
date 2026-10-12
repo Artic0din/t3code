@@ -203,7 +203,7 @@ export const TaskContextTurnSnapshot = Schema.Struct({
 });
 export type TaskContextTurnSnapshot = typeof TaskContextTurnSnapshot.Type;
 
-export const TASK_CONTEXT_COMPOSER_KIND = "task-context" as const;
+const TASK_CONTEXT_COMPOSER_KIND = "task-context" as const;
 
 export function refuseClientPathResource(input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;

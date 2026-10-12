@@ -142,6 +142,8 @@ const make = Effect.gen(function* () {
       ),
     );
     yield* writeFileStringAtomically({ filePath: storePath, contents }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
       Effect.mapError((error) =>
         failure(
           "orchestration_error",
@@ -178,7 +180,7 @@ const make = Effect.gen(function* () {
 
   const refreshResource = Effect.fn("TaskContextGroupService.refreshResource")(function* (
     resource: TaskContextGroupResource,
-  ): Effect.Effect<TaskContextGroupResource, TaskContextGroupError> {
+  ) {
     switch (resource.kind) {
       case "note":
       case "url":
@@ -195,13 +197,17 @@ const make = Effect.gen(function* () {
             ),
           );
         if (shell === null || shell.deletedAt !== null) {
-          return { ...resource, title: resource.title ?? null, availability: "missing" };
+          return {
+            ...resource,
+            title: resource.title ?? null,
+            availability: "missing" as const,
+          } satisfies TaskContextGroupResource;
         }
         return {
           ...resource,
           title: shell.title,
-          availability: "available",
-        };
+          availability: "available" as const,
+        } satisfies TaskContextGroupResource;
       }
       case "project": {
         const project = yield* projects
@@ -215,13 +221,17 @@ const make = Effect.gen(function* () {
             ),
           );
         if (Option.isNone(project) || project.value.deletedAt !== null) {
-          return { ...resource, name: resource.name ?? null, availability: "missing" };
+          return {
+            ...resource,
+            name: resource.name ?? null,
+            availability: "missing" as const,
+          } satisfies TaskContextGroupResource;
         }
         return {
           ...resource,
           name: project.value.title,
-          availability: "available",
-        };
+          availability: "available" as const,
+        } satisfies TaskContextGroupResource;
       }
       default: {
         const unreachable: never = resource;
