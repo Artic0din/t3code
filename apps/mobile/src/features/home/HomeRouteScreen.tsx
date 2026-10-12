@@ -120,14 +120,15 @@ export function HomeRouteScreen() {
       })),
     [projectScopes],
   );
+  const selectedScope =
+    selectedProjectKey === null
+      ? null
+      : (projectScopes.find((scope) => scope.key === selectedProjectKey) ?? null);
   const attentionCounts = useMemo(() => {
-    const selectedScope =
-      selectedProjectKey === null
-        ? null
-        : (projectScopes.find((scope) => scope.key === selectedProjectKey) ?? null);
     return countAttentionViews(
       threads.filter((thread) => {
         if (thread.archivedAt !== null) return false;
+        if (thread.lineage.relationshipToParent === "subagent") return false;
         if (selectedEnvironmentId !== null && thread.environmentId !== selectedEnvironmentId) {
           return false;
         }
@@ -144,19 +145,22 @@ export function HomeRouteScreen() {
         return true;
       }),
     );
-  }, [projectScopes, selectedEnvironmentId, selectedProjectKey, threads]);
-  const unavailableEnvironmentCount =
-    attentionView === "all"
-      ? 0
-      : attentionEnvironmentsUnavailable(
-          environments
-            .filter(
-              (environment) =>
-                selectedEnvironmentId === null ||
-                environment.environmentId === selectedEnvironmentId,
-            )
-            .map((environment) => ({ phase: environment.connectionState })),
-        );
+  }, [selectedEnvironmentId, selectedScope, threads]);
+  const unavailableEnvironmentCount = attentionEnvironmentsUnavailable(
+    environments
+      .filter((environment) => {
+        if (selectedEnvironmentId !== null && environment.environmentId !== selectedEnvironmentId) {
+          return false;
+        }
+        if (selectedScope !== null) {
+          return selectedScope.projectRefs.some(
+            (project) => project.environmentId === environment.environmentId,
+          );
+        }
+        return true;
+      })
+      .map((environment) => ({ phase: environment.connectionState })),
+  );
   useEffect(() => {
     if (
       selectedProjectKey !== null &&

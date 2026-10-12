@@ -499,6 +499,7 @@ function ThreadNavigationSidebarPane(
       countAttentionViews(
         threads.filter((thread) => {
           if (thread.archivedAt !== null) return false;
+          if (thread.lineage.relationshipToParent === "subagent") return false;
           if (
             options.selectedEnvironmentId !== null &&
             thread.environmentId !== options.selectedEnvironmentId
@@ -520,18 +521,24 @@ function ThreadNavigationSidebarPane(
       ),
     [options.selectedEnvironmentId, selectedProjectScope, threads],
   );
-  const unavailableEnvironmentCount =
-    attentionView === "all"
-      ? 0
-      : attentionEnvironmentsUnavailable(
-          workspaceEnvironments
-            .filter(
-              (environment) =>
-                options.selectedEnvironmentId === null ||
-                environment.environmentId === options.selectedEnvironmentId,
-            )
-            .map((environment) => ({ phase: environment.connectionState })),
-        );
+  const unavailableEnvironmentCount = attentionEnvironmentsUnavailable(
+    workspaceEnvironments
+      .filter((environment) => {
+        if (
+          options.selectedEnvironmentId !== null &&
+          environment.environmentId !== options.selectedEnvironmentId
+        ) {
+          return false;
+        }
+        if (selectedProjectScope !== null) {
+          return selectedProjectScope.projectRefs.some(
+            (project) => project.environmentId === environment.environmentId,
+          );
+        }
+        return true;
+      })
+      .map((environment) => ({ phase: environment.connectionState })),
+  );
   const attentionEmpty = attentionInboxEmptyCopy({
     view: attentionView,
     unavailableEnvironmentCount,

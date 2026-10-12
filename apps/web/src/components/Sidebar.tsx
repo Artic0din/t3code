@@ -2861,7 +2861,6 @@ export default function Sidebar() {
     [scopedProjectKeys, threads],
   );
   const attentionUnavailableCount = useMemo(() => {
-    if (attentionView === "all") return 0;
     const connected = new Set(searchEnvironmentIds);
     const scopedEnvironmentIds =
       scopedProjectKeys === null
@@ -2882,7 +2881,7 @@ export default function Sidebar() {
           phase: connected.has(environment.environmentId) ? "connected" : "offline",
         })),
     );
-  }, [attentionView, environments, scopedProjectKeys, searchEnvironmentIds]);
+  }, [environments, scopedProjectKeys, searchEnvironmentIds]);
   const attentionEmpty =
     attentionView === "all"
       ? null
