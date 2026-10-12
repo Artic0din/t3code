@@ -183,7 +183,10 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The tool surface is `OrchestratorToolkit` in
+`apps/server/src/mcp/toolkits/orchestrator/tools.ts`. Sections below cover
+tools that need prose beyond their schema. Tools without a section still
+exist on that toolkit.
 
 ### `orchestrator_capabilities`
 

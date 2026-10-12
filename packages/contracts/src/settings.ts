@@ -1270,12 +1270,12 @@ export const ServerSettings = Schema.Struct({
   ),
   /**
    * Whether agents may drive the in-app preview browser. Turning this off
-   * withholds the MCP credential, so the `t3-code` server (and with it every
-   * `preview_*` tool) is never attached to a provider session, and the prompt
-   * text describing those tools is dropped along with them. The user's own
-   * browser panel is unaffected — this gates agent access only.
+   * skips only the `preview` capability. The MCP credential is still issued
+   * with `orchestration`, `worktree`, and `pull-requests`, so the `t3-code`
+   * server stays attached. The user's own browser panel is unaffected. This
+   * setting gates agent access only.
    *
-   * Server-authoritative rather than client-local: tool injection and prompt
+   * Server-authoritative rather than client-local. Tool injection and prompt
    * construction both happen on the server, and the answer must not differ
    * between a desktop window and a phone attached to the same server.
    */
