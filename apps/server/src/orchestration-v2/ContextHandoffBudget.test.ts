@@ -501,6 +501,26 @@ describe("handoff budget", () => {
     assert.include(native!.text, "y".repeat(40_000));
   });
 
+  it("keeps exactly forty printed lines when output ends with a newline", () => {
+    const lines = Array.from({ length: 40 }, (_, index) => `line-${index}`);
+    const output = `${lines.join("\n")}\n`;
+    const message = historicalMessage(
+      commandTurn({
+        id: "item:forty-lines",
+        ordinal: 1,
+        command: "printf lines",
+        output,
+        exitCode: 0,
+      }),
+    );
+    assert.ok(message);
+    assert.include(message.text, "line-0");
+    assert.include(message.text, "line-20");
+    assert.include(message.text, "line-39");
+    assert.notInclude(message.text, "output truncated");
+    assert.include(message.text, output);
+  });
+
   it("keeps the assistant reply when a fitting command log would take the budget", () => {
     const selected = selectHistory({
       messages: historyFrom([

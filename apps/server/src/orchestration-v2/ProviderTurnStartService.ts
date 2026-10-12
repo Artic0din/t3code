@@ -1041,7 +1041,11 @@ export const layer: Layer.Layer<
                 (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
               )
                 return sum;
-              const historical = historicalMessage(item, { truncateCommandOutput: false });
+              // Handoff-injected items were capped near 8 KiB. Count that
+              // injected size, not the unabridged durable log.
+              const historical = historicalMessage(item, {
+                truncateCommandOutput: deliveredItemIds.has(item.id),
+              });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

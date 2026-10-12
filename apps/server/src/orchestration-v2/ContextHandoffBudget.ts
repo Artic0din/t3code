@@ -150,8 +150,17 @@ function commandTruncationMarker(itemId: OrchestrationV2TurnItem["id"]): string 
   return `[output truncated; itemId=${itemId}; recover the full output with t3_thread_read using itemId and textOffset]`;
 }
 
+function commandOutputLines(output: string): string[] {
+  if (output.length === 0) return [];
+  const lines = output.split("\n");
+  // Providers usually end logs with a trailing newline. That final empty
+  // segment is a delimiter, not a printed line.
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
 function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id"]): string {
-  const lines = output.length === 0 ? [] : output.split("\n");
+  const lines = commandOutputLines(output);
   const hiddenLineCount = lines.length - COMMAND_OUTPUT_HEAD_LINES - COMMAND_OUTPUT_TAIL_LINES;
   const lineCapped =
     hiddenLineCount <= 0
