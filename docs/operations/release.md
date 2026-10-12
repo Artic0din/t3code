@@ -525,26 +525,32 @@ Optional passkey signing:
 - `CLERK_PASSKEY_RP_DOMAINS` repository variable: comma-separated RP-domain override. By default,
   the build derives the domain from the production Clerk publishable key.
 
-Checklist:
+Base signing checklist:
 
 1. Apple Developer account access:
    - Team has rights to create Developer ID certificates.
-2. Create an explicit App ID for `com.t3tools.t3code` and enable Associated Domains.
-3. Create a `Developer ID Application` certificate and a compatible provisioning profile for that
-   App ID with Associated Domains enabled.
-4. Export the certificate + private key as `.p12` from Keychain.
-5. Base64-encode the `.p12` and store as `CSC_LINK`.
-6. Base64-encode the provisioning profile and store it as `MACOS_PROVISIONING_PROFILE`.
-7. Store the `.p12` export password as `CSC_KEY_PASSWORD`, and set `APPLE_TEAM_ID` to the
-   10-character Apple Developer Team ID.
-8. In App Store Connect, create an API key (Team key).
-9. Add API key values:
+2. Create a `Developer ID Application` certificate.
+3. Export the certificate + private key as `.p12` from Keychain.
+4. Base64-encode the `.p12` and store as `CSC_LINK`.
+5. Store the `.p12` export password as `CSC_KEY_PASSWORD`.
+6. In App Store Connect, create an API key (Team key).
+7. Add API key values:
    - `APPLE_API_KEY`: contents of the downloaded `.p8`
    - `APPLE_API_KEY_ID`: Key ID
    - `APPLE_API_ISSUER`: Issuer ID
-10. Complete the Clerk Native API and AASA setup in [T3 Connect setup](./connect-setup.md#desktop-passkeys).
-11. Re-run a tag release and confirm macOS artifacts are signed/notarized and contain the expected
-    `com.apple.developer.associated-domains` entitlement.
+8. Re-run a tag release and confirm macOS artifacts are signed and notarized.
+
+Optional passkey checklist (only when enabling in-app passkeys):
+
+1. Create an explicit App ID for `com.t3tools.t3code` and enable Associated Domains.
+2. Create a provisioning profile for that App ID with Associated Domains enabled.
+3. Base64-encode the provisioning profile and store it as `MACOS_PROVISIONING_PROFILE`.
+4. Set `APPLE_TEAM_ID` to the 10-character Apple Developer Team ID.
+5. Optionally set `CLERK_PASSKEY_RP_DOMAINS` if the build should not derive the RP domain from the
+   production Clerk publishable key.
+6. Complete the Clerk Native API and AASA setup in [T3 Connect setup](./connect-setup.md#desktop-passkeys).
+7. Re-run a tag release and confirm artifacts contain
+   `com.apple.developer.associated-domains`.
 
 Notes:
 
@@ -598,7 +604,11 @@ Checklist:
 ## 5) Troubleshooting
 
 - macOS build unsigned when expected signed:
-  - Check all Apple secrets plus `APPLE_TEAM_ID` are populated and non-empty.
+  - Check the required Apple secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
+    `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`) are populated and non-empty.
+  - `APPLE_TEAM_ID` and `MACOS_PROVISIONING_PROFILE` are not required for signed notarized builds.
+- macOS signed but missing passkey entitlements:
+  - Confirm `MACOS_PROVISIONING_PROFILE` and `APPLE_TEAM_ID` are both set.
   - Confirm the provisioning profile belongs to `APPLE_TEAM_ID.com.t3tools.t3code` and includes
     Associated Domains.
 - Windows build unsigned when expected signed:
