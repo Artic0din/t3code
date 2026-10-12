@@ -521,6 +521,33 @@ describe("handoff budget", () => {
     assert.include(message.text, output);
   });
 
+  it("keeps a JSON-heavy command stub selectable under the default budget", () => {
+    const output = "\0".repeat(8_192);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:nul-command",
+          ordinal: 3,
+          command: "cat binary.blob",
+          output,
+          exitCode: 0,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: cat binary.blob");
+    assert.include(command?.text, "Exit code: 0");
+    assert.include(command?.text, "item:nul-command");
+    assert.isAtMost(Buffer.byteLength(JSON.stringify(command!.text)), 12_000);
+    assert.ok(selected.messages.some((entry) => entry.text.includes("ASSISTANT_REPLY")));
+  });
+
   it("keeps the assistant reply when a fitting command log would take the budget", () => {
     const selected = selectHistory({
       messages: historyFrom([

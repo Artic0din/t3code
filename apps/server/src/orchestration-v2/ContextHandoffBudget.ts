@@ -159,6 +159,10 @@ function commandOutputLines(output: string): string[] {
   return lines;
 }
 
+function jsonEncodedBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text));
+}
+
 function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id"]): string {
   const lines = commandOutputLines(output);
   const hiddenLineCount = lines.length - COMMAND_OUTPUT_HEAD_LINES - COMMAND_OUTPUT_TAIL_LINES;
@@ -170,17 +174,25 @@ function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id
           commandTruncationMarker(itemId),
           ...lines.slice(-COMMAND_OUTPUT_TAIL_LINES),
         ].join("\n");
-  if (Buffer.byteLength(lineCapped) <= COMMAND_OUTPUT_BYTE_CAP) return lineCapped;
+  // selectHistory charges JSON.stringify size. Cap against that, not raw UTF-8,
+  // so control bytes that expand when escaped still leave a selectable stub.
+  if (jsonEncodedBytes(lineCapped) <= COMMAND_OUTPUT_BYTE_CAP) return lineCapped;
   const marker = `\n${commandTruncationMarker(itemId)}\n`;
-  const markerBytes = Buffer.byteLength(marker);
-  const retain = Math.max(0, COMMAND_OUTPUT_BYTE_CAP - markerBytes);
-  const headBytes = Math.floor(retain / 2);
-  const tailBytes = retain - headBytes;
-  return Buffer.concat([
-    Buffer.from(lineCapped).subarray(0, headBytes),
-    Buffer.from(marker),
-    Buffer.from(lineCapped).subarray(Buffer.byteLength(lineCapped) - tailBytes),
-  ]).toString();
+  const source = Buffer.from(lineCapped);
+  let retain = Math.max(0, COMMAND_OUTPUT_BYTE_CAP - jsonEncodedBytes(marker));
+  while (retain >= 0) {
+    const headBytes = Math.floor(retain / 2);
+    const tailBytes = retain - headBytes;
+    const candidate = Buffer.concat([
+      source.subarray(0, headBytes),
+      Buffer.from(marker),
+      source.subarray(Math.max(0, source.length - tailBytes)),
+    ]).toString();
+    if (jsonEncodedBytes(candidate) <= COMMAND_OUTPUT_BYTE_CAP) return candidate;
+    if (retain === 0) break;
+    retain = Math.floor(retain / 2);
+  }
+  return marker.trim();
 }
 
 function commandOutputText(
