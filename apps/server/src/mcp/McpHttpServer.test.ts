@@ -1067,3 +1067,130 @@ it.effect("admits provider and OAuth client credentials and points only clients 
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+const listedTool = (name: string) =>
+  Tool.make(name, {
+    description: name,
+    success: Schema.Struct({ ok: Schema.Boolean }),
+    failure: OrchestratorMcpFailure,
+    failureMode: "return" as const,
+    dependencies: [McpInvocationContext.McpInvocationContext],
+  });
+
+const ListedToolkit = Toolkit.make(
+  listedTool("preview_status"),
+  listedTool("t3_preview_list"),
+  listedTool("device_list"),
+  listedTool("t3_thread_list"),
+);
+
+const listedOk = Effect.succeed({ ok: true });
+
+const listScope = (
+  capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId,
+  requestNamespace: "provider-session",
+  thread: {
+    threadId,
+    providerSessionId: "provider-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
+  capabilities: new Set(capabilities),
+  issuedAt: 1,
+});
+
+it.effect("lists preview and device tools only when the credential grants them", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const byToken = {
+        both: listScope(["preview", "device", "orchestration"]),
+        preview: listScope(["preview", "orchestration"]),
+        device: listScope(["device", "orchestration"]),
+        neither: listScope(["orchestration"]),
+      } as const;
+      const serverLayer = McpHttpServer.toolkitRegistration(
+        ListedToolkit,
+        McpToolAccess.toLayer(ListedToolkit, {
+          preview_status: McpToolAccess.reads(() => listedOk),
+          t3_preview_list: McpToolAccess.reads(() => listedOk),
+          device_list: McpToolAccess.reads(() => listedOk),
+          t3_thread_list: McpToolAccess.reads(() => listedOk),
+        }),
+      ).pipe(
+        Layer.provideMerge(McpHttpServer.layerMcpTransport),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (token) =>
+              Effect.succeed(token in byToken ? byToken[token as keyof typeof byToken] : undefined),
+          }),
+        ),
+      );
+      yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
+        Layer.build,
+      );
+      const httpClient = yield* HttpClient.HttpClient;
+      const listedNames = (token: keyof typeof byToken) =>
+        Effect.gen(function* () {
+          const headers = {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${token}`,
+          };
+          const initialize = yield* httpClient.post("/mcp", {
+            headers,
+            body: HttpBody.text(
+              `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+              "application/json",
+            ),
+          });
+          expect(initialize.status).toBe(200);
+          const listed = yield* httpClient.post("/mcp", {
+            headers: {
+              ...headers,
+              "mcp-session-id": initialize.headers["mcp-session-id"]!,
+              "mcp-protocol-version": "2025-06-18",
+            },
+            body: HttpBody.text(
+              `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
+              "application/json",
+            ),
+          });
+          expect(listed.status).toBe(200);
+          const body = yield* listed.json;
+          const tools =
+            typeof body === "object" &&
+            body !== null &&
+            "result" in body &&
+            typeof body.result === "object" &&
+            body.result !== null &&
+            "tools" in body.result &&
+            Array.isArray(body.result.tools)
+              ? body.result.tools.flatMap((tool) =>
+                  typeof tool === "object" &&
+                  tool !== null &&
+                  "name" in tool &&
+                  typeof tool.name === "string"
+                    ? [tool.name]
+                    : [],
+                )
+              : [];
+          return tools.toSorted();
+        });
+
+      expect(yield* listedNames("both")).toEqual([
+        "device_list",
+        "preview_status",
+        "t3_preview_list",
+        "t3_thread_list",
+      ]);
+      expect(yield* listedNames("preview")).toEqual([
+        "preview_status",
+        "t3_preview_list",
+        "t3_thread_list",
+      ]);
+      expect(yield* listedNames("device")).toEqual(["device_list", "t3_thread_list"]);
+      expect(yield* listedNames("neither")).toEqual(["t3_thread_list"]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
