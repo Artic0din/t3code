@@ -12,7 +12,7 @@ import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../provider/T3OrchestrationInstructions.ts";
 
 /** Toolkits registered for every credential session on `McpHttpServer.layer`. */
-export const T3_CODE_CREDENTIAL_SESSION_TOOLKITS = [
+const T3_CODE_CREDENTIAL_SESSION_TOOLKITS = [
   OrchestratorToolkit,
   PreviewToolkit,
   WorktreeToolkit,
@@ -33,18 +33,14 @@ export type T3CodeMcpContextBaseline = {
   readonly orchestrationInstructionsTrimmedBytes: number;
 };
 
-export function listT3CodeCredentialSessionToolNames(): string[] {
+export function measureT3CodeMcpContextBaseline(): T3CodeMcpContextBaseline {
   const names = new Set<string>();
   for (const toolkit of T3_CODE_CREDENTIAL_SESSION_TOOLKITS) {
     for (const tool of Object.values(toolkit.tools)) {
       names.add(tool.name);
     }
   }
-  return [...names].sort((left, right) => left.localeCompare(right));
-}
-
-export function measureT3CodeMcpContextBaseline(): T3CodeMcpContextBaseline {
-  const toolNames = listT3CodeCredentialSessionToolNames();
+  const toolNames = [...names].sort((left, right) => left.localeCompare(right));
   return {
     toolCount: toolNames.length,
     toolNames,
