@@ -4451,7 +4451,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-      if (String(command.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX)) {
+      // createdBy is overwritten to "user" on the WS path, so clients cannot forge this notice.
+      if (
+        command.createdBy === "system" &&
+        command.creationSource === "server" &&
+        String(command.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX)
+      ) {
         const run = latestExecutedRun(projection.runs);
         const now = yield* DateTime.now;
         const message: OrchestrationV2ConversationMessage = {
@@ -4524,6 +4529,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             commandType: command.type,
             cause: "This thread can no longer be resumed from that run.",
+          });
+        }
+      }
+      if (command.modelFallbackOfRunId !== undefined) {
+        const source = projection.runs.find((run) => run.id === command.modelFallbackOfRunId);
+        const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
+        if (
+          command.dispatchMode.type !== "start_immediately" ||
+          source === undefined ||
+          source.status !== "failed" ||
+          limited?.class !== "usage_limit" ||
+          latestExecutedRun(projection.runs)?.id !== source.id ||
+          projection.thread.archivedAt !== null ||
+          projection.thread.deletedAt !== null ||
+          projection.runtimeRequests.some((request) => request.status === "pending")
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This thread can no longer fall back from that run.",
           });
         }
       }
@@ -10686,7 +10711,11 @@ ${result.text}`;
     Effect.gen(function* () {
       const preferences = yield* serverSettings.getSettings;
       if (!preferences.modelFallback.enabled) {
-        return { switched: false, pauseDetail: null as string | null };
+        return {
+          switched: false,
+          dispatchPending: false,
+          pauseDetail: null as string | null,
+        };
       }
       const projection = yield* projectionStore
         .getThreadProjection(threadId)
@@ -10697,29 +10726,17 @@ ${result.text}`;
             ),
           ),
         );
-      if (projection === null) return { switched: false, pauseDetail: null };
+      if (projection === null) {
+        return { switched: false, dispatchPending: false, pauseDetail: null };
+      }
       const evidence = projection.runs.map((run) => {
         const failure = latestRootProviderFailure(run, projection.turnItems);
-        const assistantMessage = projection.messages.find(
-          (message) =>
-            message.runId === run.id &&
-            message.role === "assistant" &&
-            message.text.trim().length > 0,
-        );
-        const assistantItem = projection.turnItems.find(
-          (
-            item,
-          ): item is Extract<OrchestrationV2TurnItem, { readonly type: "assistant_message" }> =>
-            item.runId === run.id &&
-            item.type === "assistant_message" &&
-            item.text.trim().length > 0,
-        );
         return {
           modelSelection: run.modelSelection,
           ordinal: run.ordinal,
           completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
           failureClass: failure?.class ?? null,
-          message: failure?.message ?? assistantMessage?.text ?? assistantItem?.text ?? "",
+          message: failure?.message ?? "",
           code: failure?.code ?? null,
           resetAt: failure?.resetAt ?? null,
         };
@@ -10730,28 +10747,52 @@ ${result.text}`;
         const instance = preferences.providerInstances[instanceId];
         return instance === undefined || !resolveProviderInstanceEnabled(instance);
       });
-      const decide = (continuation: "supported" | "unsupported") =>
-        decideFromProjection({
-          enabled: true,
-          models: preferences.modelFallback.models,
-          unavailableInstanceIds,
-          continuation,
-          current: projection.thread.modelSelection,
-          runs: evidence,
-        });
-      let decision = decide("supported");
-      if (decision.type === "switch") {
+      const skipped: ModelSelection[] = [];
+      let decision = decideFromProjection({
+        enabled: true,
+        models: preferences.modelFallback.models,
+        unavailableInstanceIds,
+        continuation: "supported",
+        current: projection.thread.modelSelection,
+        runs: evidence,
+        skipped,
+      });
+      while (decision.type === "switch") {
         const planned = yield* providerSwitchService
           .plan({ projection, targetModelSelection: decision.to })
           .pipe(Effect.exit);
-        if (Exit.isFailure(planned)) decision = decide("unsupported");
+        if (Exit.isSuccess(planned)) break;
+        skipped.push(decision.to);
+        decision = decideFromProjection({
+          enabled: true,
+          models: preferences.modelFallback.models,
+          unavailableInstanceIds,
+          continuation: "supported",
+          current: projection.thread.modelSelection,
+          runs: evidence,
+          skipped,
+        });
+      }
+      if (decision.type === "pause" && decision.reason === "exhausted" && skipped.length > 0) {
+        const unsupported = decideFromProjection({
+          enabled: true,
+          models: preferences.modelFallback.models,
+          unavailableInstanceIds,
+          continuation: "unsupported",
+          current: projection.thread.modelSelection,
+          runs: evidence,
+          skipped: [],
+        });
+        if (unsupported.type === "pause") decision = unsupported;
       }
       const run = latestExecutedRun(projection.runs);
       if (run === null || decision.type === "leave-paused") {
-        return { switched: false, pauseDetail: null };
+        return { switched: false, dispatchPending: false, pauseDetail: null };
       }
       const command = modelFallbackCommand({ threadId, runId: run.id, decision });
-      if (command === null) return { switched: false, pauseDetail: null };
+      if (command === null) {
+        return { switched: false, dispatchPending: false, pauseDetail: null };
+      }
       const dispatched = yield* dispatchWithReceipt(command).pipe(
         Effect.as(true),
         Effect.catchCause((cause) =>
@@ -10762,6 +10803,7 @@ ${result.text}`;
       );
       return {
         switched: dispatched && decision.type === "switch",
+        dispatchPending: !dispatched && decision.type === "switch",
         pauseDetail: decision.type === "pause" ? decision.detail : null,
       };
     });
@@ -10770,7 +10812,7 @@ ${result.text}`;
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
       const fallback = yield* considerModelFallback(threadId);
-      if (fallback.switched) return;
+      if (fallback.switched || fallback.dispatchPending) return;
       // finalize writes the parent thread and startNextQueuedRun writes this
       // thread, so each takes its own thread's lock, sequentially and never
       // nested: dispatchDelegatedTaskRequest already writes child events
@@ -10848,7 +10890,7 @@ ${result.text}`;
               const parentThreadId = thread?.lineage.parentThreadId;
               if (parentThreadId === undefined || parentThreadId === null) return;
               const fallback = yield* considerModelFallback(threadId);
-              if (fallback.switched) return;
+              if (fallback.switched || fallback.dispatchPending) return;
               yield* threadDispatch.withLock(
                 parentThreadId,
                 finalizeAppOwnedSubagent(threadId, { pauseDetail: fallback.pauseDetail }),
@@ -10954,7 +10996,7 @@ ${result.text}`;
       const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
       if (parentThreadId === undefined) return;
       const fallback = yield* considerModelFallback(threadId);
-      if (fallback.switched) return;
+      if (fallback.switched || fallback.dispatchPending) return;
       yield* threadDispatch.withLock(
         parentThreadId,
         finalizeAppOwnedSubagent(threadId, {

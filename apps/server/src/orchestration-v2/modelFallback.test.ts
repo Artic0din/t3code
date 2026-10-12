@@ -3,12 +3,14 @@ import {
   CommandId,
   MessageId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   type ModelSelection,
 } from "@t3tools/contracts";
 
 import {
   MODEL_FALLBACK_NOTE_PREFIX,
+  decideFromProjection,
   modelFallbackCommand,
   planModelFallback,
   presentedDelegatedStatus,
@@ -51,7 +53,14 @@ describe("planModelFallback", () => {
   });
 
   it("selects the next configured model on an explicit quota signal", () => {
-    const decision = plan();
+    const decision = plan({
+      signal: {
+        class: "usage_limit",
+        message: "You've hit your weekly limit",
+        code: "seven_day_opus",
+        resetAt: "2026-10-20T00:00:00.000Z",
+      },
+    });
     assert.equal(decision.type, "switch");
     if (decision.type !== "switch") return;
     assert.deepEqual(decision.to, sonnet);
@@ -116,21 +125,23 @@ describe("planModelFallback", () => {
     );
   });
 
-  it("treats a completed quota message as exhaustion and ignores a generic API error", () => {
-    const quota = plan({
-      signal: {
-        class: null,
-        message: "The agent terminated early due to an API error and a usage limit.",
-        resetAt: null,
-      },
-      models: [gpt],
-    });
-    assert.equal(quota.type, "switch");
+  it("requires a structured usage_limit class for fallback planning", () => {
     assert.equal(
       plan({
         signal: {
           class: null,
-          message: "The agent terminated early due to an API error.",
+          message: "The agent terminated early due to an API error and a usage limit.",
+          resetAt: null,
+        },
+        models: [gpt],
+      }).type,
+      "leave-paused",
+    );
+    assert.equal(
+      plan({
+        signal: {
+          class: null,
+          message: "Implemented usage limit handling in the fallback module.",
           resetAt: null,
         },
       }).type,
@@ -166,6 +177,21 @@ describe("planModelFallback", () => {
     assert.include(again.detail, gpt.model);
   });
 
+  it("treats an unqualified structured usage limit as instance-scoped", () => {
+    const decision = plan({
+      models: [sonnet, gpt],
+      signal: {
+        class: "usage_limit",
+        message: "Provider stopped this request",
+        code: "usageLimitExceeded",
+        resetAt: null,
+      },
+    });
+    assert.equal(decision.type, "switch");
+    if (decision.type !== "switch") return;
+    assert.deepEqual(decision.to, gpt);
+  });
+
   it("skips another model on the same named quota and keeps a different family", () => {
     const decision = plan({
       models: [opusNext, sonnet, gpt],
@@ -182,12 +208,6 @@ describe("planModelFallback", () => {
   });
 
   it("skips an unavailable provider and pauses when continuation is unsafe", () => {
-    assert.equal(
-      plan({ unavailableInstanceIds: [claude], models: [sonnet, gpt] }).type === "switch"
-        ? plan({ unavailableInstanceIds: [claude], models: [sonnet, gpt] }).type
-        : "missing",
-      "switch",
-    );
     const skipped = plan({ unavailableInstanceIds: [claude] });
     assert.equal(skipped.type, "switch");
     if (skipped.type !== "switch") return;
@@ -201,6 +221,22 @@ describe("planModelFallback", () => {
     assert.include(paused.detail, opus.model);
   });
 
+  it("continues past a skipped target to a later model", () => {
+    const decision = plan({
+      models: [sonnet, gpt],
+      skipped: [sonnet],
+      signal: {
+        class: "usage_limit",
+        message: "You've hit your weekly limit",
+        code: "seven_day_opus",
+        resetAt: "2026-10-20T00:00:00.000Z",
+      },
+    });
+    assert.equal(decision.type, "switch");
+    if (decision.type !== "switch") return;
+    assert.deepEqual(decision.to, gpt);
+  });
+
   it("follows list order and stops when every entry was already tried", () => {
     const decision = plan({ models: [gpt, sonnet] });
     assert.equal(decision.type, "switch");
@@ -209,6 +245,39 @@ describe("planModelFallback", () => {
 
     const exhausted = plan({ models: [gpt, sonnet], tried: [opus, gpt, sonnet], current: sonnet });
     assert.equal(exhausted.type, "pause");
+  });
+});
+
+describe("decideFromProjection", () => {
+  it("ignores queued runs when building the quota chain", () => {
+    const decision = decideFromProjection({
+      enabled: true,
+      models: [sonnet, gpt],
+      unavailableInstanceIds: [],
+      continuation: "supported",
+      current: opus,
+      runs: [
+        {
+          modelSelection: opus,
+          ordinal: 1,
+          completedAt: "2026-10-12T12:00:00.000Z",
+          failureClass: "usage_limit",
+          message: "You've hit your weekly limit",
+          resetAt: "2026-10-20T00:00:00.000Z",
+        },
+        {
+          modelSelection: opus,
+          ordinal: 2,
+          completedAt: null,
+          failureClass: null,
+          message: "",
+          resetAt: null,
+        },
+      ],
+    });
+    assert.equal(decision.type, "switch");
+    if (decision.type !== "switch") return;
+    assert.deepEqual(decision.to, gpt);
   });
 });
 
@@ -262,7 +331,7 @@ describe("presentedDelegatedStatus", () => {
 
 describe("modelFallbackCommand", () => {
   const threadId = ThreadId.make("thread-1");
-  const runId = "run-1" as never;
+  const runId = RunId.make("run-1");
 
   it("dispatches the replacement model once and notes an unsafe pause", () => {
     const command = modelFallbackCommand({
@@ -272,10 +341,11 @@ describe("modelFallbackCommand", () => {
     });
     assert.equal(command?.type, "message.dispatch");
     if (command?.type !== "message.dispatch") return;
-    assert.deepEqual(command.modelSelection, sonnet);
+    assert.deepEqual(command.modelSelection, gpt);
+    assert.equal(command.modelFallbackOfRunId, runId);
     assert.equal(
       command.commandId,
-      CommandId.make(`model-fallback:${threadId}:${runId}:${sonnet.instanceId}:${sonnet.model}`),
+      CommandId.make(`model-fallback:${threadId}:${runId}:${gpt.instanceId}:${gpt.model}`),
     );
     assert.equal(command.dispatchMode.type, "start_immediately");
 
@@ -287,7 +357,9 @@ describe("modelFallbackCommand", () => {
     assert.equal(note?.type, "message.dispatch");
     if (note?.type !== "message.dispatch") return;
     assert.equal(String(note.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX), true);
+    assert.equal(note.createdBy, "system");
     assert.equal(note.modelSelection, undefined);
+    assert.equal(note.modelFallbackOfRunId, undefined);
     assert.equal(
       modelFallbackCommand({ threadId, runId, decision: plan({ enabled: false }) }),
       null,
@@ -299,7 +371,7 @@ describe("modelFallbackCommand", () => {
     if (command?.type !== "message.dispatch") return;
     assert.equal(
       command.messageId,
-      MessageId.make(`model-fallback:${threadId}:${runId}:${sonnet.instanceId}:${sonnet.model}`),
+      MessageId.make(`model-fallback:${threadId}:${runId}:${gpt.instanceId}:${gpt.model}`),
     );
   });
 });

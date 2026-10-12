@@ -2366,7 +2366,7 @@ export function GeneralSettingsPanel() {
         <SettingsRow
           serverScoped
           {...searchableSetting("model-fallback")}
-          description="After an explicit usage limit, continue on the next model in this list. One provider instance id and model per line. Authentication, network, and other provider errors stay on the current model."
+          description="After an explicit usage limit, continue on the next model in this list. One provider instance id and model per line. Kept per environment. Authentication, network, and other provider errors stay on the current model."
           settingKeys={["modelFallback"]}
           control={
             <div className="flex w-72 flex-col gap-2">
@@ -3664,6 +3664,7 @@ function parseModelFallbackList(value: string) {
     const instanceId = trimmed.slice(0, separator).trim();
     const model = trimmed.slice(separator + 1).trim();
     if (instanceId.length === 0 || model.length === 0) return [];
+    if (!Schema.is(ProviderInstanceId)(instanceId)) return [];
     return [{ instanceId: ProviderInstanceId.make(instanceId), model }];
   });
 }

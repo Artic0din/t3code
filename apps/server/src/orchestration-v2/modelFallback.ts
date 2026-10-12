@@ -56,11 +56,14 @@ function isAccountScopedQuota(signal: ModelFallbackSignal): boolean {
   return /\b(spend limit|monthly spend|account)\b/i.test(signal.message);
 }
 
-function explicitQuotaExhaustion(signal: ModelFallbackSignal | null): boolean {
+function explicitQuotaExhaustion(
+  signal: ModelFallbackSignal | null,
+  options?: { readonly allowMessageHeuristic?: boolean },
+): boolean {
   if (signal === null) return false;
   if (signal.class !== null && NON_QUOTA_CLASSES.has(signal.class)) return false;
   if (signal.class === "usage_limit") return true;
-  return QUOTA_PHRASE.test(signal.message);
+  return options?.allowMessageHeuristic === true && QUOTA_PHRASE.test(signal.message);
 }
 
 function namedWindows(message: string): QuotaWindow[] {
@@ -90,12 +93,17 @@ function quotaFamily(signal: ModelFallbackSignal): string | null {
   return code.match(/(opus|sonnet|haiku|gpt)/i)?.[1]?.toLowerCase() ?? null;
 }
 
+function isInstanceScopedQuota(signal: ModelFallbackSignal): boolean {
+  if (isAccountScopedQuota(signal)) return true;
+  return signal.class === "usage_limit" && quotaFamily(signal) === null;
+}
+
 function sharesExhaustedQuota(
   candidate: ModelSelection,
   current: ModelSelection,
   signal: ModelFallbackSignal,
 ): boolean {
-  if (isAccountScopedQuota(signal)) {
+  if (isInstanceScopedQuota(signal)) {
     return candidate.instanceId === current.instanceId;
   }
   const family = quotaFamily(signal);
@@ -149,7 +157,9 @@ function quotaChain(runs: readonly FallbackRunEvidence[]): {
   readonly tried: readonly ModelSelection[];
   readonly exhaustedInstanceIds: readonly string[];
 } {
-  const ordered = [...runs].sort((left, right) => (runIsLater(left, right) ? -1 : 1));
+  const ordered = [...runs]
+    .filter((run) => run.completedAt !== null)
+    .sort((left, right) => (runIsLater(left, right) ? -1 : 1));
   const tried: ModelSelection[] = [];
   const exhaustedInstanceIds: string[] = [];
   let signal: ModelFallbackSignal | null = null;
@@ -163,7 +173,9 @@ function quotaChain(runs: readonly FallbackRunEvidence[]): {
     if (!explicitQuotaExhaustion(nextSignal)) break;
     if (signal === null) signal = nextSignal;
     tried.push(run.modelSelection);
-    if (isAccountScopedQuota(nextSignal)) exhaustedInstanceIds.push(run.modelSelection.instanceId);
+    if (isInstanceScopedQuota(nextSignal)) {
+      exhaustedInstanceIds.push(run.modelSelection.instanceId);
+    }
   }
   return {
     signal,
@@ -180,6 +192,7 @@ export function decideFromProjection(input: {
   readonly continuation: "supported" | "unsupported";
   readonly current: ModelSelection;
   readonly runs: readonly FallbackRunEvidence[];
+  readonly skipped?: readonly ModelSelection[];
 }): ModelFallbackDecision {
   const chain = quotaChain(input.runs);
   return planModelFallback({
@@ -187,6 +200,7 @@ export function decideFromProjection(input: {
     models: input.models,
     current: chain.current ?? input.current,
     tried: chain.tried,
+    skipped: input.skipped ?? [],
     exhaustedInstanceIds: chain.exhaustedInstanceIds,
     continuation: input.continuation,
     unavailableInstanceIds: input.unavailableInstanceIds,
@@ -201,7 +215,9 @@ export function planModelFallback(input: {
   readonly tried: readonly ModelSelection[];
   readonly continuation: "supported" | "unsupported";
   readonly unavailableInstanceIds: readonly string[];
-  /** Instances whose account quota already stopped an earlier model in this chain. */
+  /** Models already rejected for planning/switch this attempt (target-specific). */
+  readonly skipped?: readonly ModelSelection[];
+  /** Instances whose account or generic instance quota already stopped an earlier model. */
   readonly exhaustedInstanceIds?: readonly string[];
   readonly signal: ModelFallbackSignal | null;
 }): ModelFallbackDecision {
@@ -214,11 +230,13 @@ export function planModelFallback(input: {
   const claim = claimedReset(signal, windows);
   const unavailable = new Set(input.unavailableInstanceIds);
   const exhaustedInstances = new Set(input.exhaustedInstanceIds ?? []);
+  const skipped = input.skipped ?? [];
   const next = input.models.find(
     (candidate) =>
       !unavailable.has(candidate.instanceId) &&
       !exhaustedInstances.has(candidate.instanceId) &&
       !input.tried.some((tried) => modelSelectionsEqual(tried, candidate)) &&
+      !skipped.some((entry) => modelSelectionsEqual(entry, candidate)) &&
       !sharesExhaustedQuota(candidate, input.current, signal),
   );
   if (next === undefined) {
@@ -266,11 +284,14 @@ export function presentedDelegatedStatus(input: {
     }
   })();
   if (terminal !== "completed") return terminal;
-  return explicitQuotaExhaustion({
-    class: input.failureClass,
-    message: input.resultText,
-    resetAt: null,
-  })
+  return explicitQuotaExhaustion(
+    {
+      class: input.failureClass,
+      message: input.resultText,
+      resetAt: null,
+    },
+    { allowMessageHeuristic: true },
+  )
     ? "failed"
     : "completed";
 }
@@ -295,7 +316,7 @@ export function modelFallbackCommand(input: {
     commandId: CommandId.make(identity),
     messageId: MessageId.make(identity),
     threadId: input.threadId,
-    ...(note ? {} : { modelSelection: input.decision.to }),
+    ...(note ? {} : { modelSelection: input.decision.to, modelFallbackOfRunId: input.runId }),
     text: input.decision.detail,
     attachments: [],
     dispatchMode: { type: "start_immediately" },

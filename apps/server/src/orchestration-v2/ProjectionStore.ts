@@ -3400,6 +3400,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT 1 FROM orchestration_v2_projection_runtime_requests request
                 WHERE request.thread_id = t.thread_id AND request.status = 'pending'
               )
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_turn_items notice
+                WHERE notice.thread_id = t.thread_id
+                  AND notice.run_id = r.run_id
+                  AND notice.type = 'system_notice'
+                  AND json_extract(notice.payload_json, '$.title') = 'Model fallback'
+              )
             ORDER BY t.thread_id
           `;
           const candidates: Array<ProjectionLimitRecoveryCandidate> = [];

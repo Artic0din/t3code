@@ -1,4 +1,4 @@
-import { resolveProviderInstanceEnabled, type OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { resolveProviderInstanceEnabled, type ModelSelection } from "@t3tools/contracts";
 import {
   latestExecutedRun,
   latestRootProviderFailure,
@@ -42,26 +42,12 @@ const makeSweep = Effect.gen(function* () {
       if (projection === null) continue;
       const evidence = projection.runs.map((run) => {
         const failure = latestRootProviderFailure(run, projection.turnItems);
-        const assistantMessage = projection.messages.find(
-          (message) =>
-            message.runId === run.id &&
-            message.role === "assistant" &&
-            message.text.trim().length > 0,
-        );
-        const assistantItem = projection.turnItems.find(
-          (
-            item,
-          ): item is Extract<OrchestrationV2TurnItem, { readonly type: "assistant_message" }> =>
-            item.runId === run.id &&
-            item.type === "assistant_message" &&
-            item.text.trim().length > 0,
-        );
         return {
           modelSelection: run.modelSelection,
           ordinal: run.ordinal,
           completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
           failureClass: failure?.class ?? null,
-          message: failure?.message ?? assistantMessage?.text ?? assistantItem?.text ?? "",
+          message: failure?.message ?? "",
           code: failure?.code ?? null,
           resetAt: failure?.resetAt ?? null,
         };
@@ -72,21 +58,43 @@ const makeSweep = Effect.gen(function* () {
         const instance = preferences.providerInstances[instanceId];
         return instance === undefined || !resolveProviderInstanceEnabled(instance);
       });
-      const decide = (continuation: "supported" | "unsupported") =>
-        decideFromProjection({
-          enabled: true,
-          models: preferences.modelFallback.models,
-          unavailableInstanceIds,
-          continuation,
-          current: projection.thread.modelSelection,
-          runs: evidence,
-        });
-      let decision = decide("supported");
-      if (decision.type === "switch") {
+      const skipped: ModelSelection[] = [];
+      let decision = decideFromProjection({
+        enabled: true,
+        models: preferences.modelFallback.models,
+        unavailableInstanceIds,
+        continuation: "supported",
+        current: projection.thread.modelSelection,
+        runs: evidence,
+        skipped,
+      });
+      while (decision.type === "switch") {
         const planned = yield* providerSwitch
           .plan({ projection, targetModelSelection: decision.to })
           .pipe(Effect.exit);
-        if (Exit.isFailure(planned)) decision = decide("unsupported");
+        if (Exit.isSuccess(planned)) break;
+        skipped.push(decision.to);
+        decision = decideFromProjection({
+          enabled: true,
+          models: preferences.modelFallback.models,
+          unavailableInstanceIds,
+          continuation: "supported",
+          current: projection.thread.modelSelection,
+          runs: evidence,
+          skipped,
+        });
+      }
+      if (decision.type === "pause" && decision.reason === "exhausted" && skipped.length > 0) {
+        const unsupported = decideFromProjection({
+          enabled: true,
+          models: preferences.modelFallback.models,
+          unavailableInstanceIds,
+          continuation: "unsupported",
+          current: projection.thread.modelSelection,
+          runs: evidence,
+          skipped: [],
+        });
+        if (unsupported.type === "pause") decision = unsupported;
       }
       const run = latestExecutedRun(projection.runs);
       if (run === null || decision.type === "leave-paused") continue;
