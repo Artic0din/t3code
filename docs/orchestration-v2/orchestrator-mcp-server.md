@@ -183,7 +183,9 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+`OrchestratorToolkit` defines sixteen tools. Five of them have no section
+below. They are `schedule_task`, `list_scheduled_tasks`,
+`update_scheduled_task`, `delete_scheduled_task`, and `request_secret`.
 
 ### `orchestrator_capabilities`
 
