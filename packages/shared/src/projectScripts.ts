@@ -95,7 +95,8 @@ export function projectScriptRunCwd(input: {
     return input.project.cwd;
   }
   const prefix = input.project.repositoryRelativePrefix;
-  if (prefix == null) return null;
+  if (prefix === null) return null;
+  if (prefix === undefined) return worktreePath;
   return joinRepositoryPrefix(worktreePath, prefix);
 }
 

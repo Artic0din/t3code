@@ -217,6 +217,14 @@ describe("projectScripts helpers", () => {
       }),
     ).toBeNull();
     expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+    expect(
       projectScriptActionTerminalId({
         scriptId: "dev",
         cwd: "/worktree/packages/app",

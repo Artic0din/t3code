@@ -752,7 +752,7 @@ function ThreadRouteContent(
       const cwd = projectScriptRunCwd({
         project: {
           cwd: selectedThreadProject.workspaceRoot,
-          repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix ?? null,
+          repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix,
         },
         worktreePath: preferredWorktreePath,
       });
@@ -768,12 +768,14 @@ function ThreadRouteContent(
         cwd,
         worktreePath: preferredWorktreePath,
       });
+      const sessionIsBusy = (session: (typeof terminalMenuSessions)[number]) =>
+        session.status === "starting" ||
+        (session.status === "running" && session.hasRunningSubprocess);
       const dedicatedTerminalBusy =
         preferredDedicatedTerminalId !== null &&
         terminalMenuSessions.some(
           (session) =>
-            session.terminalId === preferredDedicatedTerminalId &&
-            (session.status === "running" || session.status === "starting"),
+            session.terminalId === preferredDedicatedTerminalId && sessionIsBusy(session),
         );
       const dedicatedTerminalId =
         preferredDedicatedTerminalId !== null && !dedicatedTerminalBusy
@@ -783,11 +785,7 @@ function ThreadRouteContent(
         dedicatedTerminalId ??
         resolveProjectScriptTerminalId({
           existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-          hasRunningTerminal:
-            dedicatedTerminalBusy ||
-            terminalMenuSessions.some(
-              (session) => session.status === "running" || session.status === "starting",
-            ),
+          hasRunningTerminal: dedicatedTerminalBusy || terminalMenuSessions.some(sessionIsBusy),
         });
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
