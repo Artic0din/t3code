@@ -42,7 +42,7 @@ function canonicalIssueKey(key: ThreadIssueKey): ThreadIssueKey {
   };
 }
 
-export function canonicalThreadIssue(issue: ThreadLinkedIssue): ThreadLinkedIssue {
+function canonicalThreadIssue(issue: ThreadLinkedIssue): ThreadLinkedIssue {
   return {
     ...canonicalIssueKey(issue),
     url: issue.url.trim(),
@@ -123,7 +123,7 @@ export function issueAvailabilityFromFailure(detail: string): "missing" | "inacc
   return null;
 }
 
-export function linkedIssuesEqual(
+function linkedIssuesEqual(
   left: ThreadLinkedIssue | null | undefined,
   right: ThreadLinkedIssue | null | undefined,
 ): boolean {
