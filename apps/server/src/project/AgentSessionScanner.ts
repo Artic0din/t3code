@@ -607,11 +607,6 @@ function extractLineMeta(line: string): TranscriptLineMeta | null {
   return { cwd, sessionId, observedActivityAtMs };
 }
 
-/** Extract `cwd` from a session-meta record, tolerating the shapes each CLI writes. */
-function extractCwd(line: string): string | null {
-  return extractLineMeta(line)?.cwd ?? null;
-}
-
 function transcriptIdentity(filePath: string, stats: FileSystem.File.Info) {
   return {
     filePath,
@@ -694,11 +689,12 @@ export const make = Effect.gen(function* () {
       Effect.map((stats): AgentSessionHomeState =>
         stats.type === "Directory" ? "present" : "unreadable",
       ),
-      Effect.catchTag("PlatformError", (error) =>
-        Effect.succeed<AgentSessionHomeState>(
-          error.reason._tag === "NotFound" ? "missing" : "unreadable",
-        ),
-      ),
+      Effect.catchTags({
+        PlatformError: (error) =>
+          Effect.succeed<AgentSessionHomeState>(
+            error.reason._tag === "NotFound" ? "missing" : "unreadable",
+          ),
+      }),
     );
 
   /** Match directory aliases without assuming the host volume is case-insensitive. */
