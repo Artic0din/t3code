@@ -137,9 +137,18 @@ export function handoffBudget(input: {
   );
 }
 
-export function historicalMessage(
-  item: OrchestrationV2TurnItem,
-): OrchestrationV2HistoricalMessage | null {
+type HandoffHistoryMessage = OrchestrationV2HistoricalMessage & {
+  readonly planId?: string;
+};
+
+function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list" }>): string {
+  return [
+    ...item.steps.map((step) => `${step.status}: ${step.text}`),
+    ...(item.explanation ? [`Explanation: ${item.explanation}`] : []),
+  ].join("\n");
+}
+
+export function historicalMessage(item: OrchestrationV2TurnItem): HandoffHistoryMessage | null {
   let text: string;
   switch (item.type) {
     case "user_message":
@@ -165,9 +174,14 @@ export function historicalMessage(
     case "proposed_plan":
       text = item.markdown;
       break;
+    case "todo_list":
+      text = todoListText(item);
+      break;
     default:
       return null;
   }
+  const planId =
+    item.type === "todo_list" || item.type === "proposed_plan" ? item.planId : undefined;
   return {
     role: item.type === "user_message" ? "user" : "assistant",
     text,
@@ -177,7 +191,32 @@ export function historicalMessage(
     providerThreadId: item.providerThreadId,
     status: item.status,
     kind: item.type,
+    ...(planId === undefined ? {} : { planId }),
   };
+}
+
+function planReplayKey(message: HandoffHistoryMessage): string | null {
+  if (message.kind !== "todo_list" && message.kind !== "proposed_plan") return null;
+  return `${message.kind}:${message.planId ?? message.itemId}`;
+}
+
+function latestPlanStates(
+  messages: ReadonlyArray<HandoffHistoryMessage>,
+): ReadonlyArray<HandoffHistoryMessage> {
+  const latestIndex = new Map<string, number>();
+  messages.forEach((message, index) => {
+    const key = planReplayKey(message);
+    if (key !== null) latestIndex.set(key, index);
+  });
+  return messages.filter((message, index) => {
+    const key = planReplayKey(message);
+    return key === null || latestIndex.get(key) === index;
+  });
+}
+
+function withoutPlanId(message: HandoffHistoryMessage): OrchestrationV2HistoricalMessage {
+  const { planId: _planId, ...historical } = message;
+  return historical;
 }
 
 function renderHistoricalMessage(message: OrchestrationV2HistoricalMessage): string {
@@ -225,12 +264,12 @@ export function historyCost(
 }
 
 export function selectHistory(input: {
-  readonly messages: ReadonlyArray<OrchestrationV2HistoricalMessage>;
+  readonly messages: ReadonlyArray<HandoffHistoryMessage>;
   readonly coverage: string;
   readonly omittedItems?: number;
   readonly budget: number;
 }) {
-  const messages = input.messages;
+  const messages = latestPlanStates(input.messages);
   const selected = new Set<number>();
   const contextFor = (
     count: number,
@@ -253,14 +292,24 @@ export function selectHistory(input: {
     selected.add(index);
     remaining -= cost;
   };
-  // Prioritize the latest request and partial answer, then original constraints.
-  // Oversized items are omitted whole and remain available through thread_read.
-  tryAdd(messages.findLastIndex((message) => message.role === "user"));
-  tryAdd(messages.findLastIndex((message) => message.role === "assistant"));
-  tryAdd(messages.findIndex((message) => message.role === "user"));
+  const pinLatestRequest = () =>
+    tryAdd(messages.findLastIndex((message) => message.role === "user"));
+  const pinPlanStates = () => {
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index];
+      if (message !== undefined && planReplayKey(message) !== null) tryAdd(index);
+    }
+  };
+  const pinPartialAnswer = () =>
+    tryAdd(messages.findLastIndex((message) => message.role === "assistant"));
+  const pinOriginalRequest = () => tryAdd(messages.findIndex((message) => message.role === "user"));
+  pinLatestRequest();
+  pinPlanStates();
+  pinPartialAnswer();
+  pinOriginalRequest();
   for (let index = messages.length - 1; index >= 0; index--) tryAdd(index);
   return {
-    messages: messages.filter((_, index) => selected.has(index)),
+    messages: messages.filter((_, index) => selected.has(index)).map(withoutPlanId),
     omittedItemIds: messages
       .filter((_, index) => !selected.has(index))
       .map((message) => message.itemId),
