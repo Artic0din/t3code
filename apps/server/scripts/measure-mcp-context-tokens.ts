@@ -352,6 +352,7 @@ function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
         redactSecrets(
           `${detail}\nstderr: ${result.stderr}\nstdout: ${result.stdout.slice(0, 2000)}`,
         ),
+        { cause: error },
       );
     }
   } finally {
