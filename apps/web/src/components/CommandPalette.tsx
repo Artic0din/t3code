@@ -16,6 +16,8 @@ import {
   normalizePastedCloneUrl,
 } from "@t3tools/client-runtime/operations/projects";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
+import { applyPromptPresetToComposer } from "../lib/applyPromptPreset";
+import { readComposerThreadDraft } from "../composerDraftStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
@@ -55,6 +57,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   MessageSquareDashedIcon,
+  BookmarkIcon,
   LinkIcon,
   MessageSquareIcon,
   MonitorIcon,
@@ -1938,6 +1941,90 @@ function OpenCommandPaletteDialog(props: {
       run: () => startScratchThread(scratchTargetEnvironmentId),
     });
   }
+
+  const presetEnvironmentId =
+    activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
+  const presetServerConfig =
+    presetEnvironmentId === null ? null : (serverConfigs.get(presetEnvironmentId) ?? null);
+  const promptPresets = presetServerConfig?.settings.promptPresets ?? [];
+  const presetThreadRef =
+    routeDraftId ??
+    (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null);
+  const applyPalettePromptPreset = (
+    presetId: string,
+    disposition: "insert" | "replace",
+  ): Promise<void> => {
+    if (presetThreadRef === null || presetServerConfig === null) {
+      toastManager.add({
+        type: "error",
+        title: "Prompt preset",
+        description: "Open a composer before applying a preset.",
+      });
+      return Promise.resolve();
+    }
+    const result = applyPromptPresetToComposer({
+      threadRef: presetThreadRef,
+      draft: readComposerThreadDraft(presetThreadRef),
+      presets: promptPresets,
+      presetId,
+      disposition,
+      providers: presetServerConfig.providers,
+    });
+    if (!result.ok) {
+      toastManager.add({
+        type: "error",
+        title: "Prompt preset",
+        description: result.message,
+      });
+    }
+    return Promise.resolve();
+  };
+  actionItems.push({
+    kind: "submenu",
+    value: "action:prompt-presets",
+    searchTerms: ["prompt", "preset", "instructions", "model", "mode"],
+    title: "Prompt presets",
+    icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "composer.promptPreset",
+    addonIcon: <BookmarkIcon className={ADDON_ICON_CLASS} />,
+    groups: [
+      {
+        value: "prompt-presets",
+        label: "Prompt presets",
+        items:
+          promptPresets.length === 0
+            ? [
+                {
+                  kind: "action",
+                  value: "prompt-preset:empty",
+                  searchTerms: ["empty", "none"],
+                  title: "No prompt presets",
+                  icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+                  disabled: true,
+                  run: () => Promise.resolve(),
+                },
+              ]
+            : promptPresets.flatMap((preset) => [
+                {
+                  kind: "action" as const,
+                  value: `prompt-preset:apply:${preset.id}`,
+                  searchTerms: [preset.name, "apply", "insert"],
+                  title: `Apply ${preset.name}`,
+                  icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+                  run: () => applyPalettePromptPreset(preset.id, "insert"),
+                },
+                {
+                  kind: "action" as const,
+                  value: `prompt-preset:replace:${preset.id}`,
+                  searchTerms: [preset.name, "replace"],
+                  title: `Replace draft with ${preset.name}`,
+                  icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+                  run: () => applyPalettePromptPreset(preset.id, "replace"),
+                },
+              ]),
+      },
+    ],
+  });
 
   if (activeThreadReferenceCopyTarget !== null) {
     actionItems.push({

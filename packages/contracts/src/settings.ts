@@ -21,6 +21,7 @@ import {
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { PromptPresets } from "./promptPreset.ts";
 import { ProjectScript } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
@@ -1287,6 +1288,7 @@ export const ServerSettings = Schema.Struct({
   defaultProjectScripts: Schema.Array(ProjectScript).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  promptPresets: PromptPresets.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   projectScriptOverrides: Schema.Record(ProjectId, Schema.NullOr(Schema.Array(ProjectScript))).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1675,6 +1677,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   defaultAutoPull: Schema.optionalKey(Schema.Boolean),
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
+  promptPresets: Schema.optionalKey(PromptPresets),
   projectScriptOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Array(ProjectScript))),
   ),

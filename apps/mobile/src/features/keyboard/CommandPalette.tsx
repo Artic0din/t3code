@@ -4,6 +4,7 @@ import { THREAD_JUMP_KEYBINDING_COMMANDS } from "@t3tools/contracts";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -24,7 +25,12 @@ import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
-import { useProjects, useThreadShell, useThreadShells } from "../../state/entities";
+import {
+  useProjects,
+  useServerConfigs,
+  useThreadShell,
+  useThreadShells,
+} from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { useWorkspaceEnvironments } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -38,6 +44,16 @@ import {
 } from "./commandPaletteItems";
 import { parseActiveThreadPath, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 import { threadJumpIndex } from "./threadKeyboardShortcuts";
+import { applyPromptPresetToMobileDraft } from "./applyPromptPresetToDraft";
+import {
+  buildPromptPreset,
+  createPromptPresetId,
+  savePromptPreset,
+} from "@t3tools/client-runtime/promptPresets";
+import { getComposerDraftSnapshot } from "../../state/use-composer-drafts";
+import { mobileDraftToPromptPresetDraft } from "./applyPromptPresetToDraft";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
   "commandPalette",
@@ -145,6 +161,11 @@ export function CommandPalette(props: {
   const threads = useThreadShells();
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
+  const serverConfigs = useServerConfigs();
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "server settings update",
+    reportFailure: true,
+  });
   const environments = useWorkspaceEnvironments();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [query, setQuery] = useState("");
@@ -341,6 +362,87 @@ export function CommandPalette(props: {
           run: () => selectThread(thread),
         };
       });
+    const presetConfig = activeThread ? serverConfigs.get(activeThread.environmentId) : undefined;
+    const presetKey = activeThread
+      ? scopedThreadKey(activeThread.environmentId, activeThread.id)
+      : null;
+    const presets = presetConfig?.settings.promptPresets ?? [];
+    if (presetKey && presetConfig && activeThread) {
+      actions.push({
+        key: "savePromptPreset",
+        kind: "action",
+        title: "Save prompt preset",
+        searchTerms: ["preset", "prompt", "instructions"],
+        run: () => {
+          const draft = getComposerDraftSnapshot(presetKey);
+          const name = draft.text.trim().split("\n")[0]?.slice(0, 80) || "Preset";
+          const next = buildPromptPreset({
+            id: createPromptPresetId(),
+            name,
+            instructions: draft.text,
+            includeAgentSettings: true,
+            draft: mobileDraftToPromptPresetDraft(draft),
+          });
+          const saved = savePromptPreset(presets, next);
+          if (!saved.ok) {
+            Alert.alert("Prompt preset", saved.message);
+            return;
+          }
+          void updateSettings({
+            environmentId: activeThread.environmentId,
+            input: { patch: { promptPresets: [...saved.value] } },
+          });
+        },
+      });
+      if (presets.length === 0) {
+        actions.push({
+          key: "promptPresetsEmpty",
+          kind: "action",
+          title: "No prompt presets",
+          detail: "Save the current draft to create one.",
+          searchTerms: ["preset", "empty"],
+          run: () => {
+            Alert.alert("Prompt preset", "No prompt presets yet. Save the current draft first.");
+          },
+        });
+      }
+      for (const preset of presets) {
+        actions.push(
+          {
+            key: `prompt-preset-apply:${preset.id}`,
+            kind: "action",
+            title: `Apply ${preset.name}`,
+            searchTerms: [preset.name, "preset", "insert"],
+            run: () => {
+              const result = applyPromptPresetToMobileDraft({
+                draftKey: presetKey,
+                presets,
+                presetId: preset.id,
+                disposition: "insert",
+                providers: presetConfig.providers,
+              });
+              if (!result.ok) Alert.alert("Prompt preset", result.message);
+            },
+          },
+          {
+            key: `prompt-preset-replace:${preset.id}`,
+            kind: "action",
+            title: `Replace draft with ${preset.name}`,
+            searchTerms: [preset.name, "preset", "replace"],
+            run: () => {
+              const result = applyPromptPresetToMobileDraft({
+                draftKey: presetKey,
+                presets,
+                presetId: preset.id,
+                disposition: "replace",
+                providers: presetConfig.providers,
+              });
+              if (!result.ok) Alert.alert("Prompt preset", result.message);
+            },
+          },
+        );
+      }
+    }
     return [...actions, ...projectItems, ...threadItems];
   }, [
     activeThread,
@@ -350,7 +452,9 @@ export function CommandPalette(props: {
     runCommand,
     savedConnectionsById,
     selectThread,
+    serverConfigs,
     threads,
+    updateSettings,
   ]);
   const results = useMemo(
     () => filterCommandPaletteItems(items, query, matchedThreadKeys),

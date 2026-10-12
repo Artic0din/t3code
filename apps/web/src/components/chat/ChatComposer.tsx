@@ -126,6 +126,8 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { ComposerPromptPresetButton, ComposerPromptPresetMenu } from "./ComposerPromptPresetMenu";
+import { useComposerPromptPresets } from "./useComposerPromptPresets";
 import { useComposerMenuState } from "./useComposerMenuState";
 import { useComposerTriggerState } from "./useComposerTriggerState";
 import { useComposerFocusState } from "./useComposerFocusState";
@@ -1818,6 +1820,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   attachmentTargetKeyRef.current = attachmentTargetKey;
   const questionPreparations = useQuestionAttachmentPreparation((state) => state.counts);
   const prompt = composerDraft.prompt;
+  const promptPresets = useComposerPromptPresets({
+    environmentId,
+    threadRef: composerDraftTarget,
+    draft: composerDraft,
+    providers: providerStatuses,
+  });
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;
   // A question answer has no chips: its files live in the question draft and show in the
@@ -2402,6 +2410,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
+  const [isPromptPresetMenuOpen, setIsPromptPresetMenuOpen] = useState(false);
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -5063,12 +5072,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const toggleStashMenu = useCallback(() => {
+    setIsPromptPresetMenuOpen(false);
     if (isComposerCollapsedMobile) {
       expandMobileComposer();
       setIsStashMenuOpen(true);
       return;
     }
     setIsStashMenuOpen((open) => !open);
+  }, [expandMobileComposer, isComposerCollapsedMobile]);
+  const togglePromptPresetMenu = useCallback(() => {
+    setIsStashMenuOpen(false);
+    if (isComposerCollapsedMobile) {
+      expandMobileComposer();
+      setIsPromptPresetMenuOpen(true);
+      return;
+    }
+    setIsPromptPresetMenuOpen((open) => !open);
   }, [expandMobileComposer, isComposerCollapsedMobile]);
   const toggleTasksDrawer = useCallback(() => {
     setIsTasksDrawerOpen((open) => !open);
@@ -5597,6 +5616,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     if (composerMenuOpen) {
       setIsStashMenuOpen(false);
+      setIsPromptPresetMenuOpen(false);
     }
   }, [composerMenuOpen]);
   useEffect(() => {
@@ -5641,6 +5661,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     stashCurrentPrompt,
     isRevertingCheckpoint,
     terminalOpen,
+  ]);
+
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: getTerminalFocusOwner() !== null,
+          terminalOpen,
+          modelPickerOpen: isComposerModelPickerOpen,
+        },
+      });
+      if (command !== "composer.promptPreset") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (isCommandPaletteOpen() || isRevertingCheckpoint || isComposerApprovalState) return;
+      togglePromptPresetMenu();
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    isComposerApprovalState,
+    isComposerModelPickerOpen,
+    isRevertingCheckpoint,
+    keybindings,
+    terminalOpen,
+    togglePromptPresetMenu,
   ]);
 
   // ------------------------------------------------------------------
@@ -6777,6 +6823,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
         </ComposerBanner.Column>
         {!isComposerApprovalState ? (
+          <ComposerPromptPresetButton
+            count={promptPresets.presets.length}
+            menuOpen={isPromptPresetMenuOpen}
+            onToggleMenu={togglePromptPresetMenu}
+          />
+        ) : null}
+        {!isComposerApprovalState ? (
           <ComposerStashBadge
             count={stashQueue.length}
             menuOpen={isStashMenuOpen}
@@ -6875,6 +6928,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 isComposerResting && "py-2 sm:py-2",
               )}
             >
+              {isPromptPresetMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
+                <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
+                  <ComposerPromptPresetMenu
+                    presets={promptPresets.presets}
+                    draftText={prompt}
+                    error={promptPresets.error}
+                    onApply={promptPresets.apply}
+                    onSave={promptPresets.save}
+                    onDelete={promptPresets.remove}
+                    onClose={() => setIsPromptPresetMenuOpen(false)}
+                  />
+                </ComposerCommandMenuLayer>
+              )}
               {isStashMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerStashMenu

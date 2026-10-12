@@ -86,6 +86,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "appearance.cycle",
   "themeEditor.toggle",
   "composer.stash",
+  "composer.promptPreset",
   "composer.sendAlternate",
   "composer.sendBackground",
   "composer.sendAndNewThread",
