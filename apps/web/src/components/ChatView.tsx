@@ -1415,11 +1415,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     knownTerminalSessions.find((session) => session.target.terminalId === surface.activeTerminalId)
       ?.state.summary ?? null;
   const activeRecordedLaunch = scriptTerminalLaunches.get(
-    scriptTerminalLaunchKey(
-      threadRef.environmentId,
-      threadRef.threadId,
-      surface.activeTerminalId,
-    ),
+    scriptTerminalLaunchKey(threadRef.environmentId, threadRef.threadId, surface.activeTerminalId),
   );
   const worktreePath =
     activeSummary?.worktreePath ??
