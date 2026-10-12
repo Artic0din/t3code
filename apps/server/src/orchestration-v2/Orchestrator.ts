@@ -4457,8 +4457,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.creationSource === "server" &&
         String(command.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX)
       ) {
-        const run = latestExecutedRun(projection.runs);
+        if (command.modelFallbackOfRunId === undefined) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Model fallback notice is missing its source run.",
+          });
+        }
+        const source = projection.runs.find((run) => run.id === command.modelFallbackOfRunId);
+        const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
         const now = yield* DateTime.now;
+        if (
+          source === undefined ||
+          source.status !== "failed" ||
+          limited?.class !== "usage_limit" ||
+          latestExecutedRun(projection.runs)?.id !== source.id ||
+          projection.thread.archivedAt !== null ||
+          projection.thread.deletedAt !== null ||
+          (projection.thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This thread can no longer record a fallback notice for that run.",
+          });
+        }
+        const run = source;
         const message: OrchestrationV2ConversationMessage = {
           createdBy: "system",
           creationSource: "server",
@@ -4535,6 +4560,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (command.modelFallbackOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.modelFallbackOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
+        const now = yield* DateTime.now;
         if (
           command.dispatchMode.type !== "start_immediately" ||
           source === undefined ||
@@ -4543,7 +4569,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           latestExecutedRun(projection.runs)?.id !== source.id ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
-          projection.runtimeRequests.some((request) => request.status === "pending")
+          projection.runtimeRequests.some((request) => request.status === "pending") ||
+          (projection.thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
         ) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
@@ -10789,9 +10817,21 @@ ${result.text}`;
       if (run === null || decision.type === "leave-paused") {
         return { switched: false, dispatchPending: false, pauseDetail: null };
       }
-      const command = modelFallbackCommand({ threadId, runId: run.id, decision });
+      let attempt = 1;
+      let command = modelFallbackCommand({ threadId, runId: run.id, decision, attempt });
       if (command === null) {
         return { switched: false, dispatchPending: false, pauseDetail: null };
+      }
+      while (attempt < 8) {
+        const prior = yield* commandReceipts
+          .getByCommandId(command.commandId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isNone(prior) || prior.value.status !== "rejected") break;
+        attempt += 1;
+        command = modelFallbackCommand({ threadId, runId: run.id, decision, attempt });
+        if (command === null) {
+          return { switched: false, dispatchPending: false, pauseDetail: null };
+        }
       }
       const dispatched = yield* dispatchWithReceipt(command).pipe(
         Effect.as(true),
@@ -10811,7 +10851,11 @@ ${result.text}`;
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
-      const fallback = yield* considerModelFallback(threadId);
+      const terminalFailed =
+        stored.event.type === "run.updated" && stored.event.payload.status === "failed";
+      const fallback = terminalFailed
+        ? yield* considerModelFallback(threadId)
+        : { switched: false, dispatchPending: false, pauseDetail: null as string | null };
       if (fallback.switched || fallback.dispatchPending) return;
       // finalize writes the parent thread and startNextQueuedRun writes this
       // thread, so each takes its own thread's lock, sequentially and never

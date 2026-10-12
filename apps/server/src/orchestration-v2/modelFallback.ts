@@ -296,27 +296,39 @@ export function presentedDelegatedStatus(input: {
     : "completed";
 }
 
-function commandIdentity(threadId: ThreadId, runId: RunId, selection?: ModelSelection): string {
+function commandIdentity(
+  threadId: ThreadId,
+  runId: RunId,
+  selection: ModelSelection | undefined,
+  attempt: number,
+): string {
   const target = selection === undefined ? "" : `:${selection.instanceId}:${selection.model}`;
-  return `model-fallback:${threadId}:${runId}${target}`;
+  const retry = attempt <= 1 ? "" : `:attempt-${attempt}`;
+  return `model-fallback:${threadId}:${runId}${target}${retry}`;
 }
 
 export function modelFallbackCommand(input: {
   readonly threadId: ThreadId;
   readonly runId: RunId;
   readonly decision: ModelFallbackDecision;
+  /** Bump after a rejected receipt so a later sweep can retry the same target. */
+  readonly attempt?: number;
 }): OrchestrationV2Command | null {
   if (input.decision.type === "leave-paused") return null;
   const note = input.decision.type === "pause";
+  const attempt = input.attempt ?? 1;
   const identity = note
-    ? `${MODEL_FALLBACK_NOTE_PREFIX}${input.threadId}:${input.runId}`
-    : commandIdentity(input.threadId, input.runId, input.decision.to);
+    ? `${MODEL_FALLBACK_NOTE_PREFIX}${input.threadId}:${input.runId}${
+        attempt <= 1 ? "" : `:attempt-${attempt}`
+      }`
+    : commandIdentity(input.threadId, input.runId, input.decision.to, attempt);
   return {
     type: "message.dispatch",
     commandId: CommandId.make(identity),
     messageId: MessageId.make(identity),
     threadId: input.threadId,
-    ...(note ? {} : { modelSelection: input.decision.to, modelFallbackOfRunId: input.runId }),
+    modelFallbackOfRunId: input.runId,
+    ...(note ? {} : { modelSelection: input.decision.to }),
     text: input.decision.detail,
     attachments: [],
     dispatchMode: { type: "start_immediately" },

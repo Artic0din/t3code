@@ -359,11 +359,19 @@ describe("modelFallbackCommand", () => {
     assert.equal(String(note.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX), true);
     assert.equal(note.createdBy, "system");
     assert.equal(note.modelSelection, undefined);
-    assert.equal(note.modelFallbackOfRunId, undefined);
+    assert.equal(note.modelFallbackOfRunId, runId);
     assert.equal(
       modelFallbackCommand({ threadId, runId, decision: plan({ enabled: false }) }),
       null,
     );
+  });
+
+  it("uses a new identity after a rejected attempt", () => {
+    const first = modelFallbackCommand({ threadId, runId, decision: plan(), attempt: 1 });
+    const second = modelFallbackCommand({ threadId, runId, decision: plan(), attempt: 2 });
+    if (first?.type !== "message.dispatch" || second?.type !== "message.dispatch") return;
+    assert.notEqual(first.commandId, second.commandId);
+    assert.include(String(second.commandId), "attempt-2");
   });
 
   it("uses stable message ids", () => {

@@ -7,9 +7,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { decideFromProjection, modelFallbackCommand } from "./modelFallback.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSwitch from "./ProviderSwitchService.ts";
@@ -20,6 +22,7 @@ const makeSweep = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const settings = yield* ServerSettings.ServerSettingsService;
   const providerSwitch = yield* ProviderSwitch.ProviderSwitchServiceV2;
+  const commandReceipts = yield* CommandReceiptStoreV2;
   return Effect.fn("ModelFallbackWorker.sweep")(function* () {
     const preferences = yield* settings.getSettings;
     if (!preferences.modelFallback.enabled) return;
@@ -40,6 +43,12 @@ const makeSweep = Effect.gen(function* () {
         ),
       );
       if (projection === null) continue;
+      if (
+        projection.thread.snoozedUntil != null &&
+        DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now)
+      ) {
+        continue;
+      }
       const evidence = projection.runs.map((run) => {
         const failure = latestRootProviderFailure(run, projection.turnItems);
         return {
@@ -98,7 +107,28 @@ const makeSweep = Effect.gen(function* () {
       }
       const run = latestExecutedRun(projection.runs);
       if (run === null || decision.type === "leave-paused") continue;
-      const command = modelFallbackCommand({ threadId: candidate.id, runId: run.id, decision });
+      let attempt = 1;
+      let command = modelFallbackCommand({
+        threadId: candidate.id,
+        runId: run.id,
+        decision,
+        attempt,
+      });
+      if (command === null) continue;
+      while (attempt < 8) {
+        const prior = yield* commandReceipts
+          .getByCommandId(command.commandId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isNone(prior) || prior.value.status !== "rejected") break;
+        attempt += 1;
+        command = modelFallbackCommand({
+          threadId: candidate.id,
+          runId: run.id,
+          decision,
+          attempt,
+        });
+        if (command === null) break;
+      }
       if (command === null) continue;
       yield* threads.dispatch(command).pipe(
         Effect.catchCause((cause) =>

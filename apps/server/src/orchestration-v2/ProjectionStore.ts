@@ -3407,6 +3407,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND notice.type = 'system_notice'
                   AND json_extract(notice.payload_json, '$.title') = 'Model fallback'
               )
+              AND (
+                json_extract(t.payload_json, '$.snoozedUntil') IS NULL
+                OR julianday(json_extract(t.payload_json, '$.snoozedUntil'))
+                  <= julianday(${DateTime.formatIso(options.now)})
+              )
             ORDER BY t.thread_id
           `;
           const candidates: Array<ProjectionLimitRecoveryCandidate> = [];

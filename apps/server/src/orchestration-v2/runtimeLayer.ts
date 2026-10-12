@@ -343,6 +343,7 @@ export const layerProduction = Layer.mergeAll(
         ProjectionStore.layer,
         layerThreadManagementProvided,
         layerProviderSwitchServiceProvided,
+        layerCommandReceiptStoreProvided,
       ),
     ),
   ),
