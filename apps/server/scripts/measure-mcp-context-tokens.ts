@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - Host-side measurement script shells out to provider CLIs and prints JSON rows.
+// Run: PATH="/opt/homebrew/opt/node@24/bin:$PATH" node --experimental-strip-types apps/server/scripts/measure-mcp-context-tokens.ts
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
