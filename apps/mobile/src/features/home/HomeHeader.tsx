@@ -8,6 +8,11 @@ import {
   createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
+import {
+  ATTENTION_VIEWS,
+  attentionViewCountText,
+} from "@t3tools/client-runtime/state/thread-attention";
+
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
@@ -20,7 +25,9 @@ export function HomeHeader(props: HomeHeaderProps) {
   // the filter menu only carries the filters and the "customized" icon state
   // keys off those alone.
   const hasCustomListOptions =
-    props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
+    props.selectedEnvironmentId !== null ||
+    props.selectedProjectKey !== null ||
+    props.attentionView !== "all";
   const focusSearch = useCallback(() => {
     searchBarRef.current?.focus();
     return searchBarRef.current !== null;
@@ -114,6 +121,24 @@ export function HomeHeader(props: HomeHeaderProps) {
                   onPress={() => props.onEnvironmentChange(environment.environmentId)}
                 >
                   <NativeHeaderToolbar.Label>{environment.label}</NativeHeaderToolbar.Label>
+                </NativeHeaderToolbar.MenuAction>
+              ))}
+            </NativeHeaderToolbar.Menu>
+
+            <NativeHeaderToolbar.Menu title="Attention">
+              <NativeHeaderToolbar.Label>Attention</NativeHeaderToolbar.Label>
+              {ATTENTION_VIEWS.map((entry) => (
+                <NativeHeaderToolbar.MenuAction
+                  key={entry.id}
+                  isOn={props.attentionView === entry.id}
+                  onPress={() => props.onAttentionChange(entry.id)}
+                  subtitle={attentionViewCountText({
+                    view: entry.id,
+                    matchedCount: props.attentionCounts[entry.id],
+                    unavailableEnvironmentCount: props.unavailableEnvironmentCount,
+                  })}
+                >
+                  <NativeHeaderToolbar.Label>{entry.label}</NativeHeaderToolbar.Label>
                 </NativeHeaderToolbar.MenuAction>
               ))}
             </NativeHeaderToolbar.Menu>

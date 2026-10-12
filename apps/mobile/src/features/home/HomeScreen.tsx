@@ -7,6 +7,11 @@ import {
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import {
+  attentionInboxEmptyCopy,
+  filterThreadsByAttentionView,
+  type AttentionViewId,
+} from "@t3tools/client-runtime/state/thread-attention";
+import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
 } from "@t3tools/client-runtime/state/thread-search";
@@ -82,6 +87,8 @@ interface HomeScreenProps {
   readonly searchQuery: string;
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly selectedProjectKey: string | null;
+  readonly attentionView: AttentionViewId;
+  readonly unavailableEnvironmentCount: number;
   readonly projectSortOrder: HomeProjectSortOrder;
   readonly projectGroupingMode: SidebarProjectGroupingMode;
   readonly onSearchQueryChange: (query: string) => void;
@@ -548,7 +555,10 @@ export function HomeScreen(props: HomeScreenProps) {
     // "hidden from lists" meaning.
     return buildThreadListV2Items({
       pendingOrder,
-      threads: props.threads.filter((thread) => thread.archivedAt === null),
+      threads: filterThreadsByAttentionView(
+        props.threads.filter((thread) => thread.archivedAt === null),
+        props.attentionView,
+      ),
       environmentId: props.selectedEnvironmentId,
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
@@ -577,6 +587,7 @@ export function HomeScreen(props: HomeScreenProps) {
     settledVisibleCount,
     settlementEnvironmentIds,
     snoozeEnvironmentIds,
+    props.attentionView,
     props.searchQuery,
     props.selectedEnvironmentId,
     props.threads,
@@ -865,6 +876,15 @@ export function HomeScreen(props: HomeScreenProps) {
     catalogState: props.catalogState,
     projectCount: props.projects.length,
   });
+  const attentionEmpty = attentionInboxEmptyCopy({
+    view: props.attentionView,
+    unavailableEnvironmentCount: props.unavailableEnvironmentCount,
+  });
+  const showAttentionEmpty =
+    attentionEmpty !== null &&
+    !props.catalogState.isLoadingConnections &&
+    props.catalogState.hasConnections &&
+    props.catalogState.hasLoadedShellSnapshot;
 
   if (!hasAnyThreads) {
     return (
@@ -881,8 +901,10 @@ export function HomeScreen(props: HomeScreenProps) {
         >
           <View className="w-full max-w-[430px]">
             <EmptyState
-              title={emptyState.title}
-              detail={emptyState.detail}
+              title={showAttentionEmpty && attentionEmpty ? attentionEmpty.title : emptyState.title}
+              detail={
+                showAttentionEmpty && attentionEmpty ? attentionEmpty.detail : emptyState.detail
+              }
               actionLabel={!props.catalogState.hasReadyEnvironment ? "Add environment" : undefined}
               onAction={!props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined}
               action={
@@ -922,6 +944,12 @@ export function HomeScreen(props: HomeScreenProps) {
       <EmptyState
         title="No results"
         detail={`No threads matching "${props.searchQuery}".`}
+        variant={Platform.OS === "android" ? "plain" : undefined}
+      />
+    ) : showAttentionEmpty && attentionEmpty ? (
+      <EmptyState
+        title={attentionEmpty.title}
+        detail={attentionEmpty.detail}
         variant={Platform.OS === "android" ? "plain" : undefined}
       />
     ) : v2ScopedProjectGroup !== null ? (

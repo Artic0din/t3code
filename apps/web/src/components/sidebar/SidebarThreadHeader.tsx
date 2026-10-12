@@ -31,6 +31,8 @@ export interface SidebarThreadHeaderProps {
   hasProjects: boolean;
   /** The project scope combobox, rendered as the first icon of the group. */
   projectScope: ReactNode;
+  /** Attention view menu. All leaves the inbox list unchanged. */
+  attentionMenu: ReactNode;
   onNewProject: () => void;
   /** Receives the click so Shift+click can skip the project picker. */
   onNewThread: (event: ReactMouseEvent) => void;
@@ -53,6 +55,7 @@ export function SidebarThreadHeader({
   searchFieldRef,
   hasProjects,
   projectScope,
+  attentionMenu,
   onNewProject,
   onNewThread,
   newThreadDisabled,
@@ -124,6 +127,7 @@ export function SidebarThreadHeader({
           hover states, and a background well reads far louder on themed
           palettes than on the base light and dark ones. */}
       <div className="flex shrink-0 items-center">
+        {attentionMenu}
         {hasProjects ? (
           <>
             {projectScope}
@@ -167,6 +171,7 @@ export function SidebarHeaderIconButton({
   tooltip = label,
   className,
   children,
+  pressed = false,
   ...rest
 }: {
   /** Accessible name; also the tooltip unless `tooltip` says more. */
@@ -174,6 +179,7 @@ export function SidebarHeaderIconButton({
   tooltip?: ReactNode;
   className?: string | undefined;
   children?: ReactNode;
+  pressed?: boolean;
 } & Omit<
   ComponentProps<typeof SidebarMenuButton>,
   "children" | "className" | "tooltip" | "isActive" | "aria-label"
@@ -186,6 +192,7 @@ export function SidebarHeaderIconButton({
             size="icon"
             type="button"
             aria-label={label}
+            isActive={pressed}
             {...rest}
             className={cn("relative size-7 shrink-0", className)}
           />

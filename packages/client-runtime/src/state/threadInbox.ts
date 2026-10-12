@@ -4,7 +4,7 @@ import { toSortableTimestamp } from "./threadSort.ts";
 // Working section beta, shared so web and mobile fold and order the inbox the
 // same way. Off by default; each client owns its own toggle.
 
-type WorkingThreadInput = Pick<
+export type WorkingThreadInput = Pick<
   EnvironmentThreadShell,
   | "hasActionableProposedPlan"
   | "hasPendingApprovals"
@@ -14,13 +14,8 @@ type WorkingThreadInput = Pick<
   | "runtime"
 >;
 
-/** Threads busy with work that does not need the user fold into the Working
-    section: a running run, or one stopped with background work that will wake
-    it. Approvals, questions, plan prompts, and failures stay in the inbox. */
-export function isThreadWorking(thread: WorkingThreadInput): boolean {
-  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
-  if (!threadRuntimeIsActive(thread.runtime) && thread.runtime?.status !== "idle") return false;
-  // A plan prompt outranks lingering background work: the user has to act on it.
+/** A settled plan prompt is the user's turn. A plan still running is not. */
+export function threadPlanReviewIsWaiting(thread: WorkingThreadInput): boolean {
   const run = thread.latestRun;
   const runSettled =
     run !== null &&
@@ -30,7 +25,16 @@ export function isThreadWorking(thread: WorkingThreadInput): boolean {
     run.status !== "running" &&
     run.status !== "waiting" &&
     thread.runtime?.activeRunId !== run.runId;
-  return !(thread.interactionMode === "plan" && thread.hasActionableProposedPlan && runSettled);
+  return thread.interactionMode === "plan" && thread.hasActionableProposedPlan && runSettled;
+}
+
+/** Threads busy with work that does not need the user fold into the Working
+    section: a running run, or one stopped with background work that will wake
+    it. Approvals, questions, plan prompts, and failures stay in the inbox. */
+export function isThreadWorking(thread: WorkingThreadInput): boolean {
+  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
+  if (!threadRuntimeIsActive(thread.runtime) && thread.runtime?.status !== "idle") return false;
+  return !threadPlanReviewIsWaiting(thread);
 }
 
 type InboxThreadInput = Pick<

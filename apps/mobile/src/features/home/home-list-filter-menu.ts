@@ -1,3 +1,9 @@
+import {
+  ATTENTION_VIEWS,
+  attentionViewCountText,
+  type AttentionViewCounts,
+  type AttentionViewId,
+} from "@t3tools/client-runtime/state/thread-attention";
 import type { EnvironmentId } from "@t3tools/contracts";
 
 export interface HomeListFilterMenuEnvironment {
@@ -34,10 +40,30 @@ export function buildHomeListFilterMenu(props: {
   readonly projects: ReadonlyArray<HomeListFilterMenuProject>;
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly selectedProjectKey: string | null;
+  readonly attentionView: AttentionViewId;
+  readonly attentionCounts: AttentionViewCounts;
+  readonly unavailableEnvironmentCount: number;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  readonly onAttentionChange: (view: AttentionViewId) => void;
 }): HomeListFilterMenu {
   const items: Array<HomeListFilterMenuAction | HomeListFilterMenuSubmenu> = [];
+
+  items.push({
+    type: "submenu",
+    title: "Attention",
+    items: ATTENTION_VIEWS.map((entry) => ({
+      type: "action" as const,
+      title: entry.label,
+      subtitle: attentionViewCountText({
+        view: entry.id,
+        matchedCount: props.attentionCounts[entry.id],
+        unavailableEnvironmentCount: props.unavailableEnvironmentCount,
+      }),
+      state: props.attentionView === entry.id ? ("on" as const) : ("off" as const),
+      onPress: () => props.onAttentionChange(entry.id),
+    })),
+  });
 
   items.push({
     type: "submenu",

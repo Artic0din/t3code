@@ -5,6 +5,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
 
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import {
+  attentionEnvironmentsUnavailable,
+  countAttentionViews,
+} from "@t3tools/client-runtime/state/thread-attention";
 
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects, useNavigationThreadShells } from "../../state/entities";
@@ -22,6 +26,7 @@ import { useHomeListOptions } from "./home-list-options";
 import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
+import { useSavedAttentionView } from "../threads/use-saved-attention-view";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionAwareBrandHeaderOptions } from "./WorkspaceConnectionTitle";
 
@@ -95,19 +100,66 @@ export function HomeRouteScreen() {
   );
   const { options: listOptions, setSelectedEnvironmentId } =
     useHomeListOptions(availableEnvironmentIds);
+  const { attentionView, setAttentionView } = useSavedAttentionView();
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
-  const projectFilterOptions = useMemo(
+  const projectScopes = useMemo(
     () =>
       buildHomeProjectScopes({
         projects,
         environmentId: selectedEnvironmentId,
         projectGroupingMode: listOptions.projectGroupingMode,
-      }).map((scope) => ({
+      }),
+    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+  );
+  const projectFilterOptions = useMemo(
+    () =>
+      projectScopes.map((scope) => ({
         key: scope.key,
         label: scope.title,
       })),
-    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+    [projectScopes],
+  );
+  const selectedScope =
+    selectedProjectKey === null
+      ? null
+      : (projectScopes.find((scope) => scope.key === selectedProjectKey) ?? null);
+  const attentionCounts = useMemo(() => {
+    return countAttentionViews(
+      threads.filter((thread) => {
+        if (thread.archivedAt !== null) return false;
+        if (thread.lineage.relationshipToParent === "subagent") return false;
+        if (selectedEnvironmentId !== null && thread.environmentId !== selectedEnvironmentId) {
+          return false;
+        }
+        if (
+          selectedScope !== null &&
+          !selectedScope.projectRefs.some(
+            (project) =>
+              project.environmentId === thread.environmentId &&
+              project.projectId === thread.projectId,
+          )
+        ) {
+          return false;
+        }
+        return true;
+      }),
+    );
+  }, [selectedEnvironmentId, selectedScope, threads]);
+  const unavailableEnvironmentCount = attentionEnvironmentsUnavailable(
+    environments
+      .filter((environment) => {
+        if (selectedEnvironmentId !== null && environment.environmentId !== selectedEnvironmentId) {
+          return false;
+        }
+        if (selectedScope !== null) {
+          return selectedScope.projectRefs.some(
+            (project) => project.environmentId === environment.environmentId,
+          );
+        }
+        return true;
+      })
+      .map((environment) => ({ phase: environment.connectionState })),
   );
   useEffect(() => {
     if (
@@ -188,8 +240,12 @@ export function HomeRouteScreen() {
           searchQuery={searchQuery}
           selectedEnvironmentId={selectedEnvironmentId}
           selectedProjectKey={selectedProjectKey}
+          attentionView={attentionView}
+          attentionCounts={attentionCounts}
+          unavailableEnvironmentCount={unavailableEnvironmentCount}
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
+          onAttentionChange={setAttentionView}
           onOpenEnvironments={() =>
             navigation.navigate("SettingsSheet", {
               screen: "SettingsContent",
@@ -259,6 +315,8 @@ export function HomeRouteScreen() {
           searchQuery={searchQuery}
           selectedEnvironmentId={selectedEnvironmentId}
           selectedProjectKey={selectedProjectKey}
+          attentionView={attentionView}
+          unavailableEnvironmentCount={unavailableEnvironmentCount}
           threads={threads}
         />
       </>
