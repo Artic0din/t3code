@@ -31,6 +31,13 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  attentionEnvironmentsUnavailable,
+  attentionInboxEmptyCopy,
+  countAttentionViews,
+  filterThreadsByAttentionView,
+  type AttentionViewId,
+} from "@t3tools/client-runtime/state/thread-attention";
 import { createInboxReturnTracker } from "@t3tools/client-runtime/state/thread-inbox";
 import {
   resolveSettledThreadTimestamp,
@@ -265,6 +272,7 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarAttentionMenu } from "./sidebar/SidebarAttentionMenu";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -2334,6 +2342,11 @@ export default function Sidebar() {
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
+  const [attentionView, setAttentionView] = useLocalStorage(
+    "t3code.sidebarAttentionView",
+    "all" as AttentionViewId,
+    Schema.Literals(["all", "needs-approval", "failed", "waiting-for-me"]),
+  );
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const {
     settleThread,
@@ -2707,7 +2720,10 @@ export default function Sidebar() {
     const preciseNow = new Date().toISOString();
     // Subagent child threads live in the parent's Agents surface, not the
     // sidebar roster (v2 models them as real threads with lineage).
-    const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+    const visible = filterThreadsByAttentionView(
+      filterSidebarV2VisibleThreads(threads, scopedProjectKeys),
+      attentionView,
+    );
     inboxReturns.observe(workingShelfEnabled ? threads : null);
     const pinned: EnvironmentThreadShell[] = [];
     const active: EnvironmentThreadShell[] = [];
@@ -2808,6 +2824,7 @@ export default function Sidebar() {
       snoozeNow: preciseNow,
     };
   }, [
+    attentionView,
     nowMinute,
     optimisticDrop,
     scopedProjectKeys,
@@ -2832,6 +2849,40 @@ export default function Sidebar() {
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads, workingThreads],
   );
   const searchEnvironmentIds = useConnectedEnvironmentIds();
+  const attentionCounts = useMemo(
+    () => countAttentionViews(filterSidebarV2VisibleThreads(threads, scopedProjectKeys)),
+    [scopedProjectKeys, threads],
+  );
+  const attentionUnavailableCount = useMemo(() => {
+    if (attentionView === "all") return 0;
+    const connected = new Set(searchEnvironmentIds);
+    const scopedEnvironmentIds =
+      scopedProjectKeys === null
+        ? null
+        : new Set(
+            [...scopedProjectKeys].flatMap((key) => {
+              const split = key.indexOf(":");
+              return split > 0 ? [key.slice(0, split)] : [];
+            }),
+          );
+    return attentionEnvironmentsUnavailable(
+      environments
+        .filter(
+          (environment) =>
+            scopedEnvironmentIds === null || scopedEnvironmentIds.has(environment.environmentId),
+        )
+        .map((environment) => ({
+          phase: connected.has(environment.environmentId) ? "connected" : "offline",
+        })),
+    );
+  }, [attentionView, environments, scopedProjectKeys, searchEnvironmentIds]);
+  const attentionEmpty =
+    attentionView === "all"
+      ? null
+      : attentionInboxEmptyCopy({
+          view: attentionView,
+          unavailableEnvironmentCount: attentionUnavailableCount,
+        });
   // useThreadSearch owns the debounce and the two-character floor.
   const threadSearch = useThreadSearch(searchEnvironmentIds, threadSearchQuery);
   const threadSearchMatchByKey = useMemo(
@@ -4970,6 +5021,14 @@ export default function Sidebar() {
                   </ComboboxPopup>
                 </Combobox>
               }
+              attentionMenu={
+                <SidebarAttentionMenu
+                  view={attentionView}
+                  counts={attentionCounts}
+                  unavailableEnvironmentCount={attentionUnavailableCount}
+                  onChange={setAttentionView}
+                />
+              }
               onNewProject={openAddProjectCommandPalette}
               onNewThread={handleNewThreadClick}
               newThreadDisabled={projects.length === 0}
@@ -5414,6 +5473,11 @@ export default function Sidebar() {
                     <PlusIcon className="-mx-0.5 size-3" />
                     Add project
                   </button>
+                </>
+              ) : attentionEmpty ? (
+                <>
+                  <span>{attentionEmpty.title}</span>
+                  <span>{attentionEmpty.detail}</span>
                 </>
               ) : scopedProjectGroup ? (
                 `No threads in ${scopedProjectGroup.displayName} yet`

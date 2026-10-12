@@ -6,6 +6,16 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import {
+  attentionEnvironmentsUnavailable,
+  attentionInboxEmptyCopy,
+  attentionViewFromMenuId,
+  attentionViewMenuId,
+  countAttentionViews,
+  filterThreadsByAttentionView,
+  ATTENTION_VIEWS,
+  attentionViewCountText,
+} from "@t3tools/client-runtime/state/thread-attention";
+import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
 } from "@t3tools/client-runtime/state/thread-search";
@@ -29,6 +39,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { useProjects, useNavigationThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
+import { useSavedAttentionView } from "./use-saved-attention-view";
 import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
@@ -176,6 +187,7 @@ function ThreadNavigationSidebarPane(
     [environments],
   );
   const { options, setSelectedEnvironmentId } = useHomeListOptions(availableEnvironmentIds);
+  const { attentionView, setAttentionView } = useSavedAttentionView();
   const searchEnvironmentIds = useMemo(
     () =>
       options.selectedEnvironmentId === null
@@ -369,7 +381,10 @@ function ThreadNavigationSidebarPane(
     threadListInboxReturns.observe(workingShelfEnabled ? threads : null);
     return buildThreadListV2Items({
       pendingOrder,
-      threads: threads.filter((thread) => thread.archivedAt === null),
+      threads: filterThreadsByAttentionView(
+        threads.filter((thread) => thread.archivedAt === null),
+        attentionView,
+      ),
       environmentId: options.selectedEnvironmentId,
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
@@ -395,6 +410,7 @@ function ThreadNavigationSidebarPane(
     snoozeWakeTick,
     snoozedShelfExpanded,
     settledShelfExpanded,
+    attentionView,
     props.selectedThreadKey,
     options.selectedEnvironmentId,
     props.searchQuery,
@@ -478,8 +494,64 @@ function ThreadNavigationSidebarPane(
     threadListV2Layout,
     workingShelfExpanded,
   ]);
+  const attentionCounts = useMemo(
+    () =>
+      countAttentionViews(
+        threads.filter((thread) => {
+          if (thread.archivedAt !== null) return false;
+          if (
+            options.selectedEnvironmentId !== null &&
+            thread.environmentId !== options.selectedEnvironmentId
+          ) {
+            return false;
+          }
+          if (
+            selectedProjectScope !== null &&
+            !selectedProjectScope.projectRefs.some(
+              (project) =>
+                project.environmentId === thread.environmentId &&
+                project.projectId === thread.projectId,
+            )
+          ) {
+            return false;
+          }
+          return true;
+        }),
+      ),
+    [options.selectedEnvironmentId, selectedProjectScope, threads],
+  );
+  const unavailableEnvironmentCount =
+    attentionView === "all"
+      ? 0
+      : attentionEnvironmentsUnavailable(
+          workspaceEnvironments
+            .filter(
+              (environment) =>
+                options.selectedEnvironmentId === null ||
+                environment.environmentId === options.selectedEnvironmentId,
+            )
+            .map((environment) => ({ phase: environment.connectionState })),
+        );
+  const attentionEmpty = attentionInboxEmptyCopy({
+    view: attentionView,
+    unavailableEnvironmentCount,
+  });
   const listMenuActions = useMemo<MenuAction[]>(
     () => [
+      {
+        id: "attention",
+        title: "Attention",
+        subactions: ATTENTION_VIEWS.map((entry) => ({
+          id: attentionViewMenuId(entry.id),
+          title: entry.label,
+          subtitle: attentionViewCountText({
+            view: entry.id,
+            matchedCount: attentionCounts[entry.id],
+            unavailableEnvironmentCount,
+          }),
+          state: attentionView === entry.id ? ("on" as const) : ("off" as const),
+        })),
+      },
       {
         id: "environment",
         title: "Environment",
@@ -522,11 +594,24 @@ function ThreadNavigationSidebarPane(
             },
           ] satisfies MenuAction[])),
     ],
-    [environments, options, projectFilterOptions, selectedProjectKey],
+    [
+      attentionCounts,
+      attentionView,
+      environments,
+      options,
+      projectFilterOptions,
+      selectedProjectKey,
+      unavailableEnvironmentCount,
+    ],
   );
   const handleListMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
       const event = nativeEvent.event;
+      const nextAttentionView = attentionViewFromMenuId(event);
+      if (nextAttentionView !== null) {
+        setAttentionView(nextAttentionView);
+        return;
+      }
       if (event === "environment:all") {
         setSelectedEnvironmentId(null);
         return;
@@ -550,7 +635,7 @@ function ThreadNavigationSidebarPane(
         return;
       }
     },
-    [environments, projectFilterOptions, setSelectedEnvironmentId],
+    [environments, projectFilterOptions, setAttentionView, setSelectedEnvironmentId],
   );
 
   const [measuredHeaderHeight, setMeasuredHeaderHeight] = useState<number | null>(null);
@@ -839,7 +924,10 @@ function ThreadNavigationSidebarPane(
   );
   // The list ignores sort/group options, so only the environment and project
   // filters can light the "customized" state.
-  const filterCustomized = options.selectedEnvironmentId !== null || selectedProjectKey !== null;
+  const filterCustomized =
+    options.selectedEnvironmentId !== null ||
+    selectedProjectKey !== null ||
+    attentionView !== "all";
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
     : "line.3.horizontal.decrease.circle";
@@ -850,10 +938,24 @@ function ThreadNavigationSidebarPane(
         projects: projectFilterOptions,
         selectedEnvironmentId: options.selectedEnvironmentId,
         selectedProjectKey,
+        attentionView,
+        attentionCounts,
+        unavailableEnvironmentCount,
         onEnvironmentChange: setSelectedEnvironmentId,
         onProjectChange: setSelectedProjectKey,
+        onAttentionChange: setAttentionView,
       }),
-    [environments, options, projectFilterOptions, selectedProjectKey, setSelectedEnvironmentId],
+    [
+      attentionCounts,
+      attentionView,
+      environments,
+      options,
+      projectFilterOptions,
+      selectedProjectKey,
+      setAttentionView,
+      setSelectedEnvironmentId,
+      unavailableEnvironmentCount,
+    ],
   );
   const nativeHeaderItems = useMemo(
     () =>
@@ -882,9 +984,14 @@ function ThreadNavigationSidebarPane(
             ? threadSearch.isPending
               ? "Searching thread messages…"
               : "No matching threads"
-            : selectedProjectScope !== null
-              ? `No threads in ${selectedProjectScope.title}`
-              : "No threads yet"}
+            : attentionEmpty &&
+                !catalogState.isLoadingConnections &&
+                catalogState.hasConnections &&
+                catalogState.hasLoadedShellSnapshot
+              ? attentionEmpty.title
+              : selectedProjectScope !== null
+                ? `No threads in ${selectedProjectScope.title}`
+                : "No threads yet"}
     </Text>
   );
 

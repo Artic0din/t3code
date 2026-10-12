@@ -1,3 +1,9 @@
+import {
+  ATTENTION_VIEWS,
+  attentionViewCountText,
+  attentionViewFromMenuId,
+  attentionViewMenuId,
+} from "@t3tools/client-runtime/state/thread-attention";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useCallback, useMemo } from "react";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
@@ -15,9 +21,25 @@ export function HomeHeader(props: HomeHeaderProps) {
   // the filter menu only carries the filters and the "customized" icon state
   // keys off those alone.
   const hasCustomListOptions =
-    props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
+    props.selectedEnvironmentId !== null ||
+    props.selectedProjectKey !== null ||
+    props.attentionView !== "all";
   const menuActions = useMemo<MenuAction[]>(
     () => [
+      {
+        id: "attention",
+        title: "Attention",
+        subactions: ATTENTION_VIEWS.map((entry) => ({
+          id: attentionViewMenuId(entry.id),
+          title: entry.label,
+          subtitle: attentionViewCountText({
+            view: entry.id,
+            matchedCount: props.attentionCounts[entry.id],
+            unavailableEnvironmentCount: props.unavailableEnvironmentCount,
+          }),
+          state: checkedMenuState(props.attentionView === entry.id),
+        })),
+      },
       {
         id: "environment",
         title: "Environment",
@@ -55,11 +77,24 @@ export function HomeHeader(props: HomeHeaderProps) {
             },
           ] satisfies MenuAction[])),
     ],
-    [props.environments, props.projects, props.selectedEnvironmentId, props.selectedProjectKey],
+    [
+      props.attentionCounts,
+      props.attentionView,
+      props.environments,
+      props.projects,
+      props.selectedEnvironmentId,
+      props.selectedProjectKey,
+      props.unavailableEnvironmentCount,
+    ],
   );
   const handleMenuAction = useCallback(
     (event: { nativeEvent: { event: string } }) => {
       const id = event.nativeEvent.event;
+      const attentionView = attentionViewFromMenuId(id);
+      if (attentionView !== null) {
+        props.onAttentionChange(attentionView);
+        return;
+      }
       if (id === "environment:all") {
         props.onEnvironmentChange(null);
         return;
