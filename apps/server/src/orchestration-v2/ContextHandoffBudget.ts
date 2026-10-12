@@ -138,6 +138,26 @@ export function handoffBudget(input: {
   );
 }
 
+const COMMAND_OUTPUT_HEAD_LINES = 20;
+const COMMAND_OUTPUT_TAIL_LINES = 20;
+
+function commandOutputText(
+  item: Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
+): string {
+  const output = item.output ?? "";
+  const lines = output.length === 0 ? [] : output.split("\n");
+  const hiddenLineCount = lines.length - COMMAND_OUTPUT_HEAD_LINES - COMMAND_OUTPUT_TAIL_LINES;
+  const body =
+    hiddenLineCount <= 0
+      ? output
+      : [
+          ...lines.slice(0, COMMAND_OUTPUT_HEAD_LINES),
+          `[output truncated; itemId=${item.id}; recover the full output with t3_thread_read using itemId and textOffset]`,
+          ...lines.slice(-COMMAND_OUTPUT_TAIL_LINES),
+        ].join("\n");
+  return [`Command: ${item.input}`, `Exit code: ${item.exitCode ?? "unknown"}`, body].join("\n");
+}
+
 function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list" }>): string {
   return [
     ...item.steps.map((step) => `${step.status}: ${step.text}`),
@@ -158,11 +178,7 @@ export function historicalMessage(
       text = item.text;
       break;
     case "command_execution":
-      text = [
-        `Command: ${item.input}`,
-        `Exit code: ${item.exitCode ?? "unknown"}`,
-        item.output ?? "",
-      ].join("\n");
+      text = commandOutputText(item);
       break;
     case "error":
       text = item.failure.message;
@@ -312,13 +328,18 @@ export function selectHistory(input: {
     }
   };
   const pinPartialAnswer = () =>
-    tryAdd(messages.findLastIndex((message) => message.role === "assistant"));
+    tryAdd(messages.findLastIndex((message) => message.kind === "assistant_message"));
   const pinOriginalRequest = () => tryAdd(messages.findIndex((message) => message.role === "user"));
   pinLatestRequest();
   pinPlanStates();
   pinPartialAnswer();
   pinOriginalRequest();
-  for (let index = messages.length - 1; index >= 0; index--) tryAdd(index);
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.kind !== "command_execution") tryAdd(index);
+  }
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.kind === "command_execution") tryAdd(index);
+  }
   return {
     messages: messages.filter((_, index) => selected.has(index)),
     omittedItemIds: [

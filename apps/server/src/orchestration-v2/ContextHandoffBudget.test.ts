@@ -457,7 +457,7 @@ describe("handoff budget", () => {
     assert.include(text, "LATEST_REQUEST continue");
   });
 
-  it("keeps the assistant reply ahead of a large command that still fits", () => {
+  it("keeps the assistant reply when a fitting command log would take the budget", () => {
     const selected = selectHistory({
       messages: historyFrom([
         userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
