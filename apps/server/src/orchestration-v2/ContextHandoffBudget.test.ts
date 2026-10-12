@@ -457,6 +457,50 @@ describe("handoff budget", () => {
     assert.include(text, "LATEST_REQUEST continue");
   });
 
+  it("shortens a long single-line command so the stub stays selectable", () => {
+    const output = "x".repeat(60_000);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:one-line-command",
+          ordinal: 3,
+          command: "cat blob.json",
+          output,
+          exitCode: 0,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: cat blob.json");
+    assert.include(command?.text, "Exit code: 0");
+    assert.include(command?.text, "item:one-line-command");
+    assert.isBelow(Buffer.byteLength(command!.text), 12_000);
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+    assert.include(text, "ASSISTANT_REPLY keep the summary");
+  });
+
+  it("counts full command output for native-context estimates", () => {
+    const item = commandTurn({
+      id: "item:native-command",
+      ordinal: 1,
+      command: "cat blob.json",
+      output: "y".repeat(40_000),
+      exitCode: 0,
+    });
+    const handoff = historicalMessage(item);
+    const native = historicalMessage(item, { truncateCommandOutput: false });
+    assert.isBelow(Buffer.byteLength(handoff!.text), 12_000);
+    assert.isAtLeast(Buffer.byteLength(native!.text), 40_000);
+    assert.include(native!.text, "y".repeat(40_000));
+  });
+
   it("keeps the assistant reply when a fitting command log would take the budget", () => {
     const selected = selectHistory({
       messages: historyFrom([

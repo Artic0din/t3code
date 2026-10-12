@@ -1041,7 +1041,7 @@ export const layer: Layer.Layer<
                 (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
               )
                 return sum;
-              const historical = historicalMessage(item);
+              const historical = historicalMessage(item, { truncateCommandOutput: false });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

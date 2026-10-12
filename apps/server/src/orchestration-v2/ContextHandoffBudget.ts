@@ -140,21 +140,46 @@ export function handoffBudget(input: {
 
 const COMMAND_OUTPUT_HEAD_LINES = 20;
 const COMMAND_OUTPUT_TAIL_LINES = 20;
+const COMMAND_OUTPUT_BYTE_CAP = 8_192;
 
-function commandOutputText(
-  item: Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
-): string {
-  const output = item.output ?? "";
+type HistoricalMessageOptions = {
+  readonly truncateCommandOutput?: boolean;
+};
+
+function commandTruncationMarker(itemId: OrchestrationV2TurnItem["id"]): string {
+  return `[output truncated; itemId=${itemId}; recover the full output with t3_thread_read using itemId and textOffset]`;
+}
+
+function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id"]): string {
   const lines = output.length === 0 ? [] : output.split("\n");
   const hiddenLineCount = lines.length - COMMAND_OUTPUT_HEAD_LINES - COMMAND_OUTPUT_TAIL_LINES;
-  const body =
+  const lineCapped =
     hiddenLineCount <= 0
       ? output
       : [
           ...lines.slice(0, COMMAND_OUTPUT_HEAD_LINES),
-          `[output truncated; itemId=${item.id}; recover the full output with t3_thread_read using itemId and textOffset]`,
+          commandTruncationMarker(itemId),
           ...lines.slice(-COMMAND_OUTPUT_TAIL_LINES),
         ].join("\n");
+  if (Buffer.byteLength(lineCapped) <= COMMAND_OUTPUT_BYTE_CAP) return lineCapped;
+  const marker = `\n${commandTruncationMarker(itemId)}\n`;
+  const markerBytes = Buffer.byteLength(marker);
+  const retain = Math.max(0, COMMAND_OUTPUT_BYTE_CAP - markerBytes);
+  const headBytes = Math.floor(retain / 2);
+  const tailBytes = retain - headBytes;
+  return Buffer.concat([
+    Buffer.from(lineCapped).subarray(0, headBytes),
+    Buffer.from(marker),
+    Buffer.from(lineCapped).subarray(Buffer.byteLength(lineCapped) - tailBytes),
+  ]).toString();
+}
+
+function commandOutputText(
+  item: Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
+  truncate: boolean,
+): string {
+  const output = item.output ?? "";
+  const body = truncate ? truncateCommandBody(output, item.id) : output;
   return [`Command: ${item.input}`, `Exit code: ${item.exitCode ?? "unknown"}`, body].join("\n");
 }
 
@@ -167,10 +192,12 @@ function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list"
 
 export function historicalMessage(
   item: OrchestrationV2TurnItem,
+  options?: HistoricalMessageOptions,
 ): OrchestrationV2HistoricalMessage | null {
   if ((item.type === "todo_list" || item.type === "proposed_plan") && item.status === "cancelled") {
     return null;
   }
+  const truncateCommandOutput = options?.truncateCommandOutput !== false;
   let text: string;
   switch (item.type) {
     case "user_message":
@@ -178,7 +205,7 @@ export function historicalMessage(
       text = item.text;
       break;
     case "command_execution":
-      text = commandOutputText(item);
+      text = commandOutputText(item, truncateCommandOutput);
       break;
     case "error":
       text = item.failure.message;
