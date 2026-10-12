@@ -65,6 +65,15 @@ import * as GitManager from "./GitManager.ts";
 const encodeCliJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeForgejoPullRequest = Schema.decodeEffect(ForgejoPullRequestSchema);
 
+type FakeIssue = {
+  number: number;
+  title: string;
+  body: string | null;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isPullRequest?: boolean;
+};
+
 interface FakeGhScenario {
   prListSequence?: string[];
   prListByHeadSelector?: Record<string, string>;
@@ -84,17 +93,24 @@ interface FakeGhScenario {
     headRepositoryOwnerLogin?: string | null;
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
-  issue?: {
-    number: number;
-    title: string;
-    body: string | null;
-    url: string;
-    state: "OPEN" | "CLOSED" | "MERGED";
-    isPullRequest?: boolean;
-  };
+  issue?: FakeIssue;
+  /** Selects by issue URL when one checkout starts the same number in two repositories. */
+  issues?: ReadonlyArray<FakeIssue>;
   failWith?: GitHubCli.GitHubCliError;
   /** Let this many gh calls succeed before failWith kicks in (default 0 = fail immediately). */
   failAfterCalls?: number;
+}
+
+function resolveFakeIssue(scenario: FakeGhScenario, reference: string): FakeIssue | null {
+  const pool = scenario.issues ?? (scenario.issue ? [scenario.issue] : []);
+  if (pool.length === 0) return null;
+  const byUrl = pool.find((issue) => issue.url === reference);
+  if (byUrl) return byUrl;
+  if (pool.length === 1) return pool[0] ?? null;
+  const numberMatch = /(?:^#?|\/issues\/)([1-9]\d*)(?:[/?#].*)?$/u.exec(reference);
+  if (!numberMatch) return null;
+  const matches = pool.filter((issue) => String(issue.number) === numberMatch[1]);
+  return matches.length === 1 ? (matches[0] ?? null) : null;
 }
 
 function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
@@ -497,7 +513,9 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     }
 
     if (args[0] === "issue" && args[1] === "view") {
-      if (!scenario.issue) {
+      const reference = typeof args[2] === "string" ? args[2] : "";
+      const issueRecord = resolveFakeIssue(scenario, reference);
+      if (!issueRecord) {
         return Effect.fail(
           new GitHubCli.GitHubCliCommandError({
             command: "gh",
@@ -506,7 +524,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
           }),
         );
       }
-      const { isPullRequest, ...issue } = scenario.issue;
+      const { isPullRequest, ...issue } = issueRecord;
       return Effect.succeed(
         fakeGhOutput(
           JSON.stringify({
@@ -4934,6 +4952,52 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       expect(result.branch).toBe("issue/31-old-title");
       expect(NodeFS.realpathSync(result.worktreePath)).toBe(NodeFS.realpathSync(worktreePath));
+    }),
+  );
+
+  it.effect("does not reuse an issue branch from a different repository", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issues: [
+            {
+              number: 31,
+              title: "Alpha work",
+              body: "From alpha",
+              url: "https://github.com/alpha/one/issues/31",
+              state: "OPEN",
+            },
+            {
+              number: 31,
+              title: "Beta work",
+              body: "From beta",
+              url: "https://github.com/beta/two/issues/31",
+              state: "OPEN",
+            },
+          ],
+        },
+      });
+
+      const alpha = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/alpha/one/issues/31",
+      });
+      const beta = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/beta/two/issues/31",
+      });
+
+      expect(alpha.branch).toBe("issue/31-alpha-work");
+      expect(alpha.issue.url).toBe("https://github.com/alpha/one/issues/31");
+      expect(beta.issue.title).toBe("Beta work");
+      expect(beta.issue.url).toBe("https://github.com/beta/two/issues/31");
+      expect(beta.branch).not.toBe(alpha.branch);
+      expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
+        NodeFS.realpathSync(alpha.worktreePath),
+      );
     }),
   );
 
