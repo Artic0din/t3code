@@ -1,0 +1,424 @@
+// Measure first-turn input tokens with and without the t3-code MCP server.
+// Static source baseline always prints. Live provider turns run only when
+// ANTHROPIC_API_KEY (Claude) and/or Codex credentials (~/.codex/auth.json) exist.
+//
+// Run from repo root:
+//   PATH="/opt/homebrew/opt/node@24/bin:$PATH" node --experimental-strip-types \
+//     apps/server/scripts/measure-mcp-context-tokens.ts
+import * as NodeCrypto from "node:crypto";
+import * as NodeFs from "node:fs";
+import * as NodeHttp from "node:http";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
+
+import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
+import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
+import * as DeviceService from "../src/device/DeviceService.ts";
+import * as ServerConfig from "../src/config.ts";
+import { NodeHttpServer } from "@effect/platform-node";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient, HttpRouter } from "effect/http";
+
+import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
+import * as GitWorkflowService from "../src/git/GitWorkflowService.ts";
+import * as ProviderAdapterRegistry from "../src/orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "../src/orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../src/project/ProjectService.ts";
+import * as ProjectSetupScriptRunner from "../src/project/ProjectSetupScriptRunner.ts";
+import * as ProviderRegistry from "../src/provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../src/scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../src/secrets/SecretRequests.ts";
+import * as ServerSettings from "../src/serverSettings.ts";
+import * as VcsStatusBroadcaster from "../src/vcs/VcsStatusBroadcaster.ts";
+import * as McpHttpServer from "../src/mcp/McpHttpServer.ts";
+import * as McpSessionRegistry from "../src/mcp/McpSessionRegistry.ts";
+import * as PreviewAutomationBroker from "../src/mcp/PreviewAutomationBroker.ts";
+import * as PreviewBrowser from "../src/preview/PreviewBrowser.ts";
+import { measureT3CodeMcpContextBaseline } from "../src/mcp/mcpContextBaseline.ts";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../src/provider/T3OrchestrationInstructions.ts";
+
+const TRIVIAL_PROMPT = "Reply with exactly: ok";
+
+type LiveTokenRow = {
+  readonly provider: "claude" | "codex";
+  readonly withT3CodeMcp: boolean;
+  readonly inputTokens: number;
+  readonly model: string;
+};
+
+type McpEndpoint = {
+  readonly url: string;
+  readonly authorizationHeader: string;
+};
+
+const layerStubServices = Layer.mergeAll(
+  Layer.mock(Orchestrator.OrchestratorV2)({}),
+  Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+  Layer.mock(DeviceService.DeviceService)({}),
+  Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+  Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+  Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+  Layer.mock(SecretRequests.SecretRequests)({}),
+  Layer.mock(ProjectService.ProjectService)({}),
+  ServerSettings.layerTest({}),
+  Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+  Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
+  Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+);
+
+function hasAnthropicApiKey(): boolean {
+  return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+}
+
+function hasCodexCredentials(): boolean {
+  const authPath = NodePath.join(NodeOs.homedir(), ".codex", "auth.json");
+  try {
+    const raw = NodeFs.readFileSync(authPath, "utf8");
+    const parsed = JSON.parse(raw) as { tokens?: unknown };
+    return parsed.tokens != null && typeof parsed.tokens === "object";
+  } catch {
+    return false;
+  }
+}
+
+function reserveLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const reservation = NodeHttp.createServer();
+    reservation.once("error", reject);
+    reservation.listen(0, "127.0.0.1", () => {
+      const address = reservation.address();
+      if (address === null || typeof address === "string") {
+        reservation.close();
+        reject(new Error("Failed to reserve a loopback port"));
+        return;
+      }
+      const { port } = address;
+      reservation.close((error) => (error ? reject(error) : resolve(port)));
+    });
+  });
+}
+
+function runCommand(
+  command: string,
+  args: ReadonlyArray<string>,
+  options: { readonly env?: NodeJS.ProcessEnv; readonly cwd?: string } = {},
+): { readonly stdout: string; readonly stderr: string; readonly status: number | null } {
+  const result = NodeChildProcess.spawnSync(command, [...args], {
+    encoding: "utf8",
+    env: options.env ?? process.env,
+    cwd: options.cwd ?? process.cwd(),
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    status: result.status,
+  };
+}
+
+function parseClaudeInputTokens(stdout: string): { inputTokens: number; model: string } {
+  const payload = JSON.parse(stdout) as {
+    usage?: {
+      input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    };
+    modelUsage?: Record<string, unknown>;
+    is_error?: boolean;
+    result?: string;
+  };
+  if (payload.is_error) {
+    throw new Error(payload.result ?? "Claude turn failed");
+  }
+  const usage = payload.usage;
+  if (!usage || typeof usage.input_tokens !== "number") {
+    throw new Error("Claude JSON output did not include usage.input_tokens");
+  }
+  const inputTokens =
+    usage.input_tokens +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0);
+  const model = Object.keys(payload.modelUsage ?? {})[0] ?? "unknown";
+  return { inputTokens, model };
+}
+
+function parseCodexInputTokens(stdout: string): { inputTokens: number; model: string } {
+  let inputTokens: number | undefined;
+  let model = "unknown";
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const type = typeof event.type === "string" ? event.type : "";
+    if (
+      (type === "thread.started" || type === "turn.started" || type === "item.completed") &&
+      typeof event.model === "string"
+    ) {
+      model = event.model;
+    }
+    const usage = event.usage as Record<string, unknown> | undefined;
+    if (usage && typeof usage.input_tokens === "number") {
+      inputTokens = usage.input_tokens;
+    }
+    const tokenUsage = event.token_usage as Record<string, unknown> | undefined;
+    if (tokenUsage && typeof tokenUsage.input_tokens === "number") {
+      inputTokens = tokenUsage.input_tokens;
+    }
+    const info = event.info as Record<string, unknown> | undefined;
+    const infoUsage = info?.usage as Record<string, unknown> | undefined;
+    if (infoUsage && typeof infoUsage.input_tokens === "number") {
+      inputTokens = infoUsage.input_tokens;
+    }
+  }
+  if (inputTokens === undefined) {
+    throw new Error("Codex JSONL output did not include input_tokens");
+  }
+  return { inputTokens, model };
+}
+
+async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>): Promise<A> {
+  const port = await reserveLoopbackPort();
+  return Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const layerRoutes = McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer));
+        yield* HttpRouter.serve(layerRoutes, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(
+          Layer.provide(
+            Layer.mock(ServerEnvironment.ServerEnvironment)({
+              getEnvironmentId: Effect.succeed("environment-mcp-measure" as never),
+            }),
+          ),
+          Layer.provide(PreviewAutomationBroker.layer),
+          Layer.provide(PreviewBrowser.layer),
+          Layer.provide(layerStubServices),
+          Layer.provide(
+            NodeHttpServer.layer(NodeHttp.createServer, {
+              host: "127.0.0.1",
+              port,
+              disablePreemptiveShutdown: true,
+            }),
+          ),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-measure-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+          Layer.provide(FetchHttpClient.layer),
+          Layer.provide(NodeServices.layer),
+          Layer.build,
+        );
+
+        const credential = yield* McpSessionRegistry.issueActiveMcpCredential({
+          threadId: ThreadId.make(`thread-mcp-measure-${NodeCrypto.randomUUID()}`),
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        });
+        if (credential === undefined) {
+          return yield* Effect.die("Failed to issue MCP credential");
+        }
+
+        const mcp: McpEndpoint = {
+          url: `http://127.0.0.1:${port}/mcp`,
+          authorizationHeader: credential.config.authorizationHeader,
+        };
+        return yield* Effect.promise(() => use(mcp));
+      }),
+    ),
+  );
+}
+
+function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
+  const tempDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-mcp-measure-claude-"));
+  try {
+    const args = [
+      "-p",
+      "--bare",
+      "--output-format",
+      "json",
+      "--dangerously-skip-permissions",
+      TRIVIAL_PROMPT,
+    ];
+    if (withT3CodeMcp) {
+      if (mcp === undefined) {
+        throw new Error("Claude with-MCP measurement requires an MCP endpoint");
+      }
+      const mcpConfigPath = NodePath.join(tempDir, "mcp.json");
+      NodeFs.writeFileSync(
+        mcpConfigPath,
+        JSON.stringify({
+          mcpServers: {
+            "t3-code": {
+              type: "http",
+              url: mcp.url,
+              headers: {
+                Authorization: mcp.authorizationHeader,
+              },
+            },
+          },
+        }),
+      );
+      args.push("--mcp-config", mcpConfigPath);
+      args.push("--append-system-prompt", T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    }
+    const result = runCommand("claude", args, {
+      cwd: tempDir,
+      env: {
+        ...process.env,
+        CLAUDE_CODE_SIMPLE: "1",
+      },
+    });
+    if (result.status !== 0 && result.stdout.trim() === "") {
+      throw new Error(result.stderr || `claude exited ${result.status}`);
+    }
+    const parsed = parseClaudeInputTokens(result.stdout);
+    return {
+      provider: "claude",
+      withT3CodeMcp,
+      inputTokens: parsed.inputTokens,
+      model: parsed.model,
+    };
+  } finally {
+    NodeFs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function redactSecrets(text: string): string {
+  return text
+    .replace(/Bearer\s+\S+/giu, "Bearer [redacted]")
+    .replace(/Authorization["']?\s*[:=]\s*["'][^"']+["']/giu, 'Authorization:"[redacted]"');
+}
+
+function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): LiveTokenRow {
+  const tempDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-mcp-measure-codex-"));
+  try {
+    const args = [
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      TRIVIAL_PROMPT,
+    ];
+    // Both sides use an isolated CODEX_HOME so the user's global MCP servers
+    // and developer instructions do not contaminate the delta.
+    const isolatedHome = NodePath.join(tempDir, "codex-home");
+    NodeFs.mkdirSync(isolatedHome, { recursive: true });
+    NodeFs.symlinkSync(
+      NodePath.join(NodeOs.homedir(), ".codex", "auth.json"),
+      NodePath.join(isolatedHome, "auth.json"),
+    );
+    const configLines: string[] = [];
+    if (withT3CodeMcp) {
+      if (mcp === undefined) {
+        throw new Error("Codex with-MCP measurement requires an MCP endpoint");
+      }
+      const authorization = mcp.authorizationHeader.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+      configLines.push(
+        `developer_instructions = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS)}`,
+        "",
+        "[mcp_servers.t3-code]",
+        `url = ${JSON.stringify(mcp.url)}`,
+        "",
+        "[mcp_servers.t3-code.http_headers]",
+        `Authorization = "${authorization}"`,
+        "",
+      );
+    }
+    NodeFs.writeFileSync(NodePath.join(isolatedHome, "config.toml"), configLines.join("\n"));
+    const result = runCommand("codex", args, {
+      cwd: tempDir,
+      env: { ...process.env, CODEX_HOME: isolatedHome },
+    });
+    if (result.status !== 0 && result.stdout.trim() === "") {
+      throw new Error(redactSecrets(result.stderr || `codex exited ${result.status}`));
+    }
+    try {
+      const parsed = parseCodexInputTokens(result.stdout);
+      return {
+        provider: "codex",
+        withT3CodeMcp,
+        inputTokens: parsed.inputTokens,
+        model: parsed.model,
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        redactSecrets(
+          `${detail}\nstderr: ${result.stderr}\nstdout: ${result.stdout.slice(0, 2000)}`,
+        ),
+      );
+    }
+  } finally {
+    NodeFs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+const baseline = measureT3CodeMcpContextBaseline();
+console.log(
+  JSON.stringify({
+    kind: "static-baseline",
+    toolCount: baseline.toolCount,
+    orchestrationInstructionsBytes: baseline.orchestrationInstructionsBytes,
+    orchestrationInstructionsTrimmedBytes: baseline.orchestrationInstructionsTrimmedBytes,
+  }),
+);
+
+const wantClaude = hasAnthropicApiKey();
+const wantCodex = hasCodexCredentials();
+
+if (!wantClaude && !wantCodex) {
+  console.error(
+    [
+      "Live token measurement skipped: missing provider credentials.",
+      "Set ANTHROPIC_API_KEY for Claude, and/or ensure ~/.codex/auth.json has ChatGPT tokens for Codex.",
+      "Refusing to invent live token numbers.",
+    ].join("\n"),
+  );
+  process.exit(2);
+}
+
+const rows: LiveTokenRow[] = [];
+
+try {
+  await withEphemeralMcpServer(async (mcp) => {
+    if (wantClaude) {
+      rows.push(measureClaude(false));
+      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
+      rows.push(measureClaude(true, mcp));
+      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
+    } else {
+      console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
+    }
+    if (wantCodex) {
+      rows.push(measureCodex(false));
+      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
+      rows.push(measureCodex(true, mcp));
+      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
+    } else {
+      console.error("Codex live measurement skipped: ~/.codex/auth.json tokens are missing.");
+    }
+  });
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Live token measurement failed:\n${redactSecrets(message)}`);
+  console.error("Refusing to invent live token numbers.");
+  process.exit(2);
+}
+
+if (rows.length === 0) {
+  console.error("No live token rows were recorded.");
+  process.exit(2);
+}
