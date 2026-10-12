@@ -53,6 +53,7 @@ import {
   ThreadLinkedPullRequest,
   ThreadId,
   type TurnItemId,
+  nextTaskContextGroupId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -417,6 +418,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.unpin":
     case "thread.pin.reorder":
     case "thread.active.reorder":
+    case "thread.task-context-group.attach":
+    case "thread.task-context-group.detach":
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.metadata.update":
@@ -2357,6 +2360,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.unpin"
           | "thread.pin.reorder"
           | "thread.active.reorder"
+          | "thread.task-context-group.attach"
+          | "thread.task-context-group.detach"
           | "thread.mark-unread"
           | "thread.metadata.update"
           | "thread.pull-request.link"
@@ -2872,6 +2877,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             updatedAt: thread.updatedAt,
           };
         }
+        case "thread.task-context-group.attach":
+        case "thread.task-context-group.detach": {
+          const taskContextGroupId = nextTaskContextGroupId(thread.taskContextGroupId, command);
+          if (taskContextGroupId === undefined) return thread;
+          return {
+            ...thread,
+            taskContextGroupId,
+            updatedAt: now,
+          };
+        }
         case "thread.mark-unread":
           return { ...thread, lastVisitedAt: markUnreadVisitedAt };
         case "thread.metadata.update": {
@@ -3182,6 +3197,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.active-reordered" as const;
         case "thread.mark-unread":
           return "thread.marked-unread" as const;
+        case "thread.task-context-group.attach":
+        case "thread.task-context-group.detach":
         case "thread.metadata.update":
         case "thread.title.regeneration.complete":
           return "thread.metadata-updated" as const;
@@ -10203,6 +10220,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.unpin":
       case "thread.pin.reorder":
       case "thread.active.reorder":
+      case "thread.task-context-group.attach":
+      case "thread.task-context-group.detach":
       case "thread.mark-unread":
       case "thread.metadata.update":
       case "thread.pull-request.link":

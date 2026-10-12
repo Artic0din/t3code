@@ -32,6 +32,7 @@ import {
   RunId,
   RuntimeRequestId,
   ScheduledTaskId,
+  TaskContextGroupId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
@@ -435,6 +436,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
       }),
     ),
   ),
+  /** Shared task context group this thread belongs to. */
+  taskContextGroupId: Schema.optional(Schema.NullOr(TaskContextGroupId)),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
@@ -1921,6 +1924,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
       }),
     ),
   ),
+  /** Shared task context group this thread belongs to. */
+  taskContextGroupId: Schema.optional(Schema.NullOr(TaskContextGroupId)),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2ThreadShell = typeof OrchestrationV2ThreadShell.Type;
@@ -2716,6 +2721,18 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     orderKey: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.task-context-group.attach"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    groupId: TaskContextGroupId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.task-context-group.detach"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    groupId: TaskContextGroupId,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.visit"),

@@ -1,4 +1,5 @@
 import {
+  CommandId,
   IsoDateTime,
   ProjectId,
   TaskContextGroup,
@@ -25,28 +26,23 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
-import * as ServerConfig from "../config.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
-const STORE_FILE = "task-context-groups.json";
+const encodeGroup = Schema.encodeEffect(Schema.fromJsonString(TaskContextGroup));
+const decodeGroup = Schema.decodeUnknownOption(Schema.fromJsonString(TaskContextGroup));
 
-const StoreDocument = Schema.Struct({
-  version: Schema.Literal(1),
-  groups: Schema.Array(TaskContextGroup),
-});
-type StoreDocument = typeof StoreDocument.Type;
-
-const encodeStore = Schema.encodeEffect(Schema.fromJsonString(StoreDocument));
-const decodeStore = Schema.decodeUnknownOption(Schema.fromJsonString(StoreDocument));
+type GroupRow = {
+  readonly group_id: string;
+  readonly document_json: string;
+  readonly updated_at: string;
+};
 
 export class TaskContextGroupService extends Context.Service<
   TaskContextGroupService,
@@ -91,67 +87,10 @@ function nowIso(): Effect.Effect<IsoDateTime> {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const config = yield* ServerConfig.ServerConfig;
+  const sql = yield* SqlClient.SqlClient;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const projects = yield* ProjectService.ProjectService;
   const lock = yield* Semaphore.make(1);
-  const storePath = path.join(config.stateDir, STORE_FILE);
-
-  const emptyStore = (): StoreDocument => ({ version: 1, groups: [] });
-
-  const readStore = Effect.fn("TaskContextGroupService.readStore")(function* () {
-    const exists = yield* fs
-      .exists(storePath)
-      .pipe(
-        Effect.mapError((error) =>
-          failure(
-            "orchestration_error",
-            `Unable to read task context store: ${errorMessage(error)}`,
-          ),
-        ),
-      );
-    if (!exists) return emptyStore();
-    const raw = yield* fs
-      .readFileString(storePath)
-      .pipe(
-        Effect.mapError((error) =>
-          failure(
-            "orchestration_error",
-            `Unable to read task context store: ${errorMessage(error)}`,
-          ),
-        ),
-      );
-    const decoded = decodeStore(raw);
-    if (Option.isNone(decoded)) {
-      return yield* failure("orchestration_error", "Task context store is corrupt.");
-    }
-    return decoded.value;
-  });
-
-  const writeStore = Effect.fn("TaskContextGroupService.writeStore")(function* (
-    document: StoreDocument,
-  ) {
-    const contents = yield* encodeStore(document).pipe(
-      Effect.mapError((error) =>
-        failure(
-          "orchestration_error",
-          `Unable to encode task context store: ${errorMessage(error)}`,
-        ),
-      ),
-    );
-    yield* writeFileStringAtomically({ filePath: storePath, contents }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.provideService(Path.Path, path),
-      Effect.mapError((error) =>
-        failure(
-          "orchestration_error",
-          `Unable to write task context store: ${errorMessage(error)}`,
-        ),
-      ),
-    );
-  });
 
   const requireThread = Effect.fn("TaskContextGroupService.requireThread")(function* (
     threadId: ThreadId,
@@ -172,11 +111,86 @@ const make = Effect.gen(function* () {
     return shell;
   });
 
-  const findGroup = (document: StoreDocument, groupId: TaskContextGroupId) =>
-    document.groups.find((group) => group.id === groupId) ?? null;
+  const decodeRow = (row: GroupRow): Effect.Effect<TaskContextGroup, TaskContextGroupError> => {
+    const decoded = decodeGroup(row.document_json);
+    if (Option.isNone(decoded)) {
+      return Effect.fail(failure("orchestration_error", "Task context group document is corrupt."));
+    }
+    return Effect.succeed(decoded.value);
+  };
 
-  const findGroupForThread = (document: StoreDocument, threadId: ThreadId) =>
-    document.groups.find((group) => group.memberThreadIds.includes(threadId)) ?? null;
+  const listRows = () =>
+    sql<GroupRow>`
+      SELECT group_id, document_json, updated_at
+      FROM task_context_groups
+      ORDER BY updated_at DESC, group_id ASC
+    `.pipe(
+      Effect.mapError((error) =>
+        failure(
+          "orchestration_error",
+          `Unable to list task context groups: ${errorMessage(error)}`,
+        ),
+      ),
+    );
+
+  const getRow = (groupId: TaskContextGroupId) =>
+    sql<GroupRow>`
+      SELECT group_id, document_json, updated_at
+      FROM task_context_groups
+      WHERE group_id = ${groupId}
+    `.pipe(
+      Effect.mapError((error) =>
+        failure(
+          "orchestration_error",
+          `Unable to load task context group ${groupId}: ${errorMessage(error)}`,
+        ),
+      ),
+      Effect.map((rows) => rows[0] ?? null),
+    );
+
+  const writeGroup = Effect.fn("TaskContextGroupService.writeGroup")(function* (
+    group: TaskContextGroup,
+  ) {
+    const documentJson = yield* encodeGroup(group).pipe(
+      Effect.mapError((error) =>
+        failure(
+          "orchestration_error",
+          `Unable to encode task context group: ${errorMessage(error)}`,
+        ),
+      ),
+    );
+    yield* sql`
+      INSERT INTO task_context_groups (group_id, document_json, updated_at)
+      VALUES (${group.id}, ${documentJson}, ${group.updatedAt})
+      ON CONFLICT(group_id) DO UPDATE SET
+        document_json = excluded.document_json,
+        updated_at = excluded.updated_at
+    `.pipe(
+      Effect.mapError((error) =>
+        failure(
+          "orchestration_error",
+          `Unable to persist task context group: ${errorMessage(error)}`,
+        ),
+      ),
+    );
+  });
+
+  const findGroup = (groupId: TaskContextGroupId) =>
+    Effect.gen(function* () {
+      const row = yield* getRow(groupId);
+      if (row === null) return null;
+      return yield* decodeRow(row);
+    });
+
+  const findGroupForThread = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const rows = yield* listRows();
+      for (const row of rows) {
+        const group = yield* decodeRow(row);
+        if (group.memberThreadIds.includes(threadId)) return group;
+      }
+      return null;
+    });
 
   const refreshResource = Effect.fn("TaskContextGroupService.refreshResource")(function* (
     resource: TaskContextGroupResource,
@@ -247,10 +261,51 @@ const make = Effect.gen(function* () {
     return { ...group, resources };
   });
 
+  const syncShellMembership = Effect.fn("TaskContextGroupService.syncShellMembership")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly groupId: TaskContextGroupId;
+      readonly op: "attach" | "detach";
+    }) {
+      const commandId = CommandId.make(
+        [
+          "command",
+          "task-context-group",
+          input.op,
+          encodeURIComponent(input.threadId),
+          encodeURIComponent(input.groupId),
+          yield* crypto.randomUUIDv4.pipe(Effect.orDie),
+        ].join(":"),
+      );
+      yield* threads
+        .dispatch({
+          type:
+            input.op === "attach"
+              ? "thread.task-context-group.attach"
+              : "thread.task-context-group.detach",
+          commandId,
+          threadId: input.threadId,
+          groupId: input.groupId,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            failure(
+              "orchestration_error",
+              `Unable to ${input.op} task context group on thread ${input.threadId}: ${errorMessage(error)}`,
+            ),
+          ),
+        );
+    },
+  );
+
   const list = (): Effect.Effect<TaskContextGroupListResult, TaskContextGroupError> =>
     Effect.gen(function* () {
-      const document = yield* readStore();
-      const groups = yield* Effect.forEach(document.groups, refreshGroup, { concurrency: 1 });
+      const rows = yield* listRows();
+      const groups = yield* Effect.forEach(
+        rows,
+        (row) => decodeRow(row).pipe(Effect.flatMap(refreshGroup)),
+        { concurrency: 1 },
+      );
       return { groups };
     });
 
@@ -258,8 +313,7 @@ const make = Effect.gen(function* () {
     groupId: TaskContextGroupId,
   ): Effect.Effect<TaskContextGroupGetResult, TaskContextGroupError> =>
     Effect.gen(function* () {
-      const document = yield* readStore();
-      const group = findGroup(document, groupId);
+      const group = yield* findGroup(groupId);
       if (group === null) return { group: null };
       return { group: yield* refreshGroup(group) };
     });
@@ -268,9 +322,12 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
   ): Effect.Effect<TaskContextGroupForThreadResult, TaskContextGroupError> =>
     Effect.gen(function* () {
-      yield* requireThread(threadId);
-      const document = yield* readStore();
-      const group = findGroupForThread(document, threadId);
+      const shell = yield* requireThread(threadId);
+      const byShell =
+        shell.taskContextGroupId === undefined || shell.taskContextGroupId === null
+          ? null
+          : yield* findGroup(shell.taskContextGroupId);
+      const group = byShell ?? (yield* findGroupForThread(threadId));
       if (group === null) return { group: null, relatedThreads: [] };
       const refreshed = yield* refreshGroup(group);
       const snapshot = yield* threads
@@ -280,14 +337,11 @@ const make = Effect.gen(function* () {
             failure("orchestration_error", `Unable to read threads: ${errorMessage(error)}`),
           ),
         );
-      const membership = new Map(
-        refreshed.memberThreadIds.map((id) => [id, refreshed.id] as const),
-      );
       const related = relatedTaskContextThreads(
         [...snapshot.threads, ...snapshot.archivedThreads].map((thread) => ({
           id: thread.id,
           title: thread.title,
-          taskContextGroupId: membership.get(thread.id) ?? null,
+          taskContextGroupId: thread.taskContextGroupId ?? null,
         })),
         refreshed.id,
         threadId,
@@ -383,13 +437,19 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<TaskContextGroupMutateResult, TaskContextGroupError> =>
     lock.withPermits(1)(
       Effect.gen(function* () {
-        const document = yield* readStore();
         const timestamp = yield* nowIso();
 
         if (input.action === "create") {
           const shell = yield* requireThread(input.threadId);
-          const existing = findGroupForThread(document, shell.id);
+          const existing = yield* findGroupForThread(shell.id);
           if (existing !== null) {
+            if (shell.taskContextGroupId !== existing.id) {
+              yield* syncShellMembership({
+                threadId: shell.id,
+                groupId: existing.id,
+                op: "attach",
+              });
+            }
             return { group: yield* refreshGroup(existing) };
           }
           const group: TaskContextGroup = {
@@ -401,11 +461,16 @@ const make = Effect.gen(function* () {
             createdAt: timestamp,
             updatedAt: timestamp,
           };
-          yield* writeStore({ version: 1, groups: [...document.groups, group] });
+          yield* writeGroup(group);
+          yield* syncShellMembership({
+            threadId: shell.id,
+            groupId: group.id,
+            op: "attach",
+          });
           return { group };
         }
 
-        const current = findGroup(document, input.groupId);
+        const current = yield* findGroup(input.groupId);
         if (current === null) {
           return yield* failure("not_found", `Task context group ${input.groupId} was not found.`);
         }
@@ -418,7 +483,7 @@ const make = Effect.gen(function* () {
           }
           case "attach-thread": {
             yield* requireThread(input.threadId);
-            const other = findGroupForThread(document, input.threadId);
+            const other = yield* findGroupForThread(input.threadId);
             if (other !== null && other.id !== current.id) {
               return yield* failure(
                 "invalid_resource",
@@ -427,18 +492,40 @@ const make = Effect.gen(function* () {
             }
             const members = nextMemberThreadIds(current.memberThreadIds, input.threadId, "attach");
             if (members === undefined) {
+              yield* syncShellMembership({
+                threadId: input.threadId,
+                groupId: current.id,
+                op: "attach",
+              });
               return { group: yield* refreshGroup(current) };
             }
             next = { ...current, memberThreadIds: [...members], updatedAt: timestamp };
-            break;
+            yield* writeGroup(next);
+            yield* syncShellMembership({
+              threadId: input.threadId,
+              groupId: next.id,
+              op: "attach",
+            });
+            return { group: yield* refreshGroup(next) };
           }
           case "detach-thread": {
             const members = nextMemberThreadIds(current.memberThreadIds, input.threadId, "detach");
             if (members === undefined) {
+              yield* syncShellMembership({
+                threadId: input.threadId,
+                groupId: current.id,
+                op: "detach",
+              });
               return { group: yield* refreshGroup(current) };
             }
             next = { ...current, memberThreadIds: [...members], updatedAt: timestamp };
-            break;
+            yield* writeGroup(next);
+            yield* syncShellMembership({
+              threadId: input.threadId,
+              groupId: next.id,
+              op: "detach",
+            });
+            return { group: yield* refreshGroup(next) };
           }
           case "attach-resource": {
             const resource = yield* resolveAttachResource(input.resource);
@@ -466,10 +553,7 @@ const make = Effect.gen(function* () {
           }
         }
 
-        yield* writeStore({
-          version: 1,
-          groups: document.groups.map((group) => (group.id === next.id ? next : group)),
-        });
+        yield* writeGroup(next);
         return { group: yield* refreshGroup(next) };
       }),
     );
@@ -481,8 +565,11 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.gen(function* () {
       const shell = yield* requireThread(input.threadId);
-      const document = yield* readStore();
-      const group = findGroupForThread(document, input.threadId);
+      const byShell =
+        shell.taskContextGroupId === undefined || shell.taskContextGroupId === null
+          ? null
+          : yield* findGroup(shell.taskContextGroupId);
+      const group = byShell ?? (yield* findGroupForThread(input.threadId));
       const refreshed = group === null ? null : yield* refreshGroup(group);
       const capturedAt = yield* nowIso();
       const merged = mergeTaskContextIntoMessage({
@@ -512,9 +599,7 @@ export const layer: Layer.Layer<
   TaskContextGroupService,
   never,
   | Crypto.Crypto
-  | FileSystem.FileSystem
-  | Path.Path
-  | ServerConfig.ServerConfig
+  | SqlClient.SqlClient
   | ThreadManagementService.ThreadManagementService
   | ProjectService.ProjectService
 > = Layer.effect(TaskContextGroupService, make);
