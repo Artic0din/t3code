@@ -71,7 +71,7 @@ export function serializeExternalSessionActivityEnabled(enabled: boolean): strin
   return enabled ? "1" : "0";
 }
 
-export function externalSessionThreadId(observation: AgentSessionObservation): string {
+function externalSessionThreadId(observation: AgentSessionObservation): string {
   return `import:${observation.providerInstanceId}:${observation.providerSessionId}`;
 }
 
