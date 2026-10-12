@@ -2538,12 +2538,13 @@ export const make = Effect.gen(function* () {
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
-      // Filtered by the prefix, so the default page size can never hide the issue's branch.
+      // Keep origin refs that share a local name. Dedup would hide the other repository's remote.
       const { refs } = yield* gitCore.listRefs({
         cwd: input.cwd,
         query: issueBranchPrefix,
         refKind: "all",
         refresh: true,
+        includeMatchingRemoteRefs: true,
       });
       const localRefs = refs.filter((ref) => !ref.isRemote);
       const firstForThisIssue = (
@@ -2579,6 +2580,7 @@ export const make = Effect.gen(function* () {
           branch: existing.name,
           worktreePath: existing.worktreePath,
           created: false,
+          recordRepository: false,
         };
       }
 
@@ -2586,19 +2588,25 @@ export const make = Effect.gen(function* () {
         Effect.map((settings) => settings.worktreeSubmodules),
         Effect.orElseSucceed(() => null),
       );
-      const finish = (worktree: VcsCreateWorktreeResult) => ({
+      const finish = (
+        worktree: VcsCreateWorktreeResult,
+        options: { readonly recordRepository: boolean },
+      ) => ({
         issue,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
         created: true,
+        recordRepository: options.recordRepository,
       });
       const worktreesDirectory = yield* readWorktreesDirectory;
       if (existing) {
+        // Existing local refs may be pre-upgrade and unrecorded; do not claim them for this issue.
         return finish(
           yield* gitCore.createWorktree(
             { cwd: input.cwd, refName: existing.name, path: null },
             { submodules, worktreesDirectory },
           ),
+          { recordRepository: false },
         );
       }
 
@@ -2627,6 +2635,7 @@ export const make = Effect.gen(function* () {
             },
             { submodules, worktreesDirectory },
           ),
+          { recordRepository: true },
         );
       }
 
@@ -2668,7 +2677,7 @@ export const make = Effect.gen(function* () {
             allowNonZeroExit: true,
           })
           .pipe(Effect.map((result) => result.exitCode === 0));
-      // Any remote may hold it (forks often use "upstream"); origin wins when several do. Match
+      // Prefer the remote that hosts the issue repository, then origin, then the rest. Match
       // <remote>/<base> exactly, since a suffix test also accepts e.g. aaa/releases/main.
       const remoteStartRef = Effect.gen(function* () {
         const listed = yield* gitCore.execute({
@@ -2679,9 +2688,16 @@ export const make = Effect.gen(function* () {
         const remotes = listed.stdout
           .split("\n")
           .map((line) => line.trim())
-          .filter((name) => name.length > 0)
-          .toSorted((left, right) => Number(right === "origin") - Number(left === "origin"));
+          .filter((name) => name.length > 0);
+        const matching: string[] = [];
+        const others: string[] = [];
         for (const remote of remotes) {
+          const remoteKey = yield* hostedRemoteRepository(remote);
+          if (repositoryKey !== null && remoteKey === repositoryKey) matching.push(remote);
+          else others.push(remote);
+        }
+        others.sort((left, right) => Number(right === "origin") - Number(left === "origin"));
+        for (const remote of [...matching, ...others]) {
           if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
             return `${remote}/${baseBranch}`;
           }
@@ -2712,11 +2728,16 @@ export const make = Effect.gen(function* () {
           },
           { submodules, worktreesDirectory },
         ),
+        { recordRepository: true },
       );
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
-      Effect.tap((result) => rememberIssueRepository(result.branch, result.issue.url)),
+      Effect.tap((result) =>
+        result.recordRepository
+          ? rememberIssueRepository(result.branch, result.issue.url)
+          : Effect.void,
+      ),
       Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),
