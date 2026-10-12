@@ -29,6 +29,11 @@ import {
   OrchestratorMcpThreadWaitResult,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
+  ThreadIssueMcpLinkInput,
+  ThreadIssueMcpLinkResult,
+  ThreadIssueMcpRelatedResult,
+  ThreadIssueMcpThreadInput,
+  ThreadIssueMcpUnlinkResult,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -36,6 +41,7 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as ThreadIssueService from "../../../orchestration-v2/ThreadIssueService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -46,6 +52,11 @@ const threadMetadataDependencies = [
   McpInvocationContext.McpInvocationContext,
   ThreadManagementService.ThreadManagementService,
   ThreadMetadataMcpService.ThreadMetadataMcpService,
+];
+const threadIssueDependencies = [
+  McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
+  ThreadIssueService.ThreadIssueService,
 ];
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
@@ -256,6 +267,45 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
   .annotate(Tool.Title, "Interrupt a T3 thread")
   .annotate(Tool.Destructive, true);
 
+const ThreadLinkIssueTool = Tool.make("t3_thread_link_issue", {
+  description:
+    "Link a GitHub issue to a thread. Omit threadId to use this thread. reference is an issue number or URL. Linking the same issue again does not create a duplicate. Linking a different issue replaces the current one. clientRequestId makes retries idempotent.",
+  parameters: ThreadIssueMcpLinkInput,
+  success: ThreadIssueMcpLinkResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: threadIssueDependencies,
+})
+  .annotate(Tool.Title, "Link a GitHub issue")
+  .annotate(Tool.Destructive, true);
+
+const ThreadUnlinkIssueTool = Tool.make("t3_thread_unlink_issue", {
+  description:
+    "Remove the GitHub issue linked to a thread. Omit threadId to use this thread. clientRequestId makes retries idempotent.",
+  parameters: ThreadIssueMcpThreadInput,
+  success: ThreadIssueMcpUnlinkResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: threadIssueDependencies,
+})
+  .annotate(Tool.Title, "Unlink a GitHub issue")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+
+const ThreadRelatedIssuesTool = Tool.make("t3_thread_related_issues", {
+  description:
+    "Read the GitHub issue linked to a thread and the other threads in this environment linked to that same host, repository, and issue number.",
+  parameters: ThreadIssueMcpThreadInput,
+  success: ThreadIssueMcpRelatedResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: threadIssueDependencies,
+})
+  .annotate(Tool.Title, "List threads for a linked issue")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
@@ -273,4 +323,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadSendTool,
   ThreadWaitTool,
   ThreadInterruptTool,
+  ThreadLinkIssueTool,
+  ThreadUnlinkIssueTool,
+  ThreadRelatedIssuesTool,
 );

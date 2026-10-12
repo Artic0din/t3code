@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
+import { ThreadIssueBanner } from "./ThreadIssueBanner";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
@@ -1078,6 +1079,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
 
   return (
     <View className="flex-1">
+      <ThreadIssueBanner
+        environmentId={props.environmentId}
+        threadId={props.selectedThread.id}
+        linkedIssue={props.selectedThread.linkedIssue ?? null}
+      />
       {showContent ? (
         <View
           style={{ flex: 1 }}

@@ -434,7 +434,8 @@ import {
   IssueThreadDialog,
   useIssueThreadDialogRequest,
 } from "./IssueThreadDialog";
-import { applyIssuePrefill } from "./issueThread.logic";
+import { durableIssueForSend } from "@t3tools/contracts";
+import { applyIssuePrefill, draftIssueAfterStart } from "./issueThread.logic";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
@@ -1764,6 +1765,7 @@ export default function ChatView(props: ChatViewProps) {
     return draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false;
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const setDraftLinkedIssue = useComposerDraftStore((store) => store.setDraftLinkedIssue);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
@@ -2911,8 +2913,13 @@ export default function ChatView(props: ChatViewProps) {
       if (next.prefill === undefined) issuePrefillByDraftRef.current.delete(preparedDraftId);
       else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
       setComposerDraftPrompt(preparedDraftId, next.prompt);
+      const currentIssue = useComposerDraftStore
+        .getState()
+        .getDraftSession(preparedDraftId)?.linkedIssue;
+      const linkedIssue = draftIssueAfterStart(currentIssue, input.issue);
+      if (linkedIssue !== undefined) setDraftLinkedIssue(preparedDraftId, linkedIssue);
     },
-    [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt],
+    [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt, setDraftLinkedIssue],
   );
 
   const handlePreparedPullRequestThread = useCallback(
@@ -9236,6 +9243,14 @@ export default function ChatView(props: ChatViewProps) {
         };
       }),
     );
+    const issueLaunchFields = (() => {
+      const linkedIssue = durableIssueForSend({
+        linkedIssue: isLocalDraftThread ? localDraftThread?.linkedIssue : null,
+        cancelled: false,
+        belongsToDraft: isLocalDraftThread,
+      });
+      return linkedIssue === null ? {} : { linkedIssue };
+    })();
     if (multipleModelSelections !== null) {
       const failedSelections: ModelSelection[] = [];
       let clearedDraft = false;
@@ -9324,6 +9339,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: null,
                       createdAt: messageCreatedAt,
+                      ...issueLaunchFields,
                     },
                     prepareWorktree: {
                       projectCwd: activeProject.workspaceRoot,
@@ -9648,6 +9664,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...issueLaunchFields,
                     },
                   }
                 : {}),

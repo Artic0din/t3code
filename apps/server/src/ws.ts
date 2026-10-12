@@ -1977,6 +1977,7 @@ const layerWsRpc = (
                   runtimeMode: input.runtimeMode,
                   interactionMode: input.interactionMode,
                   workspaceStrategy: input.workspaceStrategy,
+                  ...(input.linkedIssue === undefined ? {} : { linkedIssue: input.linkedIssue }),
                   ...(input.initialMessage === undefined
                     ? {}
                     : {

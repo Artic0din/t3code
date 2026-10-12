@@ -1,6 +1,7 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
 import type {
+  ThreadLinkedIssue,
   ThreadLinkedPullRequest,
   EnvironmentId,
   MessageId,
@@ -134,6 +135,7 @@ export interface EnvironmentThreadShell {
   readonly activeOrderKey: string | null;
   readonly pullRequests: ReadonlyArray<import("@t3tools/contracts").ThreadPullRequestLink>;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
+  readonly linkedIssue?: ThreadLinkedIssue | null;
   readonly branchPullRequest?: ThreadLinkedPullRequest | null;
   /**
    * Server-tracked visited watermark. `undefined` means the environment's
@@ -242,6 +244,7 @@ export function presentThreadShell(
     worktreePath: thread.worktreePath,
     pullRequests: threadPullRequestsOf(thread),
     linkedPullRequest: thread.linkedPullRequest ?? null,
+    ...(thread.linkedIssue === undefined ? {} : { linkedIssue: thread.linkedIssue }),
     branchPullRequest: thread.branchPullRequest ?? null,
     lineage: thread.lineage,
     forkedFrom: thread.forkedFrom,

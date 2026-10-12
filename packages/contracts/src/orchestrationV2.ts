@@ -44,6 +44,7 @@ import {
   OrchestrationGetTurnDiffResult,
 } from "./checkpointDiff.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ThreadIssueAvailability, ThreadIssueKey, ThreadLinkedIssue } from "./threadIssue.ts";
 import {
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -375,6 +376,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Pull request the user linked to this thread (#8160); optional so
       pre-linking servers still decode. */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  /** GitHub issue linked to this thread. Absent on servers from before issue links. */
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -1843,6 +1846,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   /** Pull request the user linked to this thread (#8160). */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  /** GitHub issue linked to this thread. Absent on servers from before issue links. */
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -2618,6 +2623,8 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    /** Set when an issue-start draft is becoming this thread. */
+    linkedIssue: Schema.optional(ThreadLinkedIssue),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({
@@ -2762,6 +2769,21 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     ...ThreadPullRequestKey.fields,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.issue.link"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...ThreadIssueKey.fields,
+    url: TrimmedNonEmptyString,
+    title: Schema.NullOr(TrimmedNonEmptyString),
+    availability: ThreadIssueAvailability,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("thread.issue.unlink"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ...ThreadIssueKey.fields,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-link.sync"),
@@ -3186,6 +3208,8 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  /** Persisted on the created thread when an issue-start draft is sent. */
+  linkedIssue: Schema.optional(ThreadLinkedIssue),
   initialMessage: Schema.optional(
     Schema.Struct({
       messageId: Schema.optional(MessageId),

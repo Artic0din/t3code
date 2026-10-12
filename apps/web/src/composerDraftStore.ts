@@ -23,6 +23,7 @@ import {
   type ScopedProjectRef,
   type ScopedThreadRef,
   ThreadId,
+  ThreadLinkedIssue,
   SnapShotSource,
 } from "@t3tools/contracts";
 import {
@@ -329,6 +330,7 @@ const PersistedDraftThreadState = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
@@ -461,6 +463,7 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
+  linkedIssue?: ThreadLinkedIssue | null;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -577,6 +580,11 @@ interface ComposerDraftStoreState {
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
     },
+  ) => void;
+  /** Remembers the issue a draft will attach when that draft is sent. Null clears it. */
+  setDraftLinkedIssue: (
+    threadRef: ComposerThreadTarget,
+    linkedIssue: ThreadLinkedIssue | null,
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
   clearProjectDraftThreadById: (
@@ -1638,6 +1646,9 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
+    ...(existingThread?.linkedIssue !== undefined
+      ? { linkedIssue: existingThread.linkedIssue }
+      : {}),
     promotedTo: null,
   };
 }
@@ -1672,6 +1683,11 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
+    (left.linkedIssue?.url ?? null) === (right.linkedIssue?.url ?? null) &&
+    (left.linkedIssue?.number ?? null) === (right.linkedIssue?.number ?? null) &&
+    (left.linkedIssue?.host ?? null) === (right.linkedIssue?.host ?? null) &&
+    (left.linkedIssue?.repository ?? null) === (right.linkedIssue?.repository ?? null) &&
+    (left.linkedIssue?.availability ?? null) === (right.linkedIssue?.availability ?? null) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -1709,6 +1725,16 @@ function removeDraftThreadReferences(
     draftThreadsByThreadKey: restDraftThreadsByThreadKey,
     logicalProjectDraftThreadKeyByLogicalProjectKey: nextLogicalMappings,
   };
+}
+
+function draftLinkedIssueFromUnknown(
+  value: unknown,
+):
+  | { readonly linkedIssue: ThreadLinkedIssue }
+  | { readonly linkedIssue: null }
+  | Record<string, never> {
+  if (value == null) return value === null ? { linkedIssue: null } : {};
+  return Schema.is(ThreadLinkedIssue)(value) ? { linkedIssue: value } : {};
 }
 
 function normalizePersistedDraftThreads(
@@ -1820,6 +1846,7 @@ function normalizePersistedDraftThreads(
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         startFromOrigin,
+        ...draftLinkedIssueFromUnknown(candidateDraftThread.linkedIssue),
         ...(candidateDraftThread.environmentSelection === "manual" ||
         candidateDraftThread.environmentSelection === "auto"
           ? { environmentSelection: candidateDraftThread.environmentSelection }
@@ -2582,6 +2609,9 @@ function toHydratedDraftThreadState(
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
     startFromOrigin: persistedDraftThread.startFromOrigin,
+    ...(persistedDraftThread.linkedIssue !== undefined
+      ? { linkedIssue: persistedDraftThread.linkedIssue }
+      : {}),
     ...(persistedDraftThread.environmentSelection
       ? { environmentSelection: persistedDraftThread.environmentSelection }
       : {}),
@@ -2886,6 +2916,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
+              ...(existing.linkedIssue !== undefined ? { linkedIssue: existing.linkedIssue } : {}),
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2901,6 +2932,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
+              (nextDraftThread.linkedIssue?.url ?? null) === (existing.linkedIssue?.url ?? null) &&
+              (nextDraftThread.linkedIssue?.availability ?? null) ===
+                (existing.linkedIssue?.availability ?? null) &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;
@@ -2909,6 +2943,22 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               draftThreadsByThreadKey: {
                 ...state.draftThreadsByThreadKey,
                 [threadKey]: nextDraftThread,
+              },
+            };
+          });
+        },
+        setDraftLinkedIssue: (threadRef, linkedIssue) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) return;
+          set((state) => {
+            const existing = state.draftThreadsByThreadKey[threadKey];
+            if (!existing) return state;
+            const next = linkedIssue === null ? null : linkedIssue;
+            if ((existing.linkedIssue ?? null) === next) return state;
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [threadKey]: { ...existing, linkedIssue: next },
               },
             };
           });

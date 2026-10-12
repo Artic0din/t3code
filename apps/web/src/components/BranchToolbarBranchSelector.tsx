@@ -40,6 +40,7 @@ import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
 } from "./chat/threadDetailsPanelStyles";
 import { ThreadDetailsPrRows } from "./chat/ThreadDetailsPrRows";
+import { ThreadIssueRow } from "./chat/ThreadIssueRow";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { openIssueThreadDialog } from "./IssueThreadDialog";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
@@ -816,6 +817,14 @@ export function BranchToolbarBranchSelector({
             openAriaLabel={prUrl ?? "Open pull request"}
             onOpen={(event) => openPrLink(event, prUrl)}
             onActed={() => branchStatusQuery.refresh()}
+          />
+        ) : null}
+        {displayMode === "panel" && serverThread ? (
+          <ThreadIssueRow
+            environmentId={environmentId}
+            threadId={serverThread.id}
+            cwd={serverThread.worktreePath ?? activeProject?.workspaceRoot ?? null}
+            linkedIssue={serverThread.linkedIssue ?? null}
           />
         ) : null}
       </div>

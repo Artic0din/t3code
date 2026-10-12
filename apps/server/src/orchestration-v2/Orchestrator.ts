@@ -50,6 +50,7 @@ import {
   type ProviderSessionId,
   RunId,
   RuntimeMode,
+  nextLinkedIssue,
   ThreadLinkedPullRequest,
   ThreadId,
   type TurnItemId,
@@ -426,6 +427,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request.watch":
     case "thread.pull-request-watch.sync":
     case "thread.pull-request.sync":
+    case "thread.issue.link":
+    case "thread.issue.unlink":
     case "thread.title.regeneration.complete":
     case "thread.runtime-mode.set":
     case "thread.interaction-mode.set":
@@ -2182,6 +2185,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       interactionMode: command.interactionMode,
       branch: command.branch,
       worktreePath: command.worktreePath,
+      ...(command.linkedIssue === undefined ? {} : { linkedIssue: command.linkedIssue }),
       activeProviderThreadId: null,
       lineage: {
         parentThreadId: null,
@@ -2365,6 +2369,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           | "thread.pull-request.watch"
           | "thread.pull-request-watch.sync"
           | "thread.pull-request.sync"
+          | "thread.issue.link"
+          | "thread.issue.unlink"
           | "thread.title.regeneration.complete"
           | "thread.runtime-mode.set"
           | "thread.interaction-mode.set"
@@ -3100,6 +3106,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             updatedAt: command.type === "thread.pull-request.watch" ? now : thread.updatedAt,
           };
         }
+        case "thread.issue.link":
+        case "thread.issue.unlink": {
+          const linkedIssue = nextLinkedIssue(thread.linkedIssue, command);
+          if (linkedIssue === undefined) return thread;
+          return {
+            ...thread,
+            linkedIssue,
+            updatedAt: now,
+          };
+        }
         case "thread.pull-request.sync":
           return {
             ...thread,
@@ -3190,6 +3206,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.pull-request-link.sync":
         case "thread.pull-request.watch":
         case "thread.pull-request-watch.sync":
+        case "thread.issue.link":
+        case "thread.issue.unlink":
+          return "thread.metadata-updated" as const;
         case "thread.pull-request.sync":
           return "thread.pull-request-synced" as const;
         case "thread.runtime-mode.set":
@@ -10210,6 +10229,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.pull-request-link.sync":
       case "thread.pull-request.watch":
       case "thread.pull-request.sync":
+      case "thread.issue.link":
+      case "thread.issue.unlink":
       case "thread.title.regeneration.complete":
       case "thread.runtime-mode.set":
       case "thread.interaction-mode.set":

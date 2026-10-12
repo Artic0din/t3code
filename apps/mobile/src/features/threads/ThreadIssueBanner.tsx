@@ -1,0 +1,92 @@
+import { useAtomValue } from "@effect/atom-react";
+import { StackActions, useNavigation } from "@react-navigation/native";
+import {
+  relatedIssueThreads,
+  type EnvironmentId,
+  type ThreadId,
+  type ThreadLinkedIssue,
+} from "@t3tools/contracts";
+import * as Haptics from "expo-haptics";
+import { Linking, Pressable, Text, View } from "react-native";
+
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
+
+function issueLabel(issue: ThreadLinkedIssue): string {
+  const title = issue.title ?? `${issue.repository}#${issue.number}`;
+  switch (issue.availability) {
+    case "open":
+    case "closed":
+      return title;
+    case "missing":
+      return `${title} could not be found`;
+    case "inaccessible":
+      return `${title} could not be read`;
+    default: {
+      const unreachable: never = issue.availability;
+      return unreachable;
+    }
+  }
+}
+
+export function ThreadIssueBanner(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly linkedIssue: ThreadLinkedIssue | null;
+}) {
+  const navigation = useNavigation();
+  const snapshot = useAtomValue(threadEnvironment.snapshotAtom(props.environmentId));
+  const unlinkIssue = useAtomCommand(threadEnvironment.unlinkIssue, "unlink issue");
+  if (props.linkedIssue === null) return null;
+  const issue = props.linkedIssue;
+  const related = relatedIssueThreads(
+    [...(snapshot?.threads ?? []), ...(snapshot?.archivedThreads ?? [])],
+    issue,
+    props.threadId,
+  );
+  return (
+    <View className="gap-1 px-4 py-2">
+      <Pressable
+        accessibilityRole="link"
+        onPress={() => {
+          void Linking.openURL(issue.url);
+        }}
+      >
+        <Text className="text-sm text-primary">{issueLabel(issue)}</Text>
+      </Pressable>
+      {related.map((thread) => (
+        <Pressable
+          key={thread.id}
+          accessibilityRole="button"
+          onPress={() => {
+            void Haptics.selectionAsync();
+            navigation.dispatch(
+              StackActions.push("Thread", {
+                environmentId: props.environmentId,
+                threadId: thread.id,
+              }),
+            );
+          }}
+        >
+          <Text className="text-sm text-foreground">{thread.title}</Text>
+        </Pressable>
+      ))}
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => {
+          void unlinkIssue({
+            environmentId: props.environmentId,
+            input: {
+              threadId: props.threadId,
+              host: issue.host,
+              repository: issue.repository,
+              number: issue.number,
+            },
+          });
+        }}
+      >
+        <Text className="text-sm text-foreground-muted">Unlink issue</Text>
+      </Pressable>
+    </View>
+  );
+}
