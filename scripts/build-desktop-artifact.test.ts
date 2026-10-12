@@ -46,6 +46,7 @@ import {
   renderMacPasskeyEntitlements,
   resolveClerkPasskeyNativeArtifacts,
   resolveMacPasskeySigningConfiguration,
+  resolveOptionalMacPasskeySigningConfiguration,
   resolveDesktopRuntimeDependencies,
   resolveMergedStageDependencies,
   resolveFffNativeDependencies,
@@ -1957,6 +1958,41 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(invalidPublishableKeyError.message, "pk_test_%");
   });
 
+  it("skips passkey signing when no macOS provisioning profile is configured", () => {
+    assert.isUndefined(resolveOptionalMacPasskeySigningConfiguration({}));
+    assert.isUndefined(
+      resolveOptionalMacPasskeySigningConfiguration({
+        T3CODE_APPLE_TEAM_ID: "ABC1234567",
+        T3CODE_MACOS_PROVISIONING_PROFILE: "  ",
+        T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev",
+      }),
+    );
+  });
+
+  it("resolves passkey signing when a macOS provisioning profile is configured", () => {
+    assert.deepStrictEqual(
+      resolveOptionalMacPasskeySigningConfiguration({
+        T3CODE_APPLE_TEAM_ID: "ABC1234567",
+        T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+        T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev",
+      }),
+      {
+        appId: "com.t3tools.t3code",
+        teamId: "ABC1234567",
+        rpDomains: ["example.clerk.accounts.dev"],
+        provisioningProfilePath: "/tmp/t3code.provisionprofile",
+      },
+    );
+    assert.throws(
+      () =>
+        resolveOptionalMacPasskeySigningConfiguration({
+          T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+          T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev",
+        }),
+      /T3CODE_APPLE_TEAM_ID/u,
+    );
+  });
+
   it("preserves known passkey signing configuration errors at the build boundary", () => {
     const decodingCause = new Error("publishable-key-decode-failed");
     const knownError = new InvalidMacPasskeyPublishableKeyError({ cause: decodingCause });
@@ -1994,6 +2030,27 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(mac.protocols, [
         { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
       ]);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("signs macOS builds with default entitlements when passkey signing is absent", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+      assert.notProperty(mac, "entitlements");
+      assert.notProperty(mac, "provisioningProfile");
+      assert.notProperty(mac, "hardenedRuntime");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
