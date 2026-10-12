@@ -237,5 +237,23 @@ describe("projectScripts helpers", () => {
         worktreePath: "/worktree",
       }),
     ).toBeNull();
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/a\\b",
+          repositoryRelativePrefix: "packages/a\\b",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/a\\b");
+    const longLegacyId = "x".repeat(130);
+    const hashedTerminalId = projectScriptActionTerminalId({
+      scriptId: longLegacyId,
+      cwd: "/worktree/packages/app",
+      worktreePath: "/worktree",
+    });
+    expect(hashedTerminalId?.startsWith("action-")).toBe(true);
+    expect(hashedTerminalId?.length).toBeLessThanOrEqual(128);
+    expect(hashedTerminalId).not.toBe(`action-${longLegacyId}`);
   });
 });

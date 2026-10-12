@@ -23,8 +23,9 @@ const DEFAULT_SUCCESS_TTL = Duration.minutes(1);
 // A favicon scan checks about 20 files. Shell reads (and PR sync through them) ask for every
 // linked project about once a minute, and icons rarely change, so a resolved favicon is kept
 // longer than the identity, which is only a hit on RepositoryIdentityResolver's own cache.
-// Moving a project's workspace root, and deleting it, invalidate both at once.
+// The repository prefix is likewise stable for a workspace root; invalidate still clears it.
 const DEFAULT_FAVICON_TTL = Duration.minutes(15);
+const DEFAULT_REPOSITORY_PREFIX_TTL = Duration.minutes(15);
 const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
@@ -42,7 +43,7 @@ function repositoryRelativePrefixFromShowPrefix(stdout: string): string | null {
   if (text.includes("\n") || text.includes("\r") || text.includes("\0")) return null;
   if (text === "") return "";
   if (text.startsWith("/") || text.startsWith("\\") || /^[a-zA-Z]:/.test(text)) return null;
-  const segments = text.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  const segments = text.split(/\/+/).filter((segment) => segment.length > 0);
   if (segments.length === 0) return "";
   if (segments.some((segment) => segment === "." || segment === "..")) return null;
   return segments.join("/");
@@ -62,6 +63,7 @@ export interface ProjectEnrichmentServiceOptions {
   readonly concurrency?: number;
   readonly successTtl?: Duration.Input;
   readonly faviconTtl?: Duration.Input;
+  readonly repositoryPrefixTtl?: Duration.Input;
   readonly failureTtl?: Duration.Input;
 }
 
@@ -120,6 +122,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const successTtl = options.successTtl ?? DEFAULT_SUCCESS_TTL;
   const failureTtl = options.failureTtl ?? DEFAULT_FAILURE_TTL;
   const faviconTtl = options.faviconTtl ?? DEFAULT_FAVICON_TTL;
+  const repositoryPrefixTtl = options.repositoryPrefixTtl ?? DEFAULT_REPOSITORY_PREFIX_TTL;
 
   const repositoryIdentityCache = yield* Cache.makeWith(
     (workspaceRoot: string) => Effect.exit(repositoryIdentityResolver.resolve(workspaceRoot)),
@@ -167,7 +170,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
       capacity: cacheCapacity,
       timeToLive: Exit.match({
         onFailure: () => failureTtl,
-        onSuccess: (result) => (Exit.isSuccess(result) ? successTtl : failureTtl),
+        onSuccess: (result) => (Exit.isSuccess(result) ? repositoryPrefixTtl : failureTtl),
       }),
     },
   );

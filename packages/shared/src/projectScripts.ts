@@ -1,6 +1,10 @@
+import { sha256 } from "@noble/hashes/sha2";
 import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
 
 import { normalizeProjectPathForComparison } from "./path.ts";
+
+const ACTION_TERMINAL_ID_PREFIX = "action-";
+const ACTION_TERMINAL_ID_MAX_LENGTH = 128;
 
 type ProjectScriptSettings = Pick<
   ServerSettings,
@@ -62,12 +66,21 @@ function sameProjectPath(left: string, right: string): boolean {
 }
 
 function joinRepositoryPrefix(root: string, prefix: string): string | null {
-  const segments = prefix.split(/[\\/]+/).filter((segment) => segment.length > 0);
+  const segments = prefix.split(/\/+/).filter((segment) => segment.length > 0);
   if (segments.some((segment) => segment === "." || segment === "..")) return null;
   if (segments.length === 0) return root;
   const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
   const base = root.replace(/[\\/]+$/g, "");
   return `${base}${separator}${segments.join(separator)}`;
+}
+
+function actionTerminalIdForScript(scriptId: string): string {
+  const candidate = `${ACTION_TERMINAL_ID_PREFIX}${scriptId}`;
+  if (candidate.length <= ACTION_TERMINAL_ID_MAX_LENGTH) return candidate;
+  const digest = Array.from(sha256(new TextEncoder().encode(scriptId)).slice(0, 16), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${ACTION_TERMINAL_ID_PREFIX}${digest}`;
 }
 
 export function projectScriptRunCwd(input: {
@@ -93,7 +106,7 @@ export function projectScriptActionTerminalId(input: {
 }): string | null {
   const worktreePath = input.worktreePath ?? null;
   if (worktreePath === null || sameProjectPath(worktreePath, input.cwd)) return null;
-  return `action-${input.scriptId}`;
+  return actionTerminalIdForScript(input.scriptId);
 }
 
 export function projectScriptRuntimeEnv(

@@ -850,8 +850,12 @@ type ScriptTerminalLaunch = {
   readonly worktreePath: string | null;
 };
 
-function scriptTerminalLaunchKey(threadId: string, terminalId: string): string {
-  return `${threadId}\u0000${terminalId}`;
+function scriptTerminalLaunchKey(
+  environmentId: string,
+  threadId: string,
+  terminalId: string,
+): string {
+  return `${environmentId}\u0000${threadId}\u0000${terminalId}`;
 }
 
 function useLocalDispatchState(input: {
@@ -1059,7 +1063,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       const summary =
         drawerTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
           .summary ?? null;
-      const recorded = scriptTerminalLaunches.get(scriptTerminalLaunchKey(threadId, terminalId));
+      const recorded = scriptTerminalLaunches.get(
+        scriptTerminalLaunchKey(threadRef.environmentId, threadId, terminalId),
+      );
       if (!summary && !recorded) continue;
       const worktreePathForLaunch = summary?.worktreePath ?? recorded?.worktreePath ?? null;
       const cwd = summary?.cwd ?? recorded?.cwd;
@@ -1081,6 +1087,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     scriptTerminalLaunches,
     terminalUiState.terminalIds,
     threadId,
+    threadRef.environmentId,
   ]);
   const serverOrderedTerminalIds = useMemo(
     () => drawerTerminalSessions.map((session) => session.target.terminalId),
@@ -1408,7 +1415,11 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     knownTerminalSessions.find((session) => session.target.terminalId === surface.activeTerminalId)
       ?.state.summary ?? null;
   const activeRecordedLaunch = scriptTerminalLaunches.get(
-    scriptTerminalLaunchKey(threadRef.threadId, surface.activeTerminalId),
+    scriptTerminalLaunchKey(
+      threadRef.environmentId,
+      threadRef.threadId,
+      surface.activeTerminalId,
+    ),
   );
   const worktreePath =
     activeSummary?.worktreePath ??
@@ -1462,7 +1473,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
         knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
           .summary ?? null;
       const recorded = scriptTerminalLaunches.get(
-        scriptTerminalLaunchKey(threadRef.threadId, terminalId),
+        scriptTerminalLaunchKey(threadRef.environmentId, threadRef.threadId, terminalId),
       );
       const terminalWorktreePath =
         summary?.worktreePath ??
@@ -4964,11 +4975,19 @@ export default function ChatView(props: ChatViewProps) {
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
       const wantsNewTerminal = Boolean(options?.preferNewTerminal) || isBaseTerminalBusy;
       const shouldCreateNewTerminal = wantsNewTerminal;
-      const dedicatedTerminalId = projectScriptActionTerminalId({
+      const preferredDedicatedTerminalId = projectScriptActionTerminalId({
         scriptId: script.id,
         cwd: targetCwd,
         worktreePath: targetWorktreePath,
       });
+      const dedicatedTerminalBusy =
+        preferredDedicatedTerminalId !== null &&
+        runningTerminalIds.includes(preferredDedicatedTerminalId);
+      const dedicatedTerminalId =
+        preferredDedicatedTerminalId !== null && !dedicatedTerminalBusy
+          ? preferredDedicatedTerminalId
+          : null;
+      const allocateNewTerminal = shouldCreateNewTerminal || dedicatedTerminalBusy;
 
       if (dedicatedTerminalId === null) {
         setTerminalUiLaunchContext({
@@ -4992,16 +5011,16 @@ export default function ChatView(props: ChatViewProps) {
       });
       const targetTerminalId =
         dedicatedTerminalId ??
-        (shouldCreateNewTerminal ? nextTerminalId(allocatableActiveTerminalIds) : baseTerminalId);
+        (allocateNewTerminal ? nextTerminalId(allocatableActiveTerminalIds) : baseTerminalId);
       scriptTerminalLaunchesRef.current.set(
-        scriptTerminalLaunchKey(activeThreadId, targetTerminalId),
+        scriptTerminalLaunchKey(environmentId, activeThreadId, targetTerminalId),
         {
           cwd: targetCwd,
           worktreePath: targetWorktreePath,
         },
       );
       const openTerminalInput: TerminalOpenInput =
-        dedicatedTerminalId !== null || shouldCreateNewTerminal
+        dedicatedTerminalId !== null || allocateNewTerminal
           ? {
               threadId: activeThreadId,
               terminalId: targetTerminalId,
@@ -5019,7 +5038,7 @@ export default function ChatView(props: ChatViewProps) {
               env: runtimeEnv,
             };
 
-      if (dedicatedTerminalId !== null || shouldCreateNewTerminal) {
+      if (dedicatedTerminalId !== null || allocateNewTerminal) {
         storeNewTerminal(activeThreadRef, targetTerminalId);
       } else {
         storeSetActiveTerminal(activeThreadRef, targetTerminalId);

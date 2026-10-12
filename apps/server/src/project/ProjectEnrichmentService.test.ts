@@ -462,16 +462,35 @@ it.effect("sends the repository prefix without a git remote", () =>
     );
     yield* Effect.gen(function* () {
       const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      const changes = yield* service.subscribeChanges;
       const immediate = yield* service.getAvailable("/repo/packages/app");
       assert.equal(immediate.repositoryRelativePrefixResolved, false);
       assert.isNull(immediate.repositoryRelativePrefix);
-      const resolved = yield* waitForAvailable(
-        service,
-        "/repo/packages/app",
-        (value) => value.repositoryRelativePrefixResolved === true,
-      );
-      assert.equal(resolved.repositoryRelativePrefix, "packages/app");
-      assert.isNull(resolved.repositoryIdentity);
+      const change = yield* PubSub.take(changes);
+      assert.equal(change.workspaceRoot, "/repo/packages/app");
+      assert.equal(change.enrichment.repositoryRelativePrefixResolved, true);
+      assert.equal(change.enrichment.repositoryRelativePrefix, "packages/app");
+      assert.isNull(change.enrichment.repositoryIdentity);
     }).pipe(Effect.provide(layer(layerMetadata, {}, prefixProbe("packages/app/\n"))));
+  }),
+);
+
+it.effect("keeps a literal backslash in the repository prefix", () =>
+  Effect.gen(function* () {
+    const layerMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Effect.succeed(null),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      const changes = yield* service.subscribeChanges;
+      yield* service.getAvailable("/repo/packages/a\\b");
+      const change = yield* PubSub.take(changes);
+      assert.equal(change.enrichment.repositoryRelativePrefix, "packages/a\\b");
+    }).pipe(Effect.provide(layer(layerMetadata, {}, prefixProbe("packages/a\\b/\n"))));
   }),
 );

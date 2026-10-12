@@ -763,18 +763,31 @@ function ThreadRouteContent(
         });
         return;
       }
-      const dedicatedTerminalId = projectScriptActionTerminalId({
+      const preferredDedicatedTerminalId = projectScriptActionTerminalId({
         scriptId: script.id,
         cwd,
         worktreePath: preferredWorktreePath,
       });
+      const dedicatedTerminalBusy =
+        preferredDedicatedTerminalId !== null &&
+        terminalMenuSessions.some(
+          (session) =>
+            session.terminalId === preferredDedicatedTerminalId &&
+            (session.status === "running" || session.status === "starting"),
+        );
+      const dedicatedTerminalId =
+        preferredDedicatedTerminalId !== null && !dedicatedTerminalBusy
+          ? preferredDedicatedTerminalId
+          : null;
       const targetTerminalId =
         dedicatedTerminalId ??
         resolveProjectScriptTerminalId({
           existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-          hasRunningTerminal: terminalMenuSessions.some(
-            (session) => session.status === "running" || session.status === "starting",
-          ),
+          hasRunningTerminal:
+            dedicatedTerminalBusy ||
+            terminalMenuSessions.some(
+              (session) => session.status === "running" || session.status === "starting",
+            ),
         });
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
