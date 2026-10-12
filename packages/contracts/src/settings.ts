@@ -1270,8 +1270,9 @@ export const ServerSettings = Schema.Struct({
   ),
   /**
    * Whether agents may drive the in-app preview browser. Turning this off
-   * skips only the `preview` capability. The MCP credential is still issued
-   * with `orchestration`, `worktree`, and `pull-requests`, so the `t3-code`
+   * omits `preview_*` and `t3_preview_*` tools from `tools/list` and still
+   * refuses those calls. The MCP credential is still issued with
+   * `orchestration`, `worktree`, and `pull-requests`, so the `t3-code`
    * server stays attached. The user's own browser panel is unaffected. This
    * setting gates agent access only.
    *
