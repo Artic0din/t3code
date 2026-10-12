@@ -76,11 +76,24 @@ function hasAnthropicApiKey(): boolean {
 }
 
 function hasCodexCredentials(): boolean {
+  if (process.env.OPENAI_API_KEY?.trim()) {
+    return true;
+  }
   const authPath = NodePath.join(NodeOS.homedir(), ".codex", "auth.json");
   try {
     const raw = NodeFS.readFileSync(authPath, "utf8");
-    const parsed = JSON.parse(raw) as { tokens?: unknown };
-    return parsed.tokens != null && typeof parsed.tokens === "object";
+    const parsed = JSON.parse(raw) as {
+      tokens?: unknown;
+      OPENAI_API_KEY?: unknown;
+      auth_mode?: unknown;
+    };
+    if (parsed.tokens != null && typeof parsed.tokens === "object") {
+      return true;
+    }
+    if (typeof parsed.OPENAI_API_KEY === "string" && parsed.OPENAI_API_KEY.trim() !== "") {
+      return true;
+    }
+    return parsed.auth_mode === "apikey";
   } catch {
     return false;
   }
@@ -313,46 +326,53 @@ async function measureClaude(
 ): Promise<LiveTokenRow> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
   try {
+    // Isolate via CLAUDE_CONFIG_DIR + --strict-mcp-config instead of --bare so
+    // the built-in claude_code tool surface matches production.
+    const configDir = NodePath.join(tempDir, "claude-config");
+    NodeFS.mkdirSync(configDir, { recursive: true });
+    const mcpConfigPath = NodePath.join(tempDir, "mcp.json");
+    NodeFS.writeFileSync(
+      mcpConfigPath,
+      JSON.stringify({
+        mcpServers:
+          withT3CodeMcp && mcp !== undefined
+            ? {
+                "t3-code": {
+                  type: "http",
+                  url: mcp.url,
+                  headers: {
+                    Authorization: mcp.authorizationHeader,
+                  },
+                },
+              }
+            : {},
+      }),
+    );
     const args = [
       "-p",
-      "--bare",
       "--output-format",
       "stream-json",
       "--verbose",
       "--dangerously-skip-permissions",
+      "--mcp-config",
+      mcpConfigPath,
+      "--strict-mcp-config",
       TRIVIAL_PROMPT,
     ];
     if (withT3CodeMcp) {
       if (mcp === undefined) {
         throw new Error("Claude with-MCP measurement requires an MCP endpoint");
       }
-      const mcpConfigPath = NodePath.join(tempDir, "mcp.json");
-      NodeFS.writeFileSync(
-        mcpConfigPath,
-        JSON.stringify({
-          mcpServers: {
-            "t3-code": {
-              type: "http",
-              url: mcp.url,
-              headers: {
-                Authorization: mcp.authorizationHeader,
-              },
-            },
-          },
-        }),
-      );
-      args.push("--mcp-config", mcpConfigPath);
-      args.push("--strict-mcp-config");
       args.push("--append-system-prompt", T3_CODE_ORCHESTRATION_INSTRUCTIONS);
     }
     const result = await runCommand("claude", args, {
       cwd: tempDir,
       env: {
         ...process.env,
-        CLAUDE_CODE_SIMPLE: "1",
+        CLAUDE_CONFIG_DIR: configDir,
       },
     });
-    if (result.status !== 0 && result.stdout.trim() === "") {
+    if (result.status !== 0) {
       throw new Error(result.stderr || `claude exited ${result.status}`);
     }
     const parsed = parseClaudeStreamJson(result.stdout, withT3CodeMcp);
@@ -399,17 +419,23 @@ async function measureCodex(
       NodePath.join(NodeOS.homedir(), ".codex", "auth.json"),
       NodePath.join(isolatedHome, "auth.json"),
     );
-    const configLines: string[] = [];
+    // Same developer_instructions on both sides so the live delta isolates MCP
+    // tool schemas. CLI config cannot replace Codex's built-in collaboration
+    // prompt the way the app-server path does; absolute totals are still not
+    // production-identical.
+    const configLines: string[] = [
+      `developer_instructions = ${JSON.stringify(buildCodexMeasureDeveloperInstructions(CODEX_MEASURE_MODEL))}`,
+      "",
+    ];
     if (withT3CodeMcp) {
       if (mcp === undefined) {
         throw new Error("Codex with-MCP measurement requires an MCP endpoint");
       }
       const authorization = mcp.authorizationHeader.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
       configLines.push(
-        `developer_instructions = ${JSON.stringify(buildCodexMeasureDeveloperInstructions(CODEX_MEASURE_MODEL))}`,
-        "",
         "[mcp_servers.t3-code]",
         `url = ${JSON.stringify(mcp.url)}`,
+        "required = true",
         "",
         "[mcp_servers.t3-code.http_headers]",
         `Authorization = "${authorization}"`,
@@ -421,7 +447,7 @@ async function measureCodex(
       cwd: tempDir,
       env: { ...process.env, CODEX_HOME: isolatedHome },
     });
-    if (result.status !== 0 && result.stdout.trim() === "") {
+    if (result.status !== 0) {
       throw new Error(redactSecrets(result.stderr || `codex exited ${result.status}`));
     }
     try {
