@@ -1,0 +1,75 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    # Cron runs in UTC: 02:00 AEST / 03:00 AEDT in Melbourne.
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream main
+    if: github.repository == 'Artic0din/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # GITHUB_TOKEN cannot push upstream workflow changes, and its PRs do not trigger CI.
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+      SYNC_BRANCH: sync/upstream
+      UPSTREAM_URL: https://github.com/pingdotgg/t3code.git
+      PR_TITLE: "chore(sync): merge upstream main"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Merge upstream main into sync branch
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags "$UPSTREAM_URL" main
+
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "main already contains upstream main $(git rev-parse --short FETCH_HEAD)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch -C "$SYNC_BRANCH"
+          if ! git merge --no-ff --no-edit -m "$PR_TITLE" FETCH_HEAD; then
+            {
+              echo "## Upstream merge conflict"
+              echo
+              echo "Resolve manually; main was not changed. Conflicting files:"
+              echo
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          git push --force origin "$SYNC_BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update sync PR with auto-merge
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          pr_number="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if test -z "$pr_number"; then
+            gh pr create \
+              --base main \
+              --head "$SYNC_BRANCH" \
+              --title "$PR_TITLE" \
+              --body "Automated merge of \`pingdotgg/t3code\` \`main\` into the fork, opened by the Upstream Sync workflow. Merges automatically once required checks pass."
+          fi
+          gh pr merge "$SYNC_BRANCH" --auto --merge
