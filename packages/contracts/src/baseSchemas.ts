@@ -387,3 +387,7 @@ export const RawEventId = makeEntityId("RawEventId");
 export type RawEventId = typeof RawEventId.Type;
 export const PlanId = makeEntityId("PlanId");
 export type PlanId = typeof PlanId.Type;
+export const TaskContextGroupId = makeEntityId("TaskContextGroupId");
+export type TaskContextGroupId = typeof TaskContextGroupId.Type;
+export const TaskContextResourceId = makeEntityId("TaskContextResourceId");
+export type TaskContextResourceId = typeof TaskContextResourceId.Type;
