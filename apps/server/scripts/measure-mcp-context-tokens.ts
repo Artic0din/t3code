@@ -47,6 +47,7 @@ type LiveTokenRow = {
   readonly withT3CodeMcp: boolean;
   readonly inputTokens: number;
   readonly model: string;
+  readonly cliVersion: string;
 };
 
 type McpEndpoint = {
@@ -130,17 +131,67 @@ function runCommand(
   });
 }
 
-function parseClaudeInputTokens(stdout: string): { inputTokens: number; model: string } {
-  const payload = JSON.parse(stdout) as {
-    usage?: {
-      input_tokens?: number;
-      cache_creation_input_tokens?: number;
-      cache_read_input_tokens?: number;
-    };
-    modelUsage?: Record<string, unknown>;
-    is_error?: boolean;
-    result?: string;
+type ClaudeStreamEvent = {
+  readonly type?: string;
+  readonly subtype?: string;
+  readonly mcp_servers?: ReadonlyArray<{ readonly name?: string; readonly status?: string }>;
+  readonly usage?: {
+    readonly input_tokens?: number;
+    readonly cache_creation_input_tokens?: number;
+    readonly cache_read_input_tokens?: number;
   };
+  readonly modelUsage?: Record<string, unknown>;
+  readonly is_error?: boolean;
+  readonly result?: string;
+};
+
+async function readCliVersion(command: string): Promise<string> {
+  const result = await runCommand(command, ["--version"]);
+  const version = result.stdout.trim();
+  if (result.status !== 0 || version === "") {
+    throw new Error(`${command} --version failed: ${result.stderr.trim() || result.status}`);
+  }
+  return version;
+}
+
+// Claude completes the turn even when an MCP server fails to load, so the
+// with-MCP row is only valid if the init event reports t3-code as connected.
+function parseClaudeStreamJson(
+  stdout: string,
+  requireT3CodeMcp: boolean,
+): { inputTokens: number; model: string } {
+  let init: ClaudeStreamEvent | undefined;
+  let result: ClaudeStreamEvent | undefined;
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let event: ClaudeStreamEvent;
+    try {
+      event = JSON.parse(trimmed) as ClaudeStreamEvent;
+    } catch {
+      continue;
+    }
+    if (event.type === "system" && event.subtype === "init") init = event;
+    if (event.type === "result") result = event;
+  }
+  if (requireT3CodeMcp) {
+    const t3Code = init?.mcp_servers?.find((server) => server.name === "t3-code");
+    if (t3Code?.status !== "connected") {
+      throw new Error(
+        `Claude did not connect to the t3-code MCP server (status: ${t3Code?.status ?? "missing"})`,
+      );
+    }
+  }
+  if (result === undefined) {
+    throw new Error("Claude stream-json output did not include a result event");
+  }
+  return parseClaudeInputTokens(result);
+}
+
+function parseClaudeInputTokens(payload: ClaudeStreamEvent): {
+  inputTokens: number;
+  model: string;
+} {
   if (payload.is_error) {
     throw new Error(payload.result ?? "Claude turn failed");
   }
@@ -255,14 +306,19 @@ async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>):
   );
 }
 
-async function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise<LiveTokenRow> {
+async function measureClaude(
+  withT3CodeMcp: boolean,
+  cliVersion: string,
+  mcp?: McpEndpoint,
+): Promise<LiveTokenRow> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
   try {
     const args = [
       "-p",
       "--bare",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
       "--dangerously-skip-permissions",
       TRIVIAL_PROMPT,
     ];
@@ -286,6 +342,7 @@ async function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise
         }),
       );
       args.push("--mcp-config", mcpConfigPath);
+      args.push("--strict-mcp-config");
       args.push("--append-system-prompt", T3_CODE_ORCHESTRATION_INSTRUCTIONS);
     }
     const result = await runCommand("claude", args, {
@@ -298,12 +355,13 @@ async function measureClaude(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise
     if (result.status !== 0 && result.stdout.trim() === "") {
       throw new Error(result.stderr || `claude exited ${result.status}`);
     }
-    const parsed = parseClaudeInputTokens(result.stdout);
+    const parsed = parseClaudeStreamJson(result.stdout, withT3CodeMcp);
     return {
       provider: "claude",
       withT3CodeMcp,
       inputTokens: parsed.inputTokens,
       model: parsed.model,
+      cliVersion,
     };
   } finally {
     NodeFS.rmSync(tempDir, { recursive: true, force: true });
@@ -316,7 +374,11 @@ function redactSecrets(text: string): string {
     .replace(/Authorization["']?\s*[:=]\s*["'][^"']+["']/giu, 'Authorization:"[redacted]"');
 }
 
-async function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise<LiveTokenRow> {
+async function measureCodex(
+  withT3CodeMcp: boolean,
+  cliVersion: string,
+  mcp?: McpEndpoint,
+): Promise<LiveTokenRow> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-codex-"));
   try {
     const args = [
@@ -369,6 +431,7 @@ async function measureCodex(withT3CodeMcp: boolean, mcp?: McpEndpoint): Promise<
         withT3CodeMcp,
         inputTokens: parsed.inputTokens,
         model: parsed.model,
+        cliVersion,
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -409,21 +472,29 @@ if (!wantClaude && !wantCodex) {
 }
 
 const rows: LiveTokenRow[] = [];
+const claudeVersion = wantClaude ? await readCliVersion("claude") : undefined;
+const codexVersion = wantCodex ? await readCliVersion("codex") : undefined;
 
 try {
   await withEphemeralMcpServer(async (mcp) => {
     if (wantClaude) {
-      rows.push(await measureClaude(false));
+      if (claudeVersion === undefined) {
+        throw new Error("Claude version missing after readCliVersion");
+      }
+      rows.push(await measureClaude(false, claudeVersion));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(await measureClaude(true, mcp));
+      rows.push(await measureClaude(true, claudeVersion, mcp));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
       console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
     }
     if (wantCodex) {
-      rows.push(await measureCodex(false));
+      if (codexVersion === undefined) {
+        throw new Error("Codex version missing after readCliVersion");
+      }
+      rows.push(await measureCodex(false, codexVersion));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(await measureCodex(true, mcp));
+      rows.push(await measureCodex(true, codexVersion, mcp));
       console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
     } else {
       console.error("Codex live measurement skipped: ~/.codex/auth.json tokens are missing.");
