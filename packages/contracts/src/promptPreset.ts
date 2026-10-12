@@ -5,8 +5,8 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
 export const MAX_PROMPT_PRESETS = 32;
-export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
-export const MAX_PROMPT_PRESET_INSTRUCTIONS_LENGTH = 16_000;
+const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
+const MAX_PROMPT_PRESET_INSTRUCTIONS_LENGTH = 16_000;
 
 export const PromptPresetId = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 export const PromptPreset = Schema.Struct({

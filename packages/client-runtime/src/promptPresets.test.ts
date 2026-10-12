@@ -292,9 +292,11 @@ describe("prompt preset records", () => {
   });
 });
 
+const decodeServerSettings = Schema.decodeSync(ServerSettings);
+
 describe("prompt preset persistence", () => {
   it("defaults missing presets to an empty environment-owned list", () => {
-    expect(Schema.decodeSync(ServerSettings)({}).promptPresets).toEqual([]);
+    expect(decodeServerSettings({}).promptPresets).toEqual([]);
     expect(DEFAULT_SERVER_SETTINGS.promptPresets).toEqual([]);
   });
 

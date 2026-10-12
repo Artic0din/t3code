@@ -8,8 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-export const PROMPT_PRESET_APPLY_DISPOSITIONS = ["insert", "replace"] as const;
-export type PromptPresetApplyDisposition = (typeof PROMPT_PRESET_APPLY_DISPOSITIONS)[number];
+export type PromptPresetApplyDisposition = "insert" | "replace";
 
 export interface PromptPresetDraft {
   readonly text: string;
