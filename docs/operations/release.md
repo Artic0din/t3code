@@ -515,16 +515,15 @@ Required secrets used by the workflow:
 - `APPLE_API_KEY`
 - `APPLE_API_KEY_ID`
 - `APPLE_API_ISSUER`
-- `MACOS_PROVISIONING_PROFILE` (base64-encoded provisioning profile with Associated Domains)
 
-Required repository variables:
+Optional passkey signing:
 
-- `APPLE_TEAM_ID`
-
-Optional repository variables:
-
-- `CLERK_PASSKEY_RP_DOMAINS`: comma-separated RP-domain override. By default, the build derives the
-  domain from the production Clerk publishable key.
+- `MACOS_PROVISIONING_PROFILE` secret: base64-encoded provisioning profile with Associated Domains.
+  Without it, the app is still signed and notarized, but with electron-builder's default
+  hardened-runtime entitlements and no passkey entitlements, so in-app passkeys are unavailable.
+- `APPLE_TEAM_ID` repository variable: required when `MACOS_PROVISIONING_PROFILE` is set.
+- `CLERK_PASSKEY_RP_DOMAINS` repository variable: comma-separated RP-domain override. By default,
+  the build derives the domain from the production Clerk publishable key.
 
 Checklist:
 
@@ -551,8 +550,8 @@ Notes:
 
 - `APPLE_API_KEY` is stored as raw key text in secrets.
 - The workflow writes it to a temporary `AuthKey_<id>.p8` file at runtime.
-- The workflow decodes `MACOS_PROVISIONING_PROFILE`, validates it with `security cms`, and passes it
-  to the desktop packager.
+- When `MACOS_PROVISIONING_PROFILE` is set, the workflow decodes it, validates it with
+  `security cms`, and passes it to the desktop packager.
 
 ## 3) Azure Trusted Signing setup (Windows)
 
