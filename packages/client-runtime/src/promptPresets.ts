@@ -55,7 +55,9 @@ const ALL_RUNTIME_MODES = [
 const ALL_INTERACTION_MODES = ["default", "plan"] as const;
 
 export function createPromptPresetId(): string {
-  return `preset-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // Click handlers need a sync id. Effect Crypto is async.
+  // @effect-diagnostics-next-line cryptoRandomUUID:off
+  return globalThis.crypto.randomUUID();
 }
 
 export function promptPresetCapabilitiesFromProviders(
