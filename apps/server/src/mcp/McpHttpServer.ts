@@ -168,7 +168,7 @@ const omitUngrantedListedTools = (
   if (response.body._tag !== "Uint8Array") return response;
   const raw = response.body.text ?? new TextDecoder().decode(response.body.body);
   const trimmed = raw.trim();
-  if (!trimmed.startsWith("{")) return response;
+  if (!trimmed.startsWith("{") || !trimmed.includes('"tools"')) return response;
   let message: unknown;
   try {
     message = JSON.parse(trimmed);
@@ -223,16 +223,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    const listingTools = yield* request.json.pipe(
-      Effect.map((body) => isRecord(body) && body.method === "tools/list"),
-      Effect.orElseSucceed(() => false),
-    );
     return yield* httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.map((response) =>
-        normalizeMcpHttpResponse(
-          listingTools ? omitUngrantedListedTools(response, invocation.capabilities) : response,
-        ),
+        normalizeMcpHttpResponse(omitUngrantedListedTools(response, invocation.capabilities)),
       ),
     );
   }) satisfies McpAuthMiddleware;
