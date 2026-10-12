@@ -1072,7 +1072,9 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
           ? projectScriptRunCwd({
               project: {
                 cwd: project.workspaceRoot,
-                repositoryRelativePrefix: project.repositoryRelativePrefix,
+                ...(project.repositoryRelativePrefix !== undefined
+                  ? { repositoryRelativePrefix: project.repositoryRelativePrefix }
+                  : {}),
               },
               worktreePath: threadWorktreePath,
             })
@@ -1495,7 +1497,9 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
           ? projectScriptRunCwd({
               project: {
                 cwd: project.workspaceRoot,
-                repositoryRelativePrefix: project.repositoryRelativePrefix,
+                ...(project.repositoryRelativePrefix !== undefined
+                  ? { repositoryRelativePrefix: project.repositoryRelativePrefix }
+                  : {}),
               },
               worktreePath: terminalWorktreePath,
             })
@@ -4987,7 +4991,9 @@ export default function ChatView(props: ChatViewProps) {
       const mappedCwd = projectScriptRunCwd({
         project: {
           cwd: activeProject.workspaceRoot,
-          repositoryRelativePrefix: activeProject.repositoryRelativePrefix,
+          ...(activeProject.repositoryRelativePrefix !== undefined
+            ? { repositoryRelativePrefix: activeProject.repositoryRelativePrefix }
+            : {}),
         },
         worktreePath: targetWorktreePath,
       });

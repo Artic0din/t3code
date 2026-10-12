@@ -752,7 +752,9 @@ function ThreadRouteContent(
       const cwd = projectScriptRunCwd({
         project: {
           cwd: selectedThreadProject.workspaceRoot,
-          repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix,
+          ...(selectedThreadProject.repositoryRelativePrefix !== undefined
+            ? { repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix }
+            : {}),
         },
         worktreePath: preferredWorktreePath,
       });
