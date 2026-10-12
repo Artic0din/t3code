@@ -323,6 +323,17 @@ import {
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
+  TaskContextGroupError,
+  TaskContextGroupForThreadInput,
+  TaskContextGroupForThreadResult,
+  TaskContextGroupGetInput,
+  TaskContextGroupGetResult,
+  TaskContextGroupListInput,
+  TaskContextGroupListResult,
+  TaskContextGroupMutateInput,
+  TaskContextGroupMutateResult,
+} from "./taskContextGroup.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -486,6 +497,11 @@ export const WS_METHODS = {
   secretsAnswerRequest: "secrets.answerRequest",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  taskContextGroupsList: "taskContextGroups.list",
+  taskContextGroupsGet: "taskContextGroups.get",
+  taskContextGroupsForThread: "taskContextGroups.forThread",
+  taskContextGroupsMutate: "taskContextGroups.mutate",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -1718,6 +1734,30 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   },
 );
 
+const WsTaskContextGroupsListRpc = Rpc.make(WS_METHODS.taskContextGroupsList, {
+  payload: TaskContextGroupListInput,
+  success: TaskContextGroupListResult,
+  error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
+});
+
+const WsTaskContextGroupsGetRpc = Rpc.make(WS_METHODS.taskContextGroupsGet, {
+  payload: TaskContextGroupGetInput,
+  success: TaskContextGroupGetResult,
+  error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
+});
+
+const WsTaskContextGroupsForThreadRpc = Rpc.make(WS_METHODS.taskContextGroupsForThread, {
+  payload: TaskContextGroupForThreadInput,
+  success: TaskContextGroupForThreadResult,
+  error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
+});
+
+const WsTaskContextGroupsMutateRpc = Rpc.make(WS_METHODS.taskContextGroupsMutate, {
+  payload: TaskContextGroupMutateInput,
+  success: TaskContextGroupMutateResult,
+  error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -1807,6 +1847,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsTaskContextGroupsListRpc,
+  WsTaskContextGroupsGetRpc,
+  WsTaskContextGroupsForThreadRpc,
+  WsTaskContextGroupsMutateRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

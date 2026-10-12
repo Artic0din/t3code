@@ -21,6 +21,9 @@ vi.mock("../ProjectScriptsControl", () => ({
     return null;
   },
 }));
+vi.mock("./TaskContextGroupPanel", () => ({
+  TaskContextGroupPanel: () => null,
+}));
 vi.mock("./ThreadAutomationsPanel", () => ({
   ThreadAutomationsPanel: () => null,
 }));

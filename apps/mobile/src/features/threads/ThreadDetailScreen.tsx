@@ -140,6 +140,7 @@ import {
 import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
 import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
+import { ThreadTaskContextBanner } from "./ThreadTaskContextBanner";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
@@ -1093,6 +1094,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 ? "absolute inset-0 bg-thread-canvas"
                 : "absolute inset-0 bg-screen"
             }
+          />
+          <ThreadTaskContextBanner
+            environmentId={props.environmentId}
+            threadId={props.selectedThread.id}
           />
           <RenderErrorBoundary
             key={selectedThreadKey}

@@ -2,12 +2,14 @@ import { remapComposerContextAttachments } from "@t3tools/shared/composerContext
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
+import * as TaskContextGroupService from "./TaskContextGroupService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -129,19 +131,44 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
     return yield* threads.dispatch(command);
+  const taskContextGroups = yield* Effect.serviceOption(
+    TaskContextGroupService.TaskContextGroupService,
+  );
+  const enrichedDispatch =
+    command.type === "message.dispatch" && Option.isSome(taskContextGroups)
+      ? yield* taskContextGroups.value
+          .enrichTurn({
+            threadId: command.threadId,
+            text: command.text,
+            context: command.context,
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("Task context enrichment skipped", { error }).pipe(Effect.as(null)),
+            ),
+          )
+      : null;
+  const dispatchCommandWithContext =
+    enrichedDispatch === null
+      ? command
+      : {
+          ...command,
+          text: enrichedDispatch.text,
+          ...(enrichedDispatch.context === undefined ? {} : { context: enrichedDispatch.context }),
+        };
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
-    threadId: command.threadId,
-    attachments: command.attachments ?? [],
+    threadId: dispatchCommandWithContext.threadId,
+    attachments: dispatchCommandWithContext.attachments ?? [],
   });
   return yield* threads
     .dispatch({
-      ...command,
+      ...dispatchCommandWithContext,
       attachments: claimed.attachments,
-      ...(command.context
+      ...(dispatchCommandWithContext.context
         ? {
             context: remapComposerContextAttachments(
-              command.context,
-              command.attachments ?? [],
+              dispatchCommandWithContext.context,
+              dispatchCommandWithContext.attachments ?? [],
               claimed.attachments,
             ),
           }

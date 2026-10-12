@@ -1089,6 +1089,21 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
     }),
+    taskContextGroupsList: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:list",
+      tag: WS_METHODS.taskContextGroupsList,
+      staleTimeMs: 5_000,
+    }),
+    taskContextGroup: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:get",
+      tag: WS_METHODS.taskContextGroupsGet,
+      staleTimeMs: 5_000,
+    }),
+    taskContextGroupForThread: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:for-thread",
+      tag: WS_METHODS.taskContextGroupsForThread,
+      staleTimeMs: 5_000,
+    }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -1298,6 +1313,20 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.scheduledTasksRotateWebhookToken,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    mutateTaskContextGroup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:task-context-groups:mutate",
+      tag: WS_METHODS.taskContextGroupsMutate,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([
+            environmentId,
+            input.action,
+            "groupId" in input ? input.groupId : null,
+            "threadId" in input ? input.threadId : null,
+          ]),
+      },
     }),
     // Off the config lane: answering a card must not queue behind settings
     // edits. One answer per card at a time.

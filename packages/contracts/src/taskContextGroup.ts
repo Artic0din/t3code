@@ -35,7 +35,6 @@ export const TaskContextUrlResource = Schema.Struct({
 });
 export type TaskContextUrlResource = typeof TaskContextUrlResource.Type;
 
-/** Reference to another thread. Identity only; never grants write or checkpoint access. */
 export const TaskContextThreadResource = Schema.Struct({
   kind: Schema.Literal("thread"),
   resourceId: TaskContextResourceId,
@@ -45,11 +44,6 @@ export const TaskContextThreadResource = Schema.Struct({
 });
 export type TaskContextThreadResource = typeof TaskContextThreadResource.Type;
 
-/**
- * Reference to a project in this environment. Clients send projectId only.
- * The server resolves the display name; the workspace root never becomes a
- * provider write root or checkpoint cwd from this link.
- */
 export const TaskContextProjectResource = Schema.Struct({
   kind: Schema.Literal("project"),
   resourceId: TaskContextResourceId,
@@ -94,6 +88,9 @@ export class TaskContextGroupError extends Schema.TaggedError<TaskContextGroupEr
   },
 ) {}
 
+export const TaskContextGroupListInput = Schema.Struct({});
+export type TaskContextGroupListInput = typeof TaskContextGroupListInput.Type;
+
 export const TaskContextGroupListResult = Schema.Struct({
   groups: Schema.Array(TaskContextGroup),
 });
@@ -108,6 +105,22 @@ export const TaskContextGroupGetResult = Schema.Struct({
   group: Schema.NullOr(TaskContextGroup),
 });
 export type TaskContextGroupGetResult = typeof TaskContextGroupGetResult.Type;
+
+export const TaskContextGroupForThreadInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type TaskContextGroupForThreadInput = typeof TaskContextGroupForThreadInput.Type;
+
+export const TaskContextGroupForThreadResult = Schema.Struct({
+  group: Schema.NullOr(TaskContextGroup),
+  relatedThreads: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
+    }),
+  ),
+});
+export type TaskContextGroupForThreadResult = typeof TaskContextGroupForThreadResult.Type;
 
 const CreateAction = Schema.Struct({
   action: Schema.Literal("create"),
@@ -180,7 +193,6 @@ export const TaskContextGroupMutateResult = Schema.Struct({
 });
 export type TaskContextGroupMutateResult = typeof TaskContextGroupMutateResult.Type;
 
-/** Inspectable payload stored on a turn's message.context for kind `task-context`. */
 export const TaskContextTurnSnapshot = Schema.Struct({
   groupId: TaskContextGroupId,
   title: TaskContextGroupTitle,
@@ -193,7 +205,6 @@ export type TaskContextTurnSnapshot = typeof TaskContextTurnSnapshot.Type;
 
 export const TASK_CONTEXT_COMPOSER_KIND = "task-context" as const;
 
-/** Client filesystem paths are never accepted as server resource authority. */
 export function refuseClientPathResource(input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;
   const record = input as Record<string, unknown>;
@@ -297,10 +308,6 @@ export function relatedTaskContextThreads(
     .map((thread) => ({ id: thread.id, title: thread.title }));
 }
 
-/**
- * Linking never returns another thread's worktree or project as this thread's
- * checkpoint/provider cwd. The helper encodes that isolation boundary for tests.
- */
 export function linkedThreadDoesNotWidenWorkspace(input: {
   readonly ownWorktreePath: string | null;
   readonly ownProjectId: ProjectId;
