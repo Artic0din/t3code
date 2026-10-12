@@ -30,6 +30,17 @@ import {
   type ScopedMobileSettingsTarget,
 } from "./settings-scoped-server";
 
+function uniformModelFallbackEnabled(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "settings">[],
+): boolean | null {
+  const reference = targets[0];
+  if (!reference) return null;
+  const enabled = reference.settings.modelFallback.enabled;
+  return targets.every((target) => target.settings.modelFallback.enabled === enabled)
+    ? enabled
+    : null;
+}
+
 export function SettingsThreadsRouteScreen() {
   const insets = useSafeAreaInsets();
 
@@ -90,6 +101,7 @@ function AutoSettleSettingsRows() {
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
       snoozeLimitedThreads?: boolean;
+      modelFallback?: { readonly enabled?: boolean };
     },
   ) => {
     if (writeInFlight.current) return;
@@ -184,6 +196,13 @@ function AutoSettleSettingsRows() {
             value={uniformMobileSetting(displayTargets, "snoozeLimitedThreads")}
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
+          />
+          <SettingsSwitchRow
+            icon="clock"
+            label="Automatic model fallback"
+            value={uniformModelFallbackEnabled(displayTargets)}
+            disabled={disabled}
+            onValueChange={(value) => writeToAll({ modelFallback: { enabled: value } })}
           />
         </SettingsSection>
       ) : null}

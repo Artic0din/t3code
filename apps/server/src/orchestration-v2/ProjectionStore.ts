@@ -351,6 +351,8 @@ export interface ProjectionStoreV2Shape {
     readonly now: DateTime.Utc;
     readonly autoResume: boolean;
     readonly snooze: boolean;
+    /** Failed usage-limit threads, including ones with no reported reset time. */
+    readonly fallback?: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
   /** Every candidate, or only `threadId` when a sweep checks one thread. */
   readonly getSettlementCandidates: (
@@ -3361,6 +3363,69 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getLimitRecoveryCandidates = Effect.fn("ProjectionStore.getLimitRecoveryCandidates")(
       function* (options: Parameters<ProjectionStoreV2Shape["getLimitRecoveryCandidates"]>[0]) {
+        if (options.fallback === true) {
+          const rows = yield* sql<{
+            readonly payload_json: string;
+            readonly run_id: string;
+            readonly completed_at: string | null;
+            readonly failure_payload_json: string;
+          }>`
+            SELECT t.payload_json, r.run_id, r.completed_at, item.payload_json AS failure_payload_json
+            FROM orchestration_v2_projection_threads t
+            INNER JOIN orchestration_v2_projection_runs r ON r.run_id = (
+              SELECT latest.run_id FROM orchestration_v2_projection_runs latest
+              WHERE latest.thread_id = t.thread_id
+                AND latest.status <> 'queued'
+                AND NOT (
+                  latest.status = 'cancelled'
+                  AND json_extract(latest.payload_json, '$.startedAt') IS NULL
+                )
+              ORDER BY latest.completed_at IS NULL DESC, latest.completed_at DESC,
+                latest.ordinal DESC, latest.run_id DESC
+              LIMIT 1
+            ) AND r.status = 'failed'
+            INNER JOIN orchestration_v2_projection_turn_items item ON item.turn_item_id = (
+              SELECT error.turn_item_id FROM orchestration_v2_projection_turn_items error
+              WHERE error.thread_id = t.thread_id AND error.run_id = r.run_id
+                AND error.type = 'error' AND error.status = 'failed'
+                AND error.node_id IS json_extract(r.payload_json, '$.rootNodeId')
+              ORDER BY error.updated_at DESC, error.ordinal DESC, error.turn_item_id DESC
+              LIMIT 1
+            )
+            WHERE t.deleted_at IS NULL
+              AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+              AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+              AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+                WHERE request.thread_id = t.thread_id AND request.status = 'pending'
+              )
+            ORDER BY t.thread_id
+          `;
+          const candidates: Array<ProjectionLimitRecoveryCandidate> = [];
+          for (const row of rows) {
+            const thread = yield* decodeThreadPayload(row.payload_json);
+            const item = yield* decodeTurnItemPayload(row.failure_payload_json);
+            const summary = threadErrorSummary(item.type === "error" ? item.failure : null, null);
+            if (summary.lastErrorClass !== "usage_limit") continue;
+            candidates.push({
+              id: thread.id,
+              status: "failed",
+              lastErrorClass: summary.lastErrorClass,
+              usageLimitResetAt: summary.usageLimitResetAt,
+              latestRunId: RunId.make(row.run_id),
+              latestRunCompletedAt:
+                row.completed_at === null ? null : DateTime.makeUnsafe(row.completed_at),
+              updatedAt: thread.updatedAt,
+              archivedAt: thread.archivedAt,
+              settledOverride: thread.settledOverride,
+              pendingRuntimeRequest: null,
+              limitRecovery: thread.limitRecovery ?? null,
+              snoozedUntil: thread.snoozedUntil ?? null,
+            });
+          }
+          return candidates;
+        }
         // Indexed latest-run and root-error lookups avoid reading run histories,
         // counting transcript items, or walking fork ancestors on scheduler ticks.
         const rows = yield* sql<{
@@ -5849,14 +5914,23 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   thread.settledOverride !== "settled",
               )
               .map(threadShellFromProjection)
+              .filter((thread) =>
+                options.fallback === true
+                  ? thread.status === "failed" &&
+                    thread.lastErrorClass === "usage_limit" &&
+                    thread.pendingRuntimeRequest === null
+                  : true,
+              )
               .filter(
                 (thread) =>
-                  thread.status === "failed" &&
-                  thread.lastErrorClass === "usage_limit" &&
-                  thread.usageLimitResetAt !== null &&
-                  thread.pendingRuntimeRequest === null,
+                  options.fallback === true ||
+                  (thread.status === "failed" &&
+                    thread.lastErrorClass === "usage_limit" &&
+                    thread.usageLimitResetAt !== null &&
+                    thread.pendingRuntimeRequest === null),
               )
               .filter((thread) => {
+                if (options.fallback === true) return true;
                 const resetMs = Date.parse(thread.usageLimitResetAt!);
                 const nowMs = DateTime.toEpochMillis(options.now);
                 if (

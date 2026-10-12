@@ -819,3 +819,22 @@ describe("worktreesDirectory", () => {
     expect(back.previousWorktreesDirectories).toEqual(["/b"]);
   });
 });
+
+describe("model fallback settings", () => {
+  it("replaces the model list and can enable fallback without clearing it", () => {
+    const instanceId = ProviderInstanceId.make("codex");
+    const configured = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      modelFallback: { enabled: false, models: [{ instanceId, model: "gpt-6" }] },
+    });
+    expect(configured.modelFallback).toEqual({
+      enabled: false,
+      models: [{ instanceId, model: "gpt-6" }],
+    });
+    expect(
+      applyServerSettingsPatch(configured, { modelFallback: { enabled: true } }).modelFallback,
+    ).toEqual({
+      enabled: true,
+      models: [{ instanceId, model: "gpt-6" }],
+    });
+  });
+});

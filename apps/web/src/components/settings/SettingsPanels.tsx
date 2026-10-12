@@ -10,7 +10,7 @@ import {
   type BackgroundActivityProfile,
   type DesktopUpdateChannel,
   ProviderDriverKind,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
@@ -2363,6 +2363,40 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("model-fallback")}
+          description="After an explicit usage limit, continue on the next model in this list. One provider instance id and model per line. Authentication, network, and other provider errors stay on the current model."
+          settingKeys={["modelFallback"]}
+          control={
+            <div className="flex w-72 flex-col gap-2">
+              <ScopedSwitch
+                settingKeys={["modelFallback"]}
+                checked={settings.modelFallback.enabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ modelFallback: { enabled: Boolean(checked) } })
+                }
+                aria-label="Automatic model fallback"
+              />
+              <textarea
+                key={formatModelFallbackList(settings.modelFallback.models)}
+                defaultValue={formatModelFallbackList(settings.modelFallback.models)}
+                rows={4}
+                spellCheck={false}
+                aria-label="Fallback models"
+                className="w-full rounded-md border px-2 py-1 text-xs"
+                onBlur={(event) =>
+                  updateSettings({
+                    modelFallback: {
+                      enabled: settings.modelFallback.enabled,
+                      models: parseModelFallbackList(event.currentTarget.value),
+                    },
+                  })
+                }
+              />
+            </div>
+          }
+        />
 
         <SettingsRow
           {...searchableSetting("working-shelf")}
@@ -3616,4 +3650,20 @@ export function ArchivedThreadsPanel() {
       )}
     </SettingsPageContainer>
   );
+}
+
+function formatModelFallbackList(models: readonly { instanceId: string; model: string }[]): string {
+  return models.map((model) => `${model.instanceId} ${model.model}`).join("\n");
+}
+
+function parseModelFallbackList(value: string) {
+  return value.split("\n").flatMap((line) => {
+    const trimmed = line.trim();
+    const separator = trimmed.indexOf(" ");
+    if (separator <= 0) return [];
+    const instanceId = trimmed.slice(0, separator).trim();
+    const model = trimmed.slice(separator + 1).trim();
+    if (instanceId.length === 0 || model.length === 0) return [];
+    return [{ instanceId: ProviderInstanceId.make(instanceId), model }];
+  });
 }

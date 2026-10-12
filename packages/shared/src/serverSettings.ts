@@ -288,6 +288,8 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
+    // The model list replaces; deepMerge would keep entries the client removed.
+    modelFallback: modelFallbackPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -423,6 +425,14 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.sourceControlWriterModelSelection !== undefined
       ? { sourceControlWriterModelSelection: patch.sourceControlWriterModelSelection }
+      : {}),
+    ...(modelFallbackPatch !== undefined
+      ? {
+          modelFallback: {
+            enabled: modelFallbackPatch.enabled ?? current.modelFallback.enabled,
+            models: modelFallbackPatch.models ?? current.modelFallback.models,
+          },
+        }
       : {}),
     ...(automaticGitFetchInterval !== undefined ? { automaticGitFetchInterval } : {}),
     ...(providerHealthRefreshInterval !== undefined ? { providerHealthRefreshInterval } : {}),

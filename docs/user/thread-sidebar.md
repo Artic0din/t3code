@@ -200,6 +200,19 @@ The environment must be running when the reset arrives; it resumes overdue
 continuations after a restart. Sending a new message, archiving, or settling the
 thread prevents a pending continuation from starting.
 
+**Automatic model fallback** in the same thread settings continues a thread on
+the next model in your list when the provider reports a usage limit. It is off
+until you turn it on and add models, one provider instance and model per line
+on web and desktop. The server applies that list to the main thread and to
+delegated agents. A child that stops because of a usage limit is failed, not
+completed. Authentication, network, and other provider errors do not switch
+models. The thread names the original model, the replacement, and a reset time
+only when the provider reported one for that quota. If the messages name more
+than one window, the thread does not guess which quota the reset belongs to.
+Models that share the exhausted account or named model quota are skipped. When
+the list is used up, or the next model cannot continue without replaying
+finished tool calls, the thread stays paused and says why.
+
 Choose **Snooze until reset** to hide the thread until its allowance returns.
 Snooze and auto-resume are independent: snooze alone wakes the thread without
 sending a message; enabling both wakes and continues it. **Wake now** cancels

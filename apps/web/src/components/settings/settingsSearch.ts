@@ -309,6 +309,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
+    id: "model-fallback",
+    title: "Automatic model fallback",
+    to: "/settings/general",
+    searchTerms: ["usage quota limit switch model provider continue fallback"],
+  },
+  {
     id: "working-shelf",
     title: "Working section (beta)",
     to: "/settings/general",
