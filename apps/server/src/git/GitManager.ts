@@ -284,6 +284,29 @@ function issueRepositoryKey(value: string): string | null {
   }
 }
 
+function issueFetchFailureDetail(stderr: string): string | null {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim());
+  if (
+    lines.some((line) =>
+      /^(?:fatal: (?:Authentication failed|could not read (?:Username|Password))\b|\S+: Permission denied \(publickey)/i.test(
+        line,
+      ),
+    )
+  ) {
+    return "Git could not authenticate with the remote. Check Git credentials or SSH access on the server, then retry.";
+  }
+  if (
+    lines.some((line) =>
+      /^(?:(?:fatal: |ssh: )?Could not resolve host(?:name)?\b|fatal: unable to access .+: (?:Could not resolve host|Failed to connect)\b|ssh: connect to host \S+ port \d+: (?:Connection timed out|Connection refused|Network is unreachable)\b)/i.test(
+        line,
+      ),
+    )
+  ) {
+    return "Git could not reach the remote. Check the server's network connection and remote host, then retry.";
+  }
+  return null;
+}
+
 function hostedRepositoryKey(remoteUrl: string): string | null {
   const segments = normalizeGitRemoteUrl(remoteUrl)
     .split("/")
@@ -2535,6 +2558,37 @@ export const make = Effect.gen(function* () {
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
       const issueBranchPrefix = `issue/${issue.number}-`;
+      const listedRemotes = yield* gitCore.execute({
+        operation: "GitManager.prepareIssueThread.remotes",
+        cwd: input.cwd,
+        args: ["remote"],
+      });
+      for (const remote of listedRemotes.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((name) => name.length > 0)) {
+        const fetched = yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.fetchIssueBranches",
+          cwd: input.cwd,
+          args: [
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            remote,
+            `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
+          ],
+          allowNonZeroExit: true,
+        });
+        if (fetched.exitCode !== 0) {
+          return yield* new GitManagerError({
+            operation: "prepareIssueThread",
+            cwd: input.cwd,
+            detail:
+              issueFetchFailureDetail(fetched.stderr) ??
+              `Could not fetch issue branches from ${remote}.`,
+          });
+        }
+      }
       // Filtered by the prefix, so the default page size can never hide the issue's branch.
       const { refs } = yield* gitCore.listRefs({
         cwd: input.cwd,
