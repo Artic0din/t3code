@@ -137,6 +137,23 @@ function todoTurn(input: {
     ...(input.explanation === undefined ? {} : { explanation: input.explanation }),
   };
 }
+function commandTurn(input: {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly command: string;
+  readonly output: string;
+  readonly exitCode: number;
+}): OrchestrationV2TurnItem {
+  return {
+    ...turnBase,
+    id: TurnItemId.make(input.id),
+    ordinal: input.ordinal,
+    type: "command_execution",
+    input: input.command,
+    output: input.output,
+    exitCode: input.exitCode,
+  };
+}
 function historyFrom(items: ReadonlyArray<OrchestrationV2TurnItem>) {
   return items.flatMap((item) => {
     const historical = historicalMessage(item);
@@ -404,6 +421,62 @@ describe("handoff budget", () => {
     assert.include(text, "LIVE_STEP");
     assert.notInclude(text, "STALE_STEP");
     assert.ok(first.messages.some((entry) => entry.planId === PlanId.make("plan:migration")));
+  });
+
+  it("keeps an early user decision and a shortened command when output is 60k", () => {
+    const lines = Array.from({ length: 2_000 }, (_, index) => `row ${index} ${"x".repeat(24)}`);
+    const output = lines.join("\n");
+    assert.isAtLeast(output.length, 60_000);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:bulky-command",
+          ordinal: 3,
+          command: "vp test",
+          output,
+          exitCode: 2,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: vp test");
+    assert.include(command?.text, "Exit code: 2");
+    assert.include(command?.text, "item:bulky-command");
+    assert.include(command?.text, "row 0 ");
+    assert.include(command?.text, "row 1999 ");
+    assert.notInclude(command?.text, "row 1000 ");
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+    assert.include(text, "ASSISTANT_REPLY keep the summary");
+    assert.include(text, "LATEST_REQUEST continue");
+  });
+
+  it("keeps the assistant reply ahead of a large command that still fits", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", `ASSISTANT_REPLY ${"s".repeat(5_000)}`, 2),
+        commandTurn({
+          id: "item:wide-command",
+          ordinal: 3,
+          command: "cat build.log",
+          output: "w".repeat(12_000),
+          exitCode: 3,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "ASSISTANT_REPLY");
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
   });
 
   it("retains short conversations verbatim in role and order", () => {
