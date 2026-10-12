@@ -307,6 +307,14 @@ function issueFetchFailureDetail(stderr: string): string | null {
   return null;
 }
 
+const ISSUE_BRANCH_FETCH_ENV = Object.freeze({
+  GCM_INTERACTIVE: "never",
+  GIT_ASKPASS: "",
+  GIT_TERMINAL_PROMPT: "0",
+  SSH_ASKPASS: "",
+  SSH_ASKPASS_REQUIRE: "never",
+} satisfies NodeJS.ProcessEnv);
+
 function hostedRepositoryKey(remoteUrl: string): string | null {
   const segments = normalizeGitRemoteUrl(remoteUrl)
     .split("/")
@@ -2563,10 +2571,16 @@ export const make = Effect.gen(function* () {
         cwd: input.cwd,
         args: ["remote"],
       });
+      let fetchedAnyRemote = false;
+      let fetchFailureDetail: string | undefined;
       for (const remote of listedRemotes.stdout
         .split("\n")
         .map((line) => line.trim())
         .filter((name) => name.length > 0)) {
+        if (repositoryKey !== null) {
+          const remoteKey = yield* hostedRemoteRepository(remote);
+          if (remoteKey !== null && remoteKey !== repositoryKey) continue;
+        }
         const fetched = yield* gitCore.execute({
           operation: "GitManager.prepareIssueThread.fetchIssueBranches",
           cwd: input.cwd,
@@ -2577,17 +2591,23 @@ export const make = Effect.gen(function* () {
             remote,
             `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
           ],
+          env: ISSUE_BRANCH_FETCH_ENV,
           allowNonZeroExit: true,
         });
-        if (fetched.exitCode !== 0) {
-          return yield* new GitManagerError({
-            operation: "prepareIssueThread",
-            cwd: input.cwd,
-            detail:
-              issueFetchFailureDetail(fetched.stderr) ??
-              `Could not fetch issue branches from ${remote}.`,
-          });
+        if (fetched.exitCode === 0) {
+          fetchedAnyRemote = true;
+          continue;
         }
+        fetchFailureDetail ??=
+          issueFetchFailureDetail(fetched.stderr) ??
+          `Could not fetch issue branches from ${remote}.`;
+      }
+      if (fetchFailureDetail !== undefined && !fetchedAnyRemote) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: fetchFailureDetail,
+        });
       }
       // Filtered by the prefix, so the default page size can never hide the issue's branch.
       const { refs } = yield* gitCore.listRefs({

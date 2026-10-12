@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -5464,6 +5465,159 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(result.branch).toBe("issue/31-add-dark-mode");
       const worktreeSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
       expect(worktreeSha).toBe(pushedSha);
+    }),
+  );
+
+  it.effect("continues when one remote fetch fails and another has the issue branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      const staleRemote = NodePath.join(repoDir, "missing-stale-remote.git");
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["remote", "add", "stale", staleRemote]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
+      yield* runGit(repoDir, ["add", "dark.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Earlier issue work"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
+      const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+        pushedSha,
+      );
+    }),
+  );
+
+  it.effect("skips a hosted remote that cannot belong to the issue repository", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
+      yield* runGit(repoDir, ["add", "dark.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Earlier issue work"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
+      const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
+      yield* runGit(repoDir, ["remote", "add", "other", "https://github.com/other/elsewhere.git"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+      expect(result.branch).toBe("issue/31-add-dark-mode");
+      expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+        pushedSha,
+      );
+    }),
+  );
+
+  it.effect("makes issue-branch fetches non-interactive", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      const tempDir = yield* makeTempDir("t3code-git-manager-ssh-env-");
+      yield* initRepo(repoDir);
+      const sshLogPath = NodePath.join(tempDir, "ssh-env.txt");
+      const sshWrapperPath = fileURLToPath(
+        new URL("../vcs/testing/GitVcsDriverCore.fixture.sh", import.meta.url),
+      );
+      const envKeys = [
+        "GCM_INTERACTIVE",
+        "GIT_ASKPASS",
+        "GIT_SSH",
+        "GIT_TERMINAL_PROMPT",
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "T3_TEST_SSH_ASKPASS_LOG",
+      ] as const;
+      const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+      yield* runGit(repoDir, ["remote", "add", "origin", "ssh://example.invalid/repo.git"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issue: {
+            number: 31,
+            title: "Add dark mode",
+            body: "Please",
+            url: "https://github.com/o/r/issues/31",
+            state: "OPEN",
+          },
+        },
+      });
+
+      const error = yield* Effect.gen(function* () {
+        process.env.GIT_SSH = sshWrapperPath;
+        process.env.GCM_INTERACTIVE = "always";
+        process.env.GIT_ASKPASS = "git-askpass";
+        process.env.GIT_TERMINAL_PROMPT = "1";
+        process.env.SSH_ASKPASS = "ssh-askpass";
+        process.env.SSH_ASKPASS_REQUIRE = "force";
+        process.env.T3_TEST_SSH_ASKPASS_LOG = sshLogPath;
+        return yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
+          Effect.flip,
+        );
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            for (const key of envKeys) {
+              const previous = previousEnv.get(key);
+              if (previous === undefined) {
+                delete process.env[key];
+                continue;
+              }
+              process.env[key] = previous;
+            }
+          }),
+        ),
+      );
+
+      expect(error.message).toMatch(/authenticate|reach the remote|Could not fetch/i);
+      expect(NodeFS.readFileSync(sshLogPath, "utf8").trim().split(/\r?\n/)).toEqual([
+        "GCM_INTERACTIVE=never",
+        "GIT_ASKPASS=",
+        "GIT_TERMINAL_PROMPT=0",
+        "SSH_ASKPASS=",
+        "SSH_ASKPASS_REQUIRE=never",
+      ]);
     }),
   );
 
