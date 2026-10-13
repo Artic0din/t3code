@@ -102,8 +102,23 @@ export const AgentSessionImportInput = Schema.Struct({
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   providerSessionId: Schema.optional(TrimmedNonEmptyString),
-});
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.providerInstanceId === undefined) === (input.providerSessionId === undefined) ||
+      "Provide both providerInstanceId and providerSessionId, or neither.",
+  ),
+);
 export type AgentSessionImportInput = typeof AgentSessionImportInput.Type;
+
+export class AgentSessionImportInvalidSelectorError extends Schema.TaggedError<AgentSessionImportInvalidSelectorError>()(
+  "AgentSessionImportInvalidSelectorError",
+  {},
+) {
+  override get message(): string {
+    return "Provide both providerInstanceId and providerSessionId, or neither.";
+  }
+}
 
 export class AgentSessionImportProjectNotFoundError extends Schema.TaggedError<AgentSessionImportProjectNotFoundError>()(
   "AgentSessionImportProjectNotFoundError",

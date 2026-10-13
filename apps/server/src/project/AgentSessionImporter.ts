@@ -3,6 +3,8 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  AgentSessionImportInput,
+  AgentSessionImportInvalidSelectorError,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionImportSource,
@@ -14,7 +16,6 @@ import {
   ProviderDriverKind,
   ThreadId,
   TurnItemId,
-  type AgentSessionImportInput,
   type AgentSessionImportResult,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
@@ -41,6 +42,7 @@ import * as ProjectService from "./ProjectService.ts";
 const IMPORT_EVENT_PREFIX = "agent-session-import:v2";
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const isAgentSessionImportInput = Schema.is(AgentSessionImportInput);
 const decodeImportedTranscriptPayload = Schema.decodeUnknownOption(
   Schema.Struct({
     cwd: Schema.optional(Schema.String),
@@ -175,6 +177,9 @@ const make = Effect.gen(function* () {
   const importRecentAgentThreads = Effect.fn("importRecentAgentThreadsV2")(function* (
     input: AgentSessionImportInput,
   ) {
+    if (!isAgentSessionImportInput(input)) {
+      return yield* new AgentSessionImportInvalidSelectorError({});
+    }
     const project = yield* projects.getById(input.projectId).pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
       Effect.flatMap(
