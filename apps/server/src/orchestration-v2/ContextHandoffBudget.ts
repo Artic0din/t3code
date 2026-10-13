@@ -8,9 +8,61 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2TurnItem,
   TurnItemId,
+  PlanId,
+  ThreadId,
 } from "@t3tools/contracts";
 
 import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import type { ProjectionStoreV2Shape } from "./ProjectionStore.ts";
+
+export type SupersededHistoryPlans = ReadonlyMap<
+  ThreadId,
+  {
+    readonly planIds: ReadonlySet<PlanId>;
+    readonly itemIds: ReadonlySet<TurnItemId>;
+  }
+>;
+
+export function readSupersededHistoryPlans(
+  store: Pick<ProjectionStoreV2Shape, "getSupersededPlanIds" | "getTurnItem">,
+  messages: ReadonlyArray<OrchestrationV2HistoricalMessage>,
+) {
+  const threads = new Set(
+    messages
+      .filter((message) => planReplayKey(message) !== null)
+      .map((message) => message.threadId),
+  );
+  return Effect.forEach(threads, (threadId) =>
+    Effect.gen(function* () {
+      const planIds = new Set(yield* store.getSupersededPlanIds(threadId));
+      const retiredItems = yield* Effect.forEach(
+        messages.filter(
+          (message) =>
+            message.threadId === threadId &&
+            planReplayKey(message) !== null &&
+            message.planId === undefined,
+        ),
+        (message) =>
+          store
+            .getTurnItem({ threadId, itemId: message.itemId })
+            .pipe(
+              Effect.map((item) =>
+                item !== null &&
+                (item.type === "todo_list" || item.type === "proposed_plan") &&
+                planIds.has(item.planId)
+                  ? message.itemId
+                  : null,
+              ),
+            ),
+      );
+      return [
+        threadId,
+        { planIds, itemIds: new Set(retiredItems.filter((id) => id !== null)) },
+      ] as const;
+    }),
+  ).pipe(Effect.map((entries): SupersededHistoryPlans => new Map(entries)));
+}
 
 export const DEFAULT_HANDOFF_TOKEN_CAP = 16_000;
 const HANDOFF_BYTE_CAP = 64_000;
@@ -298,7 +350,10 @@ function planReplayKey(message: OrchestrationV2HistoricalMessage): string | null
   return `${message.kind}:${message.planId ?? message.itemId}`;
 }
 
-function latestPlanStates(messages: ReadonlyArray<OrchestrationV2HistoricalMessage>): {
+function latestPlanStates(
+  messages: ReadonlyArray<OrchestrationV2HistoricalMessage>,
+  supersededPlans?: SupersededHistoryPlans,
+): {
   readonly messages: ReadonlyArray<OrchestrationV2HistoricalMessage>;
   readonly supersededItemIds: ReadonlyArray<TurnItemId>;
 } {
@@ -307,6 +362,14 @@ function latestPlanStates(messages: ReadonlyArray<OrchestrationV2HistoricalMessa
   messages.forEach((message, index) => {
     const key = planReplayKey(message);
     if (key === null) return;
+    const retired = supersededPlans?.get(message.threadId);
+    if (
+      retired?.itemIds.has(message.itemId) ||
+      (message.planId !== undefined && retired?.planIds.has(message.planId))
+    ) {
+      supersededItemIds.push(message.itemId);
+      return;
+    }
     const previous = latestIndex.get(key);
     if (previous !== undefined) supersededItemIds.push(messages[previous]!.itemId);
     latestIndex.set(key, index);
@@ -369,8 +432,9 @@ export function selectHistory(input: {
   readonly coverage: string;
   readonly omittedItems?: number;
   readonly budget: number;
+  readonly supersededPlans?: SupersededHistoryPlans;
 }) {
-  const { messages, supersededItemIds } = latestPlanStates(input.messages);
+  const { messages, supersededItemIds } = latestPlanStates(input.messages, input.supersededPlans);
   const selected = new Set<number>();
   const contextFor = (
     count: number,

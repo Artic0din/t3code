@@ -35,6 +35,7 @@ import {
   attachmentTokenAllowance,
   contextUsageForHandoff,
   historicalMessage,
+  readSupersededHistoryPlans,
   latestNativeContextUsage,
 } from "./ContextHandoffBudget.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
@@ -1146,6 +1147,12 @@ export const layer: Layer.Layer<
                 ];
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
+            supersededPlans: yield* readSupersededHistoryPlans(
+              projectionStore,
+              [...effectiveHandoffs, ...retryHandoff].flatMap(
+                (handoff) => handoff.history?.messages ?? [],
+              ),
+            ),
             deferInline: compact,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {

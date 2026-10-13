@@ -14,8 +14,11 @@ import * as Layer from "effect/Layer";
 
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as IdAllocator from "./IdAllocator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 
-const layerTest = ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer));
+const layerTest = ContextHandoffService.layer.pipe(
+  Layer.provide(Layer.merge(IdAllocator.layer, ProjectionStore.layerMemory)),
+);
 
 function importedItem(
   input:
