@@ -1,6 +1,8 @@
 import type {
   OrchestrationV2ContextHandoff,
   OrchestrationV2ProviderThread,
+  ContextHandoffId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2HistoricalContext } from "./ProviderAdapter.ts";
 import * as Effect from "effect/Effect";
@@ -49,13 +51,15 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
       coverage = `Context handoff (${strategies.join(", ")}). ${pending.length} handoff records; detailed coverage references omitted. Recover history with t3_thread_read({threadId:"${input.providerThread.appThreadId ?? pending[0]!.threadId}",view:"activity",limit:20,maxCharsPerItem:4000}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.`;
     }
     const seen = new Set(input.alreadyDeliveredItemIds);
-    const messages = pending
-      .flatMap((handoff) => handoff.history?.messages ?? [])
-      .filter((message) => {
+    const messageSources = new Map<TurnItemId, ContextHandoffId>();
+    const messages = pending.flatMap((handoff) =>
+      (handoff.history?.messages ?? []).filter((message) => {
         if (seen.has(message.itemId)) return false;
         seen.add(message.itemId);
+        messageSources.set(message.itemId, handoff.id);
         return true;
-      });
+      }),
+    );
     // Old preview handoffs remain readable. Their preformatted context is included
     // as a whole when it fits, otherwise the coverage marker points to retrieval.
     const oldContext = pending
@@ -97,11 +101,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
                         .map((message) => message.itemId),
                     ],
                     itemIds: selected.messages
-                      .filter((message) =>
-                        handoff.history?.messages.some(
-                          (candidate) => candidate.itemId === message.itemId,
-                        ),
-                      )
+                      .filter((message) => messageSources.get(message.itemId) === handoff.id)
                       .map((message) => message.itemId),
                   },
                 }),

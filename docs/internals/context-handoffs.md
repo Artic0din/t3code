@@ -3,6 +3,14 @@
 Portable provider and fork handoffs are textual summaries. They do not claim native provider context
 parity.
 
+Provider handoff command records have an 8 KiB JSON-encoded text limit.
+Long inputs and outputs retain their beginning and end, the exit code, and a retrieval marker.
+Outputs retain at most the first and last 20 lines, with byte limits within those lines.
+History selection keeps each transformed command record whole and preserves recency after pinned conversation and plan items.
+Native-context estimates include retired native plans, full native commands, and the saved text of the handoff that actually delivered imported commands.
+Older delivery receipts can assign differing copies of an item to several handoffs.
+Those ambiguous receipts use the largest saved text as a conservative estimate until native token telemetry is available, which can reduce the allowance for additional history.
+
 `ContextHandoffServiceV2` includes user messages, assistant messages, command executions, file
 changes, checkpoints, and prior handoffs. It skips other turn item types. For text-bearing items,
 `compactText` replaces every whitespace run with one space, trims the result, and returns at most

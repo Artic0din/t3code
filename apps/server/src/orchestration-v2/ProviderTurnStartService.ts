@@ -4,6 +4,7 @@ import {
   CommandId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ContextHandoff,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
@@ -11,6 +12,7 @@ import {
   type OrchestrationV2TurnItem,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -54,6 +56,24 @@ import {
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
 } from "./RestartBackgroundNote.ts";
+
+export function deliveredHandoffTextForEstimate(
+  handoffs: ReadonlyArray<OrchestrationV2ContextHandoff>,
+): ReadonlyMap<TurnItemId, string> {
+  const text = new Map<TurnItemId, string>();
+  for (const handoff of handoffs) {
+    const deliveredItemIds = new Set(handoff.delivery?.itemIds ?? []);
+    for (const message of handoff.history?.messages ?? []) {
+      const previous = text.get(message.itemId);
+      if (
+        deliveredItemIds.has(message.itemId) &&
+        (previous === undefined || Buffer.byteLength(message.text) > Buffer.byteLength(previous))
+      )
+        text.set(message.itemId, message.text);
+    }
+  }
+  return text;
+}
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
@@ -988,6 +1008,7 @@ export const layer: Layer.Layer<
       const deliveredItemIds = new Set(
         settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
       );
+      const deliveredMessageText = deliveredHandoffTextForEstimate(settledHandoffs);
       const coveredItemIds = new Set([
         ...deliveredItemIds,
         ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
@@ -1043,7 +1064,14 @@ export const layer: Layer.Layer<
                 (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
               )
                 return sum;
-              const historical = historicalMessage(item, { includeCancelledPlans: true });
+              const deliveredText = deliveredMessageText.get(item.id);
+              const historical =
+                deliveredText !== undefined
+                  ? { text: deliveredText }
+                  : historicalMessage(item, {
+                      truncateCommandOutput: false,
+                      includeCancelledPlans: true,
+                    });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

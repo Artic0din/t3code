@@ -190,6 +190,100 @@ export function handoffBudget(input: {
   );
 }
 
+const COMMAND_OUTPUT_HEAD_LINES = 20;
+const COMMAND_OUTPUT_TAIL_LINES = 20;
+const COMMAND_RECORD_BYTE_CAP = 8_192;
+
+type HistoricalMessageOptions = {
+  readonly truncateCommandOutput?: boolean;
+  readonly includeCancelledPlans?: boolean;
+};
+
+function commandTruncationMarker(itemId: OrchestrationV2TurnItem["id"], part = "output"): string {
+  return `[${part} truncated; itemId=${itemId}; recover the full command with t3_thread_read using itemId and textOffset]`;
+}
+
+function commandOutputRanges(output: string) {
+  const end = output.endsWith("\n") ? output.length - 1 : output.length;
+  const head = output.slice(0, Math.min(end, COMMAND_RECORD_BYTE_CAP));
+  const tailOffset = Math.max(0, end - COMMAND_RECORD_BYTE_CAP);
+  const tail = output.slice(tailOffset, end);
+  let headEnd = head.length;
+  let headCursor = 0;
+  for (let line = 0; line < COMMAND_OUTPUT_HEAD_LINES; line++) {
+    const boundary = head.indexOf("\n", headCursor);
+    if (boundary < 0) break;
+    headCursor = boundary + 1;
+    if (line === COMMAND_OUTPUT_HEAD_LINES - 1) headEnd = boundary;
+  }
+  let tailStart = tailOffset;
+  let tailBoundary = tail.length;
+  for (let line = 0; line < COMMAND_OUTPUT_TAIL_LINES; line++) {
+    tailBoundary = tail.lastIndexOf("\n", tailBoundary - 1);
+    if (tailBoundary < 0) break;
+    if (line === COMMAND_OUTPUT_TAIL_LINES - 1) tailStart = tailOffset + tailBoundary + 1;
+  }
+  return tailStart <= headEnd + 1 ? undefined : { headEnd, tailStart, end };
+}
+
+function jsonEncodedBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text));
+}
+
+function splitsSurrogatePair(text: string, index: number): boolean {
+  const previous = text.charCodeAt(index - 1);
+  const next = text.charCodeAt(index);
+  return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+}
+
+function truncateCommandPart(
+  text: string,
+  budget: number,
+  truncationMarker: string,
+  ranges?: { readonly headEnd: number; readonly tailStart: number; readonly end: number },
+): string {
+  if (ranges === undefined && text.length + 2 <= budget && jsonEncodedBytes(text) <= budget)
+    return text;
+  const marker = `\n${truncationMarker}\n`;
+  const end = ranges?.end ?? text.length;
+  let retain = Math.max(0, budget - jsonEncodedBytes(marker));
+  while (retain >= 0) {
+    let headEnd = Math.min(ranges?.headEnd ?? end, Math.floor(retain / 2));
+    let tailStart = Math.max(ranges?.tailStart ?? 0, end - (retain - Math.floor(retain / 2)));
+    if (splitsSurrogatePair(text, headEnd)) headEnd--;
+    if (splitsSurrogatePair(text, tailStart)) tailStart++;
+    const candidate = text.slice(0, headEnd) + marker + text.slice(tailStart, end);
+    if (jsonEncodedBytes(candidate) <= budget) return candidate;
+    if (retain === 0) break;
+    retain = Math.floor(retain / 2);
+  }
+  return marker.trim();
+}
+
+function commandOutputText(
+  item: Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
+  truncate: boolean,
+): string {
+  const output = item.output ?? "";
+  if (!truncate)
+    return [`Command: ${item.input}`, `Exit code: ${item.exitCode ?? "unknown"}`, output].join(
+      "\n",
+    );
+  const input = truncateCommandPart(
+    item.input,
+    Math.floor(COMMAND_RECORD_BYTE_CAP / 2),
+    commandTruncationMarker(item.id, "input"),
+  );
+  const prefix = `Command: ${input}\nExit code: ${item.exitCode ?? "unknown"}\n`;
+  const body = truncateCommandPart(
+    output,
+    COMMAND_RECORD_BYTE_CAP - jsonEncodedBytes(prefix) + 2,
+    commandTruncationMarker(item.id),
+    commandOutputRanges(output),
+  );
+  return prefix + body;
+}
+
 function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list" }>): string {
   return [
     ...item.steps.map((step) => `${step.status}: ${step.text}`),
@@ -199,7 +293,7 @@ function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list"
 
 export function historicalMessage(
   item: OrchestrationV2TurnItem,
-  options?: { readonly includeCancelledPlans?: boolean },
+  options?: HistoricalMessageOptions,
 ): OrchestrationV2HistoricalMessage | null {
   if (
     options?.includeCancelledPlans !== true &&
@@ -208,6 +302,7 @@ export function historicalMessage(
   ) {
     return null;
   }
+  const truncateCommandOutput = options?.truncateCommandOutput !== false;
   let text: string;
   switch (item.type) {
     case "user_message":
@@ -215,11 +310,7 @@ export function historicalMessage(
       text = item.text;
       break;
     case "command_execution":
-      text = [
-        `Command: ${item.input}`,
-        `Exit code: ${item.exitCode ?? "unknown"}`,
-        item.output ?? "",
-      ].join("\n");
+      text = commandOutputText(item, truncateCommandOutput);
       break;
     case "error":
       text = item.failure.message;
@@ -381,7 +472,7 @@ export function selectHistory(input: {
     }
   };
   const pinPartialAnswer = () =>
-    tryAdd(messages.findLastIndex((message) => message.role === "assistant"));
+    tryAdd(messages.findLastIndex((message) => message.kind === "assistant_message"));
   const pinOriginalRequest = () => tryAdd(messages.findIndex((message) => message.role === "user"));
   pinLatestRequest();
   pinPlanStates();

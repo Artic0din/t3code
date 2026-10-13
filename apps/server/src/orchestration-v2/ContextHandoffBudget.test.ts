@@ -29,6 +29,7 @@ import {
 } from "./ContextHandoffBudget.ts";
 import { projectContextHandoffForWire } from "./WireProjection.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { deliveredHandoffTextForEstimate } from "./ProviderTurnStartService.ts";
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeHandoff = Schema.decodeUnknownSync(OrchestrationV2ContextHandoff);
@@ -135,6 +136,23 @@ function todoTurn(input: {
       status: step.status,
     })),
     ...(input.explanation === undefined ? {} : { explanation: input.explanation }),
+  };
+}
+function commandTurn(input: {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly command: string;
+  readonly output: string;
+  readonly exitCode: number;
+}): Extract<OrchestrationV2TurnItem, { type: "command_execution" }> {
+  return {
+    ...turnBase,
+    id: TurnItemId.make(input.id),
+    ordinal: input.ordinal,
+    type: "command_execution",
+    input: input.command,
+    output: input.output,
+    exitCode: input.exitCode,
   };
 }
 function historyFrom(items: ReadonlyArray<OrchestrationV2TurnItem>) {
@@ -435,6 +453,348 @@ describe("handoff budget", () => {
     assert.include(text, "LIVE_STEP");
     assert.notInclude(text, "STALE_STEP");
     assert.ok(first.messages.some((entry) => entry.planId === PlanId.make("plan:migration")));
+  });
+
+  it("keeps an early user decision and a shortened command when output is 60k", () => {
+    const lines = Array.from({ length: 2_000 }, (_, index) => `row ${index} ${"x".repeat(24)}`);
+    const output = lines.join("\n");
+    assert.isAtLeast(output.length, 60_000);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:bulky-command",
+          ordinal: 3,
+          command: "vp test",
+          output,
+          exitCode: 2,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: vp test");
+    assert.include(command?.text, "Exit code: 2");
+    assert.include(command?.text, "item:bulky-command");
+    assert.include(command?.text, "row 0 ");
+    assert.include(command?.text, "row 1999 ");
+    assert.notInclude(command?.text, "row 1000 ");
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+    assert.include(text, "ASSISTANT_REPLY keep the summary");
+    assert.include(text, "LATEST_REQUEST continue");
+  });
+
+  it("shortens a long single-line command so the stub stays selectable", () => {
+    const output = "x".repeat(60_000);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:one-line-command",
+          ordinal: 3,
+          command: "cat blob.json",
+          output,
+          exitCode: 0,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: cat blob.json");
+    assert.include(command?.text, "Exit code: 0");
+    assert.include(command?.text, "item:one-line-command");
+    assert.isBelow(Buffer.byteLength(command!.text), 12_000);
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+    assert.include(text, "ASSISTANT_REPLY keep the summary");
+  });
+
+  it("counts full command output for native-context estimates", () => {
+    const item = commandTurn({
+      id: "item:native-command",
+      ordinal: 1,
+      command: "cat blob.json",
+      output: "y".repeat(40_000),
+      exitCode: 0,
+    });
+    const handoff = historicalMessage(item);
+    const native = historicalMessage(item, { truncateCommandOutput: false });
+    assert.isBelow(Buffer.byteLength(handoff!.text), 12_000);
+    assert.isAtLeast(Buffer.byteLength(native!.text), 40_000);
+    assert.include(native!.text, "y".repeat(40_000));
+  });
+
+  it("keeps exactly forty printed lines when output ends with a newline", () => {
+    const lines = Array.from({ length: 40 }, (_, index) => `line-${index}`);
+    const output = `${lines.join("\n")}\n`;
+    const message = historicalMessage(
+      commandTurn({
+        id: "item:forty-lines",
+        ordinal: 1,
+        command: "printf lines",
+        output,
+        exitCode: 0,
+      }),
+    );
+    assert.ok(message);
+    assert.include(message.text, "line-0");
+    assert.include(message.text, "line-20");
+    assert.include(message.text, "line-39");
+    assert.notInclude(message.text, "output truncated");
+    assert.include(message.text, output);
+  });
+
+  it("keeps a JSON-heavy command stub selectable under the default budget", () => {
+    const output = "\0".repeat(8_192);
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", "ASSISTANT_REPLY keep the summary", 2),
+        commandTurn({
+          id: "item:nul-command",
+          ordinal: 3,
+          command: "cat binary.blob",
+          output,
+          exitCode: 0,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const command = selected.messages.find((entry) => entry.kind === "command_execution");
+    assert.equal(command?.kind, "command_execution");
+    assert.include(command?.text, "Command: cat binary.blob");
+    assert.include(command?.text, "Exit code: 0");
+    assert.include(command?.text, "item:nul-command");
+    assert.isAtMost(Buffer.byteLength(JSON.stringify(command!.text)), 12_000);
+    assert.ok(selected.messages.some((entry) => entry.text.includes("ASSISTANT_REPLY")));
+  });
+
+  it("keeps the assistant reply when a fitting command log would take the budget", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        assistantTurn("item:assistant", `ASSISTANT_REPLY ${"s".repeat(5_000)}`, 2),
+        commandTurn({
+          id: "item:wide-command",
+          ordinal: 3,
+          command: "cat build.log",
+          output: "w".repeat(12_000),
+          exitCode: 3,
+        }),
+        userTurn("item:latest", "LATEST_REQUEST continue", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "ASSISTANT_REPLY");
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+  });
+
+  it.each(["x", "\0", "界", "🧪", '"', "\\"])(
+    "bounds the complete command record with a 60k %s input",
+    (character) => {
+      const item = commandTurn({
+        id: "item:long-input",
+        ordinal: 2,
+        command: `INPUT_HEAD ${character.repeat(60_000)} INPUT_TAIL`,
+        output: `OUTPUT_HEAD ${character.repeat(60_000)} OUTPUT_TAIL`,
+        exitCode: 7,
+      });
+      const selected = selectHistory({
+        messages: historyFrom([userTurn("item:request", "Keep the command outcome.", 1), item]),
+        coverage: "History",
+        budget: 16_000,
+      });
+      const command = selected.messages.find((entry) => entry.itemId === item.id);
+      assert.equal(command?.kind, "command_execution");
+      assert.include(command!.text, "INPUT_HEAD");
+      assert.include(command!.text, "INPUT_TAIL");
+      assert.include(command!.text, "Exit code: 7");
+      assert.include(command!.text, "OUTPUT_HEAD");
+      assert.include(command!.text, "OUTPUT_TAIL");
+      assert.include(command!.text, "item:long-input");
+      assert.isAtMost(Buffer.byteLength(JSON.stringify(command!.text)), 8_192);
+      assert.notInclude(command!.text, "\ufffd");
+      assert.include(historicalMessage(item, { truncateCommandOutput: false })!.text, item.input);
+    },
+  );
+
+  it("keeps a recent short command ahead of older activity under a tight budget", () => {
+    const command = historicalMessage(
+      commandTurn({
+        id: "item:short-result",
+        ordinal: 3,
+        command: "vp test",
+        output: `RECENT_RESULT ${"r".repeat(800)}`,
+        exitCode: 1,
+      }),
+    )!;
+    const selected = selectHistory({
+      messages: [
+        message("item:request", "user", "Continue."),
+        {
+          ...message("item:older-activity", "assistant", `OLDER_ACTIVITY ${"a".repeat(1_700)}`),
+          kind: "file_change",
+        },
+        command,
+        message("item:reply", "assistant", "Current answer."),
+      ],
+      coverage: "History",
+      budget: 4_000,
+    });
+    assert.include(
+      selected.messages.map((entry) => entry.itemId),
+      command.itemId,
+    );
+    assert.notInclude(
+      selected.messages.map((entry) => entry.itemId),
+      TurnItemId.make("item:older-activity"),
+    );
+    assert.include(
+      selected.messages.find((entry) => entry.itemId === command.itemId)!.text,
+      "Exit code: 1",
+    );
+  });
+
+  it("uses only the text from the handoff that actually delivered an overlapping item", () => {
+    const full = message(
+      "item:old-delivery",
+      "assistant",
+      `FULL_COMMAND_OUTPUT ${"x".repeat(60_000)}`,
+    );
+    const oldHandoff: OrchestrationV2ContextHandoff = {
+      ...handoff,
+      history: { ...handoff.history!, messages: [full] },
+      delivery: { nativeThreadId: "native:target", status: "injected", itemIds: [full.itemId] },
+    };
+    const laterHandoff: OrchestrationV2ContextHandoff = {
+      ...oldHandoff,
+      id: ContextHandoffId.make("handoff:overlap"),
+      history: { ...handoff.history!, messages: [{ ...full, text: "SHORT_COPY_NEVER_DELIVERED" }] },
+      delivery: { nativeThreadId: "native:target", status: "inline", itemIds: [] },
+    };
+    assert.equal(
+      deliveredHandoffTextForEstimate([oldHandoff, laterHandoff]).get(full.itemId),
+      full.text,
+    );
+    assert.equal(deliveredHandoffTextForEstimate([laterHandoff]).size, 0);
+    assert.equal(
+      deliveredHandoffTextForEstimate([
+        oldHandoff,
+        { ...laterHandoff, delivery: { ...laterHandoff.delivery!, itemIds: [full.itemId] } },
+      ]).get(full.itemId),
+      full.text,
+    );
+    assert.equal(
+      deliveredHandoffTextForEstimate([
+        { ...laterHandoff, delivery: { ...laterHandoff.delivery!, itemIds: [full.itemId] } },
+        oldHandoff,
+      ]).get(full.itemId),
+      full.text,
+    );
+  });
+
+  it.effect.each([true, false])(
+    "records the actual source of differing copies, injected=%s",
+    (injected) =>
+      Effect.gen(function* () {
+        const full = message(
+          "item:shared-command",
+          "assistant",
+          `FULL_OUTPUT ${"x".repeat(60_000)}`,
+        );
+        const first = { ...handoff, history: { ...handoff.history!, messages: [full] } };
+        const second = {
+          ...first,
+          id: ContextHandoffId.make("handoff:duplicate-copy"),
+          history: {
+            ...first.history,
+            messages: [{ ...full, text: "SHORT_COPY_NEVER_DELIVERED" }],
+          },
+        };
+        const stored = new Map<ContextHandoffId, OrchestrationV2ContextHandoff>();
+        let delivered: ReadonlyArray<OrchestrationV2HistoricalMessage> = [];
+        const result = yield* deliverContextHandoffs({
+          handoffs: [first, second],
+          providerThread,
+          budget: 64_000,
+          alreadyDeliveredItemIds: new Set(),
+          inject: (value) =>
+            Effect.sync(() => {
+              delivered = value.messages;
+              return injected;
+            }),
+          persist: (value) =>
+            Effect.sync(() => {
+              stored.set(value.id, value);
+            }),
+        });
+        yield* result.delivered;
+        if (!injected) assert.include(result.context, full.text);
+        assert.deepEqual(
+          delivered.map((entry) => entry.text),
+          [full.text],
+        );
+        assert.deepEqual(stored.get(first.id)!.delivery!.itemIds, [full.itemId]);
+        assert.deepEqual(stored.get(second.id)!.delivery!.itemIds, []);
+        assert.equal(
+          deliveredHandoffTextForEstimate([...stored.values()]).get(full.itemId),
+          full.text,
+        );
+      }),
+  );
+
+  it.each(["head", "tail"])(
+    "keeps the other edge's line limit when the %s line is huge",
+    (edge) => {
+      const short = Array.from({ length: 20 }, (_, index) => `EDGE_${index}`).join("\n");
+      const long = `LONG_EDGE ${"x".repeat(60_000)} END_EDGE`;
+      const output =
+        edge === "tail"
+          ? `${short}\n${"MIDDLE\n".repeat(1_000)}${long}`
+          : `${long}\n${"MIDDLE\n".repeat(1_000)}${short}`;
+      const item = commandTurn({
+        id: `item:mixed-${edge}`,
+        ordinal: 1,
+        command: "vp test",
+        output,
+        exitCode: 0,
+      });
+      const text = historicalMessage(item)!.text;
+      assert.include(text, "EDGE_0");
+      assert.include(text, "EDGE_19");
+      assert.notInclude(text, "MIDDLE");
+      assert.isAtMost(Buffer.byteLength(JSON.stringify(text)), 8_192);
+    },
+  );
+
+  it("preserves head and tail lines without replaying the middle of a newline-heavy output", () => {
+    const head = Array.from({ length: 20 }, (_, index) => `HEAD_${index}`).join("\n");
+    const tail = Array.from({ length: 20 }, (_, index) => `TAIL_${index}`).join("\n");
+    const item = commandTurn({
+      id: "item:many-lines",
+      ordinal: 1,
+      command: "vp test",
+      output: `${head}\n${"MIDDLE\n".repeat(100_000)}${tail}\n`,
+      exitCode: 0,
+    });
+    const text = historicalMessage(item)!.text;
+    assert.include(text, head);
+    assert.include(text, tail);
+    assert.include(text, "output truncated");
+    assert.notInclude(text, "MIDDLE");
   });
 
   it("retains short conversations verbatim in role and order", () => {
