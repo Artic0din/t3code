@@ -8,6 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -35,7 +36,6 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
-  type ProjectId,
   SourceControlProviderError,
   type SourceControlProviderKind,
   type SourceControlWritingStyleSettings,
@@ -285,11 +285,14 @@ function issueRepositoryKey(value: string): string | null {
 }
 
 function hostedRepositoryKey(remoteUrl: string): string | null {
-  const segments = normalizeGitRemoteUrl(remoteUrl)
+  const url = remoteUrl.trim().replace(/^([a-zA-Z0-9._-]+@[^:/\s]+:)\/+/u, "$1");
+  if (!/^(?:(?:ssh|https?|git):\/\/|[a-zA-Z0-9._-]+@[^:/\s]+:)/iu.test(url)) {
+    return null;
+  }
+  const segments = normalizeGitRemoteUrl(url)
     .split("/")
     .filter((segment) => segment.length > 0);
-  const host = segments[0];
-  if (!host || !host.includes(".") || segments.length < 3) return null;
+  if (!segments[0] || segments.length < 3) return null;
   return segments.join("/");
 }
 
@@ -2519,28 +2522,36 @@ export const make = Effect.gen(function* () {
               result.exitCode === 0 ? hostedRepositoryKey(result.stdout.trim()) : null,
             ),
           );
-      // A recorded repository must match. A branch with no record stays reusable, including after
-      // a title change. A hosted remote URL is the record for a branch that exists only there.
+      // Local refs use branch config. Remote refs use that remote's URL. Missing either stays
+      // reusable so a title change still finds the branch.
+      const issueBranchPrefix = `issue/${issue.number}-`;
       const matchesIssueRepository = (branchName: string, remoteName?: string) =>
         Effect.gen(function* () {
           if (repositoryKey === null) return true;
+          if (remoteName !== undefined) {
+            const remoteKey = yield* hostedRemoteRepository(remoteName);
+            if (remoteKey === null) return true;
+            return remoteKey === repositoryKey;
+          }
           const recorded = yield* readIssueBranchRepository(branchName);
           if (recorded.length > 0) return recorded === repositoryKey;
-          if (remoteName === undefined) return true;
-          const remoteKey = yield* hostedRemoteRepository(remoteName);
-          if (remoteKey === null) return true;
-          return remoteKey === repositoryKey;
+          return true;
         });
+      const distinctIssueBranchName = (key: string) =>
+        crypto.digest("SHA-256", new TextEncoder().encode(key)).pipe(
+          Effect.map((digest) => `${issueBranchPrefix}${Hex.encode(digest).slice(0, 12)}`),
+          Effect.orDie,
+        );
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
-      const issueBranchPrefix = `issue/${issue.number}-`;
-      // Filtered by the prefix, so the default page size can never hide the issue's branch.
+      // Keep origin refs that share a local name. Dedup would hide the other repository's remote.
       const { refs } = yield* gitCore.listRefs({
         cwd: input.cwd,
         query: issueBranchPrefix,
         refKind: "all",
         refresh: true,
+        includeMatchingRemoteRefs: true,
       });
       const localRefs = refs.filter((ref) => !ref.isRemote);
       const firstForThisIssue = (
@@ -2610,12 +2621,16 @@ export const make = Effect.gen(function* () {
         localNameOf,
       );
       if (remoteRef) {
+        const remoteLocalName = localNameOf(remoteRef);
         return finish(
           yield* gitCore.createWorktree(
             {
               cwd: input.cwd,
               refName: remoteRef.name,
-              newRefName: localNameOf(remoteRef),
+              newRefName:
+                repositoryKey !== null && !(yield* matchesIssueRepository(remoteLocalName))
+                  ? yield* distinctIssueBranchName(repositoryKey)
+                  : remoteLocalName,
               path: null,
             },
             { submodules, worktreesDirectory },
@@ -2661,7 +2676,7 @@ export const make = Effect.gen(function* () {
             allowNonZeroExit: true,
           })
           .pipe(Effect.map((result) => result.exitCode === 0));
-      // Any remote may hold it (forks often use "upstream"); origin wins when several do. Match
+      // Prefer the remote that hosts the issue repository, then origin, then the rest. Match
       // <remote>/<base> exactly, since a suffix test also accepts e.g. aaa/releases/main.
       const remoteStartRef = Effect.gen(function* () {
         const listed = yield* gitCore.execute({
@@ -2672,9 +2687,16 @@ export const make = Effect.gen(function* () {
         const remotes = listed.stdout
           .split("\n")
           .map((line) => line.trim())
-          .filter((name) => name.length > 0)
-          .toSorted((left, right) => Number(right === "origin") - Number(left === "origin"));
+          .filter((name) => name.length > 0);
+        const matching: string[] = [];
+        const others: string[] = [];
         for (const remote of remotes) {
+          const remoteKey = yield* hostedRemoteRepository(remote);
+          if (repositoryKey !== null && remoteKey === repositoryKey) matching.push(remote);
+          else others.push(remote);
+        }
+        others.sort((left, right) => Number(right === "origin") - Number(left === "origin"));
+        for (const remote of [...matching, ...others]) {
           if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
             return `${remote}/${baseBranch}`;
           }
@@ -2698,7 +2720,7 @@ export const make = Effect.gen(function* () {
             refName: startRef,
             newRefName:
               repositoryKey !== null && !(yield* matchesIssueRepository(branch))
-                ? `${issueBranchPrefix}${sanitizeBranchFragment(repositoryKey).replace(/[/.]/g, "-")}`
+                ? yield* distinctIssueBranchName(repositoryKey)
                 : branch,
             baseRefName: baseBranch,
             path: null,

@@ -5039,6 +5039,143 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect(
+    "continues a remote issue branch whose name matches a local branch from another repository",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const alphaRemote = yield* createBareRemote();
+        const betaRemote = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
+        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
+        yield* runGit(repoDir, ["push", "alpha", "main"]);
+        yield* runGit(repoDir, ["push", "beta", "main"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "alpha",
+          "https://github.com/alpha/one.git",
+          alphaRemote,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "beta",
+          "https://github.com/beta/two.git",
+          betaRemote,
+        );
+
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issues: [
+              {
+                number: 31,
+                title: "Shared title",
+                body: "From alpha",
+                url: "https://github.com/alpha/one/issues/31",
+                state: "OPEN",
+              },
+              {
+                number: 31,
+                title: "Shared title",
+                body: "From beta",
+                url: "https://github.com/beta/two/issues/31",
+                state: "OPEN",
+              },
+            ],
+          },
+        });
+
+        const alpha = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/alpha/one/issues/31",
+        });
+        expect(alpha.branch).toBe("issue/31-shared-title");
+        NodeFS.writeFileSync(NodePath.join(alpha.worktreePath, "alpha.txt"), "alpha\n");
+        yield* runGit(alpha.worktreePath, ["add", "alpha.txt"]);
+        yield* runGit(alpha.worktreePath, ["commit", "-m", "Alpha issue work"]);
+
+        yield* runGit(repoDir, ["checkout", "-b", "issue/31-shared-title-beta"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "beta.txt"), "beta\n");
+        yield* runGit(repoDir, ["add", "beta.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Beta remote issue work"]);
+        const betaSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(repoDir, [
+          "push",
+          "beta",
+          "issue/31-shared-title-beta:issue/31-shared-title",
+        ]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(repoDir, ["branch", "-D", "issue/31-shared-title-beta"]);
+
+        const beta = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/beta/two/issues/31",
+        });
+
+        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+        expect(beta.branch).not.toBe(alpha.branch);
+        expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
+          NodeFS.realpathSync(alpha.worktreePath),
+        );
+        const worktreeSha = (yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+        expect(worktreeSha).toBe(betaSha);
+        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "beta.txt"))).toBe(true);
+      }),
+  );
+
+  it.effect("uses distinct fallback branch names when sanitized repository keys collide", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const blockerPath = NodePath.join(yield* makeTempDir("t3code-issue-wt-"), "wt");
+      yield* runGit(repoDir, ["worktree", "add", "-b", "issue/31-shared", blockerPath]);
+      yield* runGit(repoDir, [
+        "config",
+        "--local",
+        "branch.issue/31-shared.t3code-issue-repository",
+        "github.com/other/x",
+      ]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issues: [
+            {
+              number: 31,
+              title: "Shared",
+              body: "From a-b/c",
+              url: "https://github.com/a-b/c/issues/31",
+              state: "OPEN",
+            },
+            {
+              number: 31,
+              title: "Shared",
+              body: "From a/b-c",
+              url: "https://github.com/a/b-c/issues/31",
+              state: "OPEN",
+            },
+          ],
+        },
+      });
+
+      const first = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/a-b/c/issues/31",
+      });
+      const second = yield* prepareIssueThread(manager, {
+        cwd: repoDir,
+        reference: "https://github.com/a/b-c/issues/31",
+      });
+
+      expect(first.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+      expect(second.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+      expect(second.branch).not.toBe(first.branch);
+      expect(NodeFS.realpathSync(second.worktreePath)).not.toBe(
+        NodeFS.realpathSync(first.worktreePath),
+      );
+    }),
+  );
+
   it.effect("checks out project submodules for an unpersisted issue draft", () =>
     allowFileSubmodules(
       Effect.gen(function* () {
@@ -5238,6 +5375,184 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         );
       }),
     ),
+  );
+
+  it.effect.each([
+    { transport: "HTTP", prefix: "https://github/" },
+    { transport: "SSH", prefix: "ssh://git@github/" },
+    { transport: "scp-style SSH", prefix: "git@github:" },
+    { transport: "absolute-path scp-style SSH", prefix: "git@github:/" },
+  ])(
+    "does not continue a single-label $transport remote from a different repository",
+    ({ prefix }) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const alphaRemote = yield* createBareRemote();
+        const betaRemote = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
+        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
+        yield* runGit(repoDir, ["push", "alpha", "main"]);
+        yield* runGit(repoDir, ["push", "beta", "main"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "alpha",
+          `${prefix}alpha/one.git`,
+          alphaRemote,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "beta",
+          `${prefix}beta/two.git`,
+          betaRemote,
+        );
+
+        const { manager: alphaManager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Shared title",
+              body: "From alpha",
+              url: "https://github/alpha/one/issues/31",
+              state: "OPEN",
+            },
+          },
+        });
+
+        const alpha = yield* prepareIssueThread(alphaManager, {
+          cwd: repoDir,
+          reference: "31",
+        });
+        expect(alpha.branch).toBe("issue/31-shared-title");
+        NodeFS.writeFileSync(NodePath.join(alpha.worktreePath, "alpha.txt"), "alpha\n");
+        yield* runGit(alpha.worktreePath, ["add", "alpha.txt"]);
+        yield* runGit(alpha.worktreePath, ["commit", "-m", "Alpha issue work"]);
+        yield* runGit(alpha.worktreePath, ["push", "alpha", "issue/31-shared-title"]);
+        const alphaSha = (yield* runGit(alpha.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+        const cloneDir = NodePath.join(yield* makeTempDir("t3code-issue-clone-"), "repo");
+        yield* runGit(repoDir, ["clone", "--origin", "alpha", alphaRemote, cloneDir]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          cloneDir,
+          "alpha",
+          `${prefix}alpha/one.git`,
+          alphaRemote,
+        );
+        const continued = yield* prepareIssueThread(alphaManager, {
+          cwd: cloneDir,
+          reference: "31",
+        });
+        expect((yield* runGit(continued.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          alphaSha,
+        );
+        expect(
+          NodeFS.readFileSync(NodePath.join(continued.worktreePath, "alpha.txt"), "utf8"),
+        ).toBe("alpha\n");
+
+        const { manager: betaManager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Shared title",
+              body: "From beta",
+              url: "https://github/beta/two/issues/31",
+              state: "OPEN",
+            },
+          },
+        });
+        const beta = yield* prepareIssueThread(betaManager, {
+          cwd: repoDir,
+          reference: "31",
+        });
+
+        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+        expect(beta.branch).not.toBe(alpha.branch);
+        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "alpha.txt"))).toBe(false);
+        const baseSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+        expect((yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          baseSha,
+        );
+      }),
+  );
+
+  it.effect(
+    "continues an origin issue branch hidden by a local branch from another repository",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const alphaRemote = yield* createBareRemote();
+        const originRemote = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
+        yield* runGit(repoDir, ["remote", "add", "origin", originRemote]);
+        yield* runGit(repoDir, ["push", "alpha", "main"]);
+        yield* runGit(repoDir, ["push", "origin", "main"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "alpha",
+          "https://github.com/alpha/one.git",
+          alphaRemote,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/beta/two.git",
+          originRemote,
+        );
+
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issues: [
+              {
+                number: 31,
+                title: "Shared title",
+                body: "From alpha",
+                url: "https://github.com/alpha/one/issues/31",
+                state: "OPEN",
+              },
+              {
+                number: 31,
+                title: "Shared title",
+                body: "From beta",
+                url: "https://github.com/beta/two/issues/31",
+                state: "OPEN",
+              },
+            ],
+          },
+        });
+
+        const alpha = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/alpha/one/issues/31",
+        });
+        expect(alpha.branch).toBe("issue/31-shared-title");
+
+        yield* runGit(repoDir, ["checkout", "-b", "issue/31-shared-title-origin"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "origin.txt"), "origin\n");
+        yield* runGit(repoDir, ["add", "origin.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Origin issue work"]);
+        const originSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(repoDir, [
+          "push",
+          "origin",
+          "issue/31-shared-title-origin:issue/31-shared-title",
+        ]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(repoDir, ["branch", "-D", "issue/31-shared-title-origin"]);
+
+        const beta = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "https://github.com/beta/two/issues/31",
+        });
+
+        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+        expect(beta.branch).not.toBe(alpha.branch);
+        const worktreeSha = (yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+        expect(worktreeSha).toBe(originSha);
+        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "origin.txt"))).toBe(true);
+      }),
   );
 
   it.effect("finds an issue worktree among more than 100 branches", () =>
