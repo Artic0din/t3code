@@ -2512,6 +2512,20 @@ export const make = Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
       const repositoryKey = issueRepositoryKey(issue.url);
+      const repository =
+        repositoryKey === null
+          ? undefined
+          : `${new URL(issue.url).host}/${repositoryKey.split("/").slice(1).join("/")}`;
+      const issueDefaultBranch = () =>
+        sourceControlProvider(input.cwd).pipe(
+          Effect.flatMap((provider) =>
+            provider.getDefaultBranch({
+              cwd: input.cwd,
+              ...(repository === undefined ? {} : { repository }),
+            }),
+          ),
+          Effect.orElseSucceed(() => null),
+        );
       const hostedRemoteRepository = (remoteName: string) =>
         gitCore
           .execute({
@@ -2627,20 +2641,39 @@ export const make = Effect.gen(function* () {
       );
       if (remoteRef) {
         const remoteLocalName = localNameOf(remoteRef);
-        return finish(
-          yield* gitCore.createWorktree(
-            {
-              cwd: input.cwd,
-              refName: remoteRef.name,
-              newRefName:
-                repositoryKey !== null && !(yield* matchesIssueRepository(remoteLocalName))
-                  ? yield* distinctIssueBranchName(repositoryKey)
-                  : remoteLocalName,
-              path: null,
-            },
-            { submodules, worktreesDirectory },
-          ),
+        const newRefName =
+          repositoryKey !== null && !(yield* matchesIssueRepository(remoteLocalName))
+            ? yield* distinctIssueBranchName(repositoryKey)
+            : remoteLocalName;
+        const baseRefName = newRefName === remoteLocalName ? null : yield* issueDefaultBranch();
+        const worktree = yield* gitCore.createWorktree(
+          {
+            cwd: input.cwd,
+            refName: remoteRef.name,
+            newRefName,
+            ...(baseRefName === null ? {} : { baseRefName }),
+            path: null,
+          },
+          { submodules, worktreesDirectory },
         );
+        if (newRefName !== remoteLocalName && remoteRef.remoteName !== undefined) {
+          yield* gitCore.execute({
+            operation: "GitManager.prepareIssueThread.publishRemote",
+            cwd: input.cwd,
+            args: ["config", "--local", `branch.${newRefName}.pushRemote`, remoteRef.remoteName],
+          });
+          yield* gitCore.execute({
+            operation: "GitManager.prepareIssueThread.publishBranch",
+            cwd: input.cwd,
+            args: [
+              "config",
+              "--local",
+              `branch.${newRefName}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
+              remoteLocalName,
+            ],
+          });
+        }
+        return finish(worktree);
       }
 
       // Git cannot create issue/<n>-… while a branch named exactly "issue" exists.
@@ -2660,9 +2693,7 @@ export const make = Effect.gen(function* () {
       }
 
       // No fallback to the current branch: it would carry unrelated commits into the issue.
-      const baseBranch = yield* (yield* sourceControlProvider(input.cwd))
-        .getDefaultBranch({ cwd: input.cwd })
-        .pipe(Effect.orElseSucceed(() => null));
+      const baseBranch = yield* issueDefaultBranch();
       if (!baseBranch) {
         return yield* new GitManagerError({
           operation: "prepareIssueThread",
@@ -2700,8 +2731,11 @@ export const make = Effect.gen(function* () {
           if (repositoryKey !== null && remoteKey === repositoryKey) matching.push(remote);
           else others.push(remote);
         }
-        others.sort((left, right) => Number(right === "origin") - Number(left === "origin"));
-        for (const remote of [...matching, ...others]) {
+        const originFirst = (left: string, right: string) =>
+          Number(right === "origin") - Number(left === "origin");
+        matching.sort(originFirst);
+        others.sort(originFirst);
+        for (const remote of matching.length > 0 ? matching : others) {
           if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
             return {
               refName: `refs/remotes/${remote}/${baseBranch}`,
@@ -2709,14 +2743,14 @@ export const make = Effect.gen(function* () {
             };
           }
         }
-        return null;
+        return { refName: null, isIssueRepository: matching.length > 0 };
       });
       const remoteBase = yield* remoteStartRef;
-      const startRef = remoteBase?.isIssueRepository
+      const startRef = remoteBase.isIssueRepository
         ? remoteBase.refName
         : (yield* refExists(`refs/heads/${baseBranch}`))
           ? baseBranch
-          : (remoteBase?.refName ?? null);
+          : remoteBase.refName;
       if (startRef === null) {
         return yield* new GitManagerError({
           operation: "prepareIssueThread",

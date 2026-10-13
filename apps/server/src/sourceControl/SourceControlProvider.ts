@@ -141,6 +141,7 @@ export class SourceControlProvider extends Context.Service<
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
+      readonly repository?: string;
     }) => Effect.Effect<string | null, SourceControlProviderError>;
     readonly checkoutChangeRequest: (input: {
       readonly cwd: string;

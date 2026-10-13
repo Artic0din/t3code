@@ -286,6 +286,7 @@ export class GitHubCli extends Context.Service<
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
       readonly rateLimitHost?: string;
+      readonly repository?: string;
     }) => Effect.Effect<string | null, GitHubCliError>;
 
     readonly checkoutPullRequest: (input: {
@@ -1118,7 +1119,15 @@ export const make = Effect.gen(function* () {
       }),
     getDefaultBranch: (input) =>
       Effect.gen(function* () {
-        const locator = yield* resolveRepository({ cwd: input.cwd, host: input.rateLimitHost });
+        const locator =
+          input.repository === undefined
+            ? yield* resolveRepository({ cwd: input.cwd, host: input.rateLimitHost })
+            : parseGitHubRepositorySelector(
+                input.repository,
+                input.rateLimitHost ?? environment.GH_HOST ?? "github.com",
+              );
+        if (locator === null)
+          return yield* commandFailure(input.cwd, "Repositories are named owner/name.");
         const repository = yield* readRepository(input.cwd, locator);
         const branch = repository.default_branch?.trim() ?? "";
         return branch.length > 0 ? branch : null;

@@ -223,6 +223,35 @@ describe("selectGitHubBaseRepository", () => {
 });
 
 describe("GitHubCli repository resolution", () => {
+  it.effect.each([
+    "github.com/beta/two",
+    "enterprise.test/beta/two",
+    "enterprise.test:8443/beta/two",
+  ])("reads the explicit default repository %s instead of the checkout", (repository) => {
+    const paths: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "git@github.com:alpha/one.git"]),
+      api: {
+        rest: (input) =>
+          Effect.sync(() => {
+            paths.push(`${input.host} ${input.path}`);
+            return restResponse({
+              full_name: input.path === "repos/beta/two" ? "beta/two" : "alpha/one",
+              html_url: `https://${input.host}/beta/two`,
+              ssh_url: `git@${input.host}:beta/two.git`,
+              default_branch: input.path === "repos/beta/two" ? "master" : "main",
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      const input = { cwd: "/repo", repository };
+      assert.strictEqual(yield* gh.getDefaultBranch(input), "master");
+      assert.deepStrictEqual(paths, [`${repository.split("/")[0]} repos/beta/two`]);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reads the repository gh would pick from the remotes", () => {
     const paths: string[] = [];
     const { layer } = harness({

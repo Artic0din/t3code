@@ -1515,6 +1515,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     cwd: string,
     branchName: string,
   ) {
+    const configuredBranch = yield* runGitStdout(
+      "GitVcsDriver.resolvePublishBranchName.config",
+      cwd,
+      ["config", "--get", `branch.${branchName}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`],
+      true,
+    ).pipe(Effect.map((stdout) => stdout.trim()));
+    if (configuredBranch.length > 0) return configuredBranch;
     const remoteNames = yield* listRemoteNames(cwd).pipe(Effect.orElseSucceed(() => []));
     const parsedRemoteRef = parseRemoteRefWithRemoteNames(branchName, remoteNames);
     return parsedRemoteRef?.branchName ?? branchName;
@@ -2374,7 +2381,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // `effect-atom`: the branch name ends in the upstream head while the
       // upstream ref ends in the branch name.
       const isAliasOfUpstreamHead =
-        branch === currentUpstream.branchName ||
+        (yield* resolvePublishBranchName(cwd, branch)) === currentUpstream.branchName ||
         (branch.endsWith(`/${currentUpstream.branchName}`) &&
           currentUpstream.upstreamRef.endsWith(`/${branch}`));
       if (!isAliasOfUpstreamHead) {
