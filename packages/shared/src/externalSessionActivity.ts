@@ -1,5 +1,6 @@
 import type {
   AgentSessionObservation,
+  AgentSessionImportResult,
   AgentSessionScanResult,
   AgentSessionSourceReport,
   ProjectId,
@@ -67,6 +68,20 @@ export type ExternalSessionActivityRefresh =
 
 const ADD_PROJECT_REASON = "Add this folder as a T3 project before importing the session.";
 
+export function externalSessionImportMessage(result: AgentSessionImportResult): string {
+  const imported =
+    result.importedCount === 0
+      ? "No sessions were imported."
+      : `Imported ${result.importedCount} session${result.importedCount === 1 ? "" : "s"}.`;
+  const skipped =
+    result.skippedCount === 0
+      ? ""
+      : ` Skipped ${result.skippedCount} session${result.skippedCount === 1 ? "" : "s"}.`;
+  const retry =
+    result.importedCount === 0 || result.skippedCount > 0 ? " Refresh and try again." : "";
+  return `${imported}${skipped}${retry}`;
+}
+
 export function parseExternalSessionActivityEnabled(raw: string | null): boolean {
   return raw === "1";
 }
@@ -75,7 +90,9 @@ export function serializeExternalSessionActivityEnabled(enabled: boolean): strin
   return enabled ? "1" : "0";
 }
 
-function externalSessionThreadId(observation: AgentSessionObservation): string {
+function externalSessionThreadId(
+  observation: Pick<AgentSessionObservation, "providerInstanceId" | "providerSessionId">,
+): string {
   return `import:${observation.providerInstanceId}:${observation.providerSessionId}`;
 }
 
@@ -182,7 +199,18 @@ export function presentExternalSessionActivity(input: {
       return {
         status: "refreshFailed",
         message: input.refresh.message,
-        previous: input.refresh.previous,
+        previous:
+          input.refresh.previous === null
+            ? null
+            : {
+                ...input.refresh.previous,
+                rows: input.refresh.previous.rows.map((row) => {
+                  const threadId = externalSessionThreadId(row);
+                  return input.knownThreadIds.has(threadId)
+                    ? { ...row, action: { kind: "open" as const, threadId } }
+                    : row;
+                }),
+              },
       };
     case "succeeded":
       return {

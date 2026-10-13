@@ -62,6 +62,26 @@ export function useThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(environmentThreadShells.threadShellsAtom);
 }
 
+export function waitForThreadShell(ref: ScopedThreadRef, timeoutMs = 5_000): Promise<boolean> {
+  const atom = environmentThreadShells.threadShellAtom(ref);
+  if (appAtomRegistry.get(atom) !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let unsubscribe: (() => void) | null = null;
+    const timeout = setTimeout(() => {
+      unsubscribe?.();
+      resolve(false);
+    }, timeoutMs);
+    const finish = () => {
+      if (appAtomRegistry.get(atom) === null) return;
+      clearTimeout(timeout);
+      unsubscribe?.();
+      resolve(true);
+    };
+    unsubscribe = appAtomRegistry.subscribe(atom, finish);
+    finish();
+  });
+}
+
 export function useNavigationThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return useAtomValue(environmentThreadShells.navigationThreadShellsAtom);
 }

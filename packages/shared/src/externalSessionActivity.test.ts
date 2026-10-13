@@ -44,6 +44,32 @@ describe("external session activity preference", () => {
 });
 
 describe("presentExternalSessionActivity", () => {
+  it("updates retained actions after imported identities arrive during a failed refresh", () => {
+    const shown = presentExternalSessionActivity({
+      enabled: true,
+      refresh: { _tag: "succeeded", result: scan },
+      knownThreadIds: new Set(),
+    });
+    if (shown.status !== "shown") throw new Error("Expected scanned session rows");
+    expect(shown.snapshot.rows[0]?.action.kind).toBe("import");
+    expect(
+      presentExternalSessionActivity({
+        enabled: true,
+        refresh: { _tag: "failed", message: "Scan unavailable", previous: shown.snapshot },
+        knownThreadIds: new Set(["import:codex:session-1"]),
+      }),
+    ).toEqual({
+      status: "refreshFailed",
+      message: "Scan unavailable",
+      previous: {
+        ...shown.snapshot,
+        rows: shown.snapshot.rows.map((row) => ({
+          ...row,
+          action: { kind: "open", threadId: "import:codex:session-1" },
+        })),
+      },
+    });
+  });
   it("hides every session until the preference is on", () => {
     expect(
       presentExternalSessionActivity({
