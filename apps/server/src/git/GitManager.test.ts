@@ -5147,6 +5147,105 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect.each([
+    { transport: "HTTP", prefix: "https://github/" },
+    { transport: "SSH", prefix: "ssh://git@github/" },
+    { transport: "scp-style SSH", prefix: "git@github:" },
+    { transport: "absolute-path scp-style SSH", prefix: "git@github:/" },
+  ])(
+    "does not continue a single-label $transport remote from a different repository",
+    ({ prefix }) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const alphaRemote = yield* createBareRemote();
+        const betaRemote = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
+        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
+        yield* runGit(repoDir, ["push", "alpha", "main"]);
+        yield* runGit(repoDir, ["push", "beta", "main"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "alpha",
+          `${prefix}alpha/one.git`,
+          alphaRemote,
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "beta",
+          `${prefix}beta/two.git`,
+          betaRemote,
+        );
+
+        const { manager: alphaManager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Shared title",
+              body: "From alpha",
+              url: "https://github/alpha/one/issues/31",
+              state: "OPEN",
+            },
+          },
+        });
+
+        const alpha = yield* prepareIssueThread(alphaManager, {
+          cwd: repoDir,
+          reference: "31",
+        });
+        expect(alpha.branch).toBe("issue/31-shared-title");
+        NodeFS.writeFileSync(NodePath.join(alpha.worktreePath, "alpha.txt"), "alpha\n");
+        yield* runGit(alpha.worktreePath, ["add", "alpha.txt"]);
+        yield* runGit(alpha.worktreePath, ["commit", "-m", "Alpha issue work"]);
+        yield* runGit(alpha.worktreePath, ["push", "alpha", "issue/31-shared-title"]);
+        const alphaSha = (yield* runGit(alpha.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+        const cloneDir = NodePath.join(yield* makeTempDir("t3code-issue-clone-"), "repo");
+        yield* runGit(repoDir, ["clone", "--origin", "alpha", alphaRemote, cloneDir]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          cloneDir,
+          "alpha",
+          `${prefix}alpha/one.git`,
+          alphaRemote,
+        );
+        const continued = yield* prepareIssueThread(alphaManager, {
+          cwd: cloneDir,
+          reference: "31",
+        });
+        expect((yield* runGit(continued.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          alphaSha,
+        );
+        expect(
+          NodeFS.readFileSync(NodePath.join(continued.worktreePath, "alpha.txt"), "utf8"),
+        ).toBe("alpha\n");
+
+        const { manager: betaManager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Shared title",
+              body: "From beta",
+              url: "https://github/beta/two/issues/31",
+              state: "OPEN",
+            },
+          },
+        });
+        const beta = yield* prepareIssueThread(betaManager, {
+          cwd: repoDir,
+          reference: "31",
+        });
+
+        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
+        expect(beta.branch).not.toBe(alpha.branch);
+        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "alpha.txt"))).toBe(false);
+        const baseSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+        expect((yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          baseSha,
+        );
+      }),
+  );
+
   it.effect(
     "continues an origin issue branch hidden by a local branch from another repository",
     () =>

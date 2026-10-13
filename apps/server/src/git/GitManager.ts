@@ -286,11 +286,14 @@ function issueRepositoryKey(value: string): string | null {
 }
 
 function hostedRepositoryKey(remoteUrl: string): string | null {
-  const segments = normalizeGitRemoteUrl(remoteUrl)
+  const url = remoteUrl.trim().replace(/^([a-zA-Z0-9._-]+@[^:/\s]+:)\/+/u, "$1");
+  if (!/^(?:(?:ssh|https?|git):\/\/|[a-zA-Z0-9._-]+@[^:/\s]+:)/iu.test(url)) {
+    return null;
+  }
+  const segments = normalizeGitRemoteUrl(url)
     .split("/")
     .filter((segment) => segment.length > 0);
-  const host = segments[0];
-  if (!host || !host.includes(".") || segments.length < 3) return null;
+  if (!segments[0] || segments.length < 3) return null;
   return segments.join("/");
 }
 
