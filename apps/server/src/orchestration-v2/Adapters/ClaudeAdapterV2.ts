@@ -3068,15 +3068,6 @@ export function makeClaudeAdapterV2(
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        const latestPlanByKind = yield* Ref.make(
-          new Map<
-            string,
-            {
-              readonly plan: OrchestrationV2PlanArtifact;
-              readonly turnItem: OrchestrationV2TurnItem;
-            }
-          >(),
-        );
         const planIdsByNativeItem = yield* Ref.make(
           new Map<string, OrchestrationV2PlanArtifact["id"]>(),
         );
@@ -4610,39 +4601,14 @@ export function makeClaudeAdapterV2(
                   markdown: input.markdown ?? "",
                   streaming: false,
                 };
-          const latestPlanKey = `${input.context.input.threadId}:${input.kind}`;
-          const previous = (yield* Ref.get(latestPlanByKind)).get(latestPlanKey);
-          const supersedePrevious =
-            previous !== undefined &&
-            previous.plan.id !== plan.id &&
-            previous.plan.status !== "completed";
           yield* Effect.all(
             [
-              ...(supersedePrevious
-                ? [
-                    emitProviderEvent({
-                      type: "plan.updated" as const,
-                      driver: CLAUDE_PROVIDER,
-                      plan: { ...previous.plan, status: "superseded" as const },
-                    }),
-                    emitProviderEvent({
-                      type: "turn_item.updated" as const,
-                      driver: CLAUDE_PROVIDER,
-                      turnItem: { ...previous.turnItem, status: "cancelled", updatedAt },
-                    }),
-                  ]
-                : []),
               emitProviderEvent({ type: "node.updated", driver: CLAUDE_PROVIDER, node }),
               emitProviderEvent({ type: "plan.updated", driver: CLAUDE_PROVIDER, plan }),
               emitProviderEvent({ type: "turn_item.updated", driver: CLAUDE_PROVIDER, turnItem }),
             ],
             { concurrency: 1 },
           );
-          yield* Ref.update(latestPlanByKind, (current) => {
-            const updated = new Map(current);
-            updated.set(latestPlanKey, { plan, turnItem });
-            return updated;
-          });
         });
 
         // Resolves the subagent that owns a parent_tool_use_id. The session

@@ -134,6 +134,15 @@ function providerTurnAnalyticsProperties(input: {
 
 type TodoListPlan = Extract<OrchestrationV2PlanArtifact, { readonly kind: "todo_list" }>;
 
+function isReplacementPlanEvent(event: ProviderAdapterV2Event): boolean {
+  return (
+    (event.driver === "claudeAgent" || event.driver === "cursor") &&
+    (event.type === "plan.updated" ||
+      (event.type === "turn_item.updated" &&
+        (event.turnItem.type === "todo_list" || event.turnItem.type === "proposed_plan")))
+  );
+}
+
 function withPlanStepDurations(
   plan: TodoListPlan,
   previous: TodoListPlan | undefined,
@@ -460,8 +469,55 @@ export const layer: Layer.Layer<
                 nodeId: input.event.message.nodeId,
               }),
             ];
-          case "turn_item.updated":
+          case "turn_item.updated": {
+            const item = input.event.turnItem;
+            const superseded: Array<OrchestrationV2DomainEvent> = [];
+            if (isReplacementPlanEvent(input.event)) {
+              const previous = yield* projections.getTurnItem({
+                threadId: item.threadId,
+                itemId: item.id,
+              });
+              if (previous?.status === "cancelled") return [];
+              if (
+                (item.type === "todo_list" || item.type === "proposed_plan") &&
+                item.status === "completed" &&
+                item.providerThreadId !== null &&
+                item.providerTurnId !== null
+              ) {
+                const priorItems = yield* projections.getPriorIncompletePlanItems({
+                  threadId: item.threadId,
+                  providerThreadId: item.providerThreadId,
+                  providerTurnId: item.providerTurnId,
+                  planId: item.planId,
+                  itemId: item.id,
+                  kind: item.type,
+                });
+                for (const prior of priorItems) {
+                  superseded.push(
+                    yield* makeDomainEvent(input, {
+                      type: "plan.updated",
+                      threadId: prior.plan.threadId,
+                      runId: prior.plan.runId,
+                      nodeId: prior.plan.nodeId,
+                      payload: { ...prior.plan, status: "superseded" },
+                    }),
+                    yield* makeDomainEvent(input, {
+                      type: "turn-item.updated",
+                      threadId: prior.turnItem.threadId,
+                      runId: prior.turnItem.runId,
+                      nodeId: prior.turnItem.nodeId,
+                      payload: {
+                        ...prior.turnItem,
+                        status: "cancelled",
+                        updatedAt: item.updatedAt,
+                      },
+                    }),
+                  );
+                }
+              }
+            }
             return [
+              ...superseded,
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
                 threadId: input.event.turnItem.threadId,
@@ -470,6 +526,7 @@ export const layer: Layer.Layer<
                 nodeId: input.event.turnItem.nodeId,
               }),
             ];
+          }
           case "runtime_request.updated":
             return [
               yield* makeDomainEvent(input, {
@@ -483,9 +540,10 @@ export const layer: Layer.Layer<
             const occurredAt = yield* DateTime.now;
             const plan = input.event.plan;
             const previous =
-              plan.kind === "todo_list"
+              plan.kind === "todo_list" || isReplacementPlanEvent(input.event)
                 ? yield* projections.getPlan(plan.threadId, plan.id)
                 : undefined;
+            if (isReplacementPlanEvent(input.event) && previous?.status === "superseded") return [];
             const payload =
               plan.kind === "todo_list"
                 ? withPlanStepDurations(
@@ -635,6 +693,10 @@ export const layer: Layer.Layer<
               );
             }),
           ),
+          (effect) =>
+            isReplacementPlanEvent(input.event)
+              ? threadCommands.withLock(input.threadId, effect)
+              : effect,
         ),
     });
   }),
