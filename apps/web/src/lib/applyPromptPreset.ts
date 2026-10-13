@@ -55,6 +55,7 @@ export function applyPromptPresetToComposer(input: {
   readonly effectiveAgentSettings?: PromptPresetAgentSettings | undefined;
   readonly threadState?: PromptPresetThreadState | undefined;
   readonly expectedActiveTarget?: ActiveComposerDraftTarget | null | undefined;
+  readonly planModeEnabled?: boolean | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
   const activeTarget =
     input.expectedActiveTarget === undefined ? null : getActiveComposerDraftTarget();
@@ -77,7 +78,9 @@ export function applyPromptPresetToComposer(input: {
     presets: input.presets,
     presetId: input.presetId,
     disposition: input.disposition,
-    capabilities: promptPresetCapabilitiesFromProviders(input.providers),
+    capabilities: promptPresetCapabilitiesFromProviders(input.providers, {
+      planModeEnabled: (activeTarget?.planModeEnabled ?? input.planModeEnabled) === true,
+    }),
     threadState: activeTarget?.threadState ?? input.threadState,
   });
   if (!result.ok) return result;

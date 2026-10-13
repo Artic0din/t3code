@@ -11,6 +11,7 @@ export interface ActiveComposerDraftTarget {
   readonly threadRef: ComposerThreadTarget;
   readonly effectiveAgentSettings: PromptPresetAgentSettings;
   readonly threadState: PromptPresetThreadState;
+  readonly planModeEnabled?: boolean | undefined;
 }
 
 let activeTarget: ActiveComposerDraftTarget | null = null;

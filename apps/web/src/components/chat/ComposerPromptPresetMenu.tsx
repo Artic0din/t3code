@@ -46,13 +46,16 @@ export function ComposerPromptPresetMenu(props: {
     readonly includeAgentSettings: boolean;
     readonly replaceInstructions: boolean;
   }) => boolean;
-  readonly onDelete: (presetId: string) => void;
+  readonly onDelete: (presetId: string) => boolean | Promise<boolean>;
   readonly onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [includeAgentSettings, setIncludeAgentSettings] = useState(true);
-  const [replaceInstructions, setReplaceInstructions] = useState(true);
+  const [editor, setEditor] = useState(EMPTY_PRESET_EDITOR);
+  const { name, editingId, includeAgentSettings, replaceInstructions } = editor;
+  const [deletingIds, setDeletingIds] = useState<readonly string[]>([]);
+  const [deletionError, setDeletionError] = useState<string | null>(null);
+  if (editingId !== null && !props.presets.some((preset) => preset.id === editingId)) {
+    setEditor(EMPTY_PRESET_EDITOR);
+  }
 
   return (
     <ComposerBanner.Root data-prompt-preset-menu="true">
@@ -77,6 +80,7 @@ export function ComposerPromptPresetMenu(props: {
           onSubmit={(event) => {
             event.preventDefault();
             event.stopPropagation();
+            if (editingId !== null && deletingIds.includes(editingId)) return;
             const saved = props.onSave({
               ...(editingId ? { id: editingId } : {}),
               name,
@@ -85,9 +89,12 @@ export function ComposerPromptPresetMenu(props: {
               replaceInstructions: editingId === null || replaceInstructions,
             });
             if (saved) {
-              setName("");
-              setEditingId(null);
-              setReplaceInstructions(true);
+              setEditor((current) => ({
+                ...current,
+                name: "",
+                editingId: null,
+                replaceInstructions: true,
+              }));
             }
           }}
         >
@@ -96,13 +103,19 @@ export function ComposerPromptPresetMenu(props: {
             value={name}
             placeholder="Preset name"
             className="h-8 rounded-md border border-border bg-background px-2 text-sm"
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              const name = event.target.value;
+              setEditor((current) => ({ ...current, name }));
+            }}
           />
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <input
               type="checkbox"
               checked={includeAgentSettings}
-              onChange={(event) => setIncludeAgentSettings(event.target.checked)}
+              onChange={(event) => {
+                const includeAgentSettings = event.target.checked;
+                setEditor((current) => ({ ...current, includeAgentSettings }));
+              }}
             />
             Include provider, model, and mode
           </label>
@@ -111,18 +124,24 @@ export function ComposerPromptPresetMenu(props: {
               <input
                 type="checkbox"
                 checked={replaceInstructions}
-                onChange={(event) => setReplaceInstructions(event.target.checked)}
+                onChange={(event) => {
+                  const replaceInstructions = event.target.checked;
+                  setEditor((current) => ({ ...current, replaceInstructions }));
+                }}
               />
               Replace instructions with the current draft
             </label>
           ) : null}
           <button
             type="submit"
+            disabled={editingId !== null && deletingIds.includes(editingId)}
             className="h-8 rounded-md bg-primary px-2 text-sm text-primary-foreground"
           >
             {editingId ? "Update preset" : "Save preset"}
           </button>
-          {props.error ? <p className="text-sm text-destructive">{props.error}</p> : null}
+          {props.error || deletionError ? (
+            <p className="text-sm text-destructive">{props.error ?? deletionError}</p>
+          ) : null}
         </form>
       </ComposerBanner.Body>
       <ComposerBanner.Scroll>
@@ -159,16 +178,41 @@ export function ComposerPromptPresetMenu(props: {
                   <PresetAction
                     label={`Edit ${preset.name}`}
                     onClick={() => {
-                      setEditingId(preset.id);
-                      setName(preset.name);
-                      setReplaceInstructions(false);
+                      setEditor((current) => ({
+                        ...current,
+                        editingId: preset.id,
+                        name: preset.name,
+                        replaceInstructions: false,
+                      }));
                     }}
                   >
                     Edit
                   </PresetAction>
                   <PresetAction
                     label={`Delete ${preset.name}`}
-                    onClick={() => props.onDelete(preset.id)}
+                    disabled={deletingIds.includes(preset.id)}
+                    onClick={() => {
+                      setDeletingIds((current) => [...current, preset.id]);
+                      setDeletionError(null);
+                      void Promise.resolve()
+                        .then(() => props.onDelete(preset.id))
+                        .then((deleted) => {
+                          if (deleted)
+                            setEditor((current) =>
+                              current.editingId === preset.id ? EMPTY_PRESET_EDITOR : current,
+                            );
+                        })
+                        .catch((error: unknown) => {
+                          setDeletionError(
+                            error instanceof Error
+                              ? error.message
+                              : "Could not delete the preset. Try again.",
+                          );
+                        })
+                        .finally(() =>
+                          setDeletingIds((current) => current.filter((id) => id !== preset.id)),
+                        );
+                    }}
                   >
                     Delete
                   </PresetAction>
@@ -182,14 +226,23 @@ export function ComposerPromptPresetMenu(props: {
   );
 }
 
+const EMPTY_PRESET_EDITOR = {
+  name: "",
+  editingId: null as string | null,
+  includeAgentSettings: true,
+  replaceInstructions: true,
+};
+
 function PresetAction(props: {
   readonly label: string;
   readonly onClick: () => void;
   readonly children: string;
+  readonly disabled?: boolean;
 }) {
   return (
     <button
       type="button"
+      disabled={props.disabled}
       aria-label={props.label}
       className="text-sm text-muted-foreground"
       onPointerDown={(event) => event.preventDefault()}

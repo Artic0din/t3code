@@ -43,6 +43,7 @@ function Composer({ enabled }: { enabled: boolean }) {
     effectiveAgentSettings,
     threadState: { hasStartedSession: false },
     enabled,
+    planModeEnabled: false,
   });
   useLayoutEffect(() => {
     actions = state;
@@ -106,3 +107,19 @@ it("blocks preset application and saving during pending input without touching t
   expect(readComposerThreadDraft(target).prompt).toBe("Hidden ordinary draft");
   expect(mocks.update).not.toHaveBeenCalled();
 });
+
+it.each(["Success", "Failure"] as const)(
+  "reports the deletion acknowledgement (%s)",
+  async (tag) => {
+    mocks.update.mockResolvedValue({ _tag: tag });
+    await act(() => root.render(<Composer enabled />));
+    let removed: unknown;
+    await act(async () => {
+      removed = await actions.remove("text");
+    });
+    expect(removed).toBe(tag === "Success");
+    expect(mocks.presets).toEqual([
+      { id: "text", name: "Text", instructions: "Preset instructions" },
+    ]);
+  },
+);

@@ -29,6 +29,7 @@ export function useComposerPromptPresets(input: {
   readonly providers: readonly ServerProvider[];
   readonly effectiveAgentSettings: PromptPresetAgentSettings;
   readonly threadState: PromptPresetThreadState;
+  readonly planModeEnabled: boolean;
 }) {
   const presets = useEnvironmentSettings(input.environmentId, (settings) => settings.promptPresets);
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
@@ -36,7 +37,7 @@ export function useComposerPromptPresets(input: {
     reportFailure: true,
   });
   const [error, setError] = useState<string | null>(null);
-  const { environmentId, threadRef, effectiveAgentSettings, threadState } = input;
+  const { environmentId, threadRef, effectiveAgentSettings, threadState, planModeEnabled } = input;
   const { providerInstanceId, model, runtimeMode, interactionMode } = effectiveAgentSettings;
   const {
     hasStartedSession,
@@ -48,6 +49,7 @@ export function useComposerPromptPresets(input: {
     () => ({
       environmentId,
       threadRef,
+      planModeEnabled,
       effectiveAgentSettings: { providerInstanceId, model, runtimeMode, interactionMode },
       threadState: {
         hasStartedSession,
@@ -59,6 +61,7 @@ export function useComposerPromptPresets(input: {
     [
       environmentId,
       threadRef,
+      planModeEnabled,
       providerInstanceId,
       model,
       runtimeMode,
@@ -93,6 +96,7 @@ export function useComposerPromptPresets(input: {
         providers: input.providers,
         effectiveAgentSettings: input.effectiveAgentSettings,
         threadState: input.threadState,
+        planModeEnabled,
       });
       if (!result.ok) {
         report(result.message);
@@ -132,13 +136,14 @@ export function useComposerPromptPresets(input: {
       setError(null);
       return true;
     },
-    remove(presetId: string) {
-      if (!input.enabled) return;
-      void updateSettings({
+    async remove(presetId: string) {
+      if (!input.enabled) return false;
+      const result = await updateSettings({
         environmentId: input.environmentId,
         input: { patch: { promptPresetMutation: { operation: "delete", presetId } } },
       });
-      setError(null);
+      if (result._tag === "Success") setError(null);
+      return result._tag === "Success";
     },
   };
 }

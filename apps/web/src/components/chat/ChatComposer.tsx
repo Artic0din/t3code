@@ -2323,6 +2323,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const promptPresetsEnabled = activePendingProgress === null && pendingUserInputs.length === 0;
   const promptPresets = useComposerPromptPresets({
     enabled: promptPresetsEnabled,
+    planModeEnabled: settings.planModeEnabled,
     environmentId,
     threadRef: composerDraftTarget,
     draft: composerDraft,

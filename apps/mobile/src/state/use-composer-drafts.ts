@@ -1303,6 +1303,32 @@ export function setComposerDraftText(draftKey: string, value: string): void {
   scheduleUnusedComposerAttachmentCleanup(removed);
 }
 
+/** Preset replacement keeps chips visible so later edits and legacy sends retain their payloads. */
+export function setComposerDraftPresetText(draftKey: string, value: string): void {
+  updateComposerDrafts((current) => {
+    const existing = normalizeDraft(current[draftKey]);
+    const referencedIds = new Set(
+      collectComposerContextReferences(value).map((ref) => ref.contextId),
+    );
+    const missingReferences = collectComposerContextReferences(existing.text).filter(
+      (reference) => {
+        if (
+          referencedIds.has(reference.contextId) ||
+          !existing.context?.records.some((record) => record.contextId === reference.contextId)
+        )
+          return false;
+        referencedIds.add(reference.contextId);
+        return true;
+      },
+    );
+    const text =
+      missingReferences.length > 0
+        ? `${value}${value.length > 0 ? "\n\n" : ""}${missingReferences.map((ref) => ref.source).join(" ")}`
+        : value;
+    return withComposerDraft(current, draftKey, { ...existing, text });
+  });
+}
+
 export function insertComposerDraftText(
   draftKey: string,
   value: string,

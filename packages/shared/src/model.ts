@@ -7,12 +7,28 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { copySorted } from "./Array.ts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+/** Unknown auth is usable for drivers without an authentication probe. */
+export function isProviderModelSelectable(provider: {
+  readonly enabled: boolean;
+  readonly installed?: boolean | undefined;
+  readonly auth?: Pick<ServerProvider["auth"], "status"> | undefined;
+  readonly availability?: ServerProvider["availability"] | undefined;
+}): boolean {
+  return (
+    provider.enabled &&
+    provider.installed !== false &&
+    provider.auth?.status !== "unauthenticated" &&
+    provider.availability !== "unavailable"
+  );
+}
 
 /** Choose the command for a model change against the thread's current provider instance. */
 export function modelSelectionCommandType(

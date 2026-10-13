@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useFocusEffect } from "@react-navigation/native";
 import { Alert } from "react-native";
 
 import type {
@@ -1270,36 +1271,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [],
   );
 
-  const presetEnvironmentId = editingPendingTask?.environmentId ?? selectedEnvironmentId;
-  useEffect(() => {
-    if (
-      selectedProjectDraftKey !== null &&
-      presetEnvironmentId !== null &&
-      (isNewTaskDraftKey(selectedProjectDraftKey) || editingPendingTask !== null)
-    ) {
-      return registerActiveComposerDraftTarget({
-        draftKey: selectedProjectDraftKey,
-        environmentId: presetEnvironmentId,
-        effectiveAgentSettings: {
-          providerInstanceId: selectedModel?.instanceId ?? null,
-          model: selectedModel?.model ?? null,
-          runtimeMode,
-          interactionMode,
-        },
-        threadState: { hasStartedSession: false, isQueuedEdit: editingPendingTask !== null },
-      });
-    }
-    return undefined;
-  }, [
-    presetEnvironmentId,
-    selectedProjectDraftKey,
-    editingPendingTask,
-    selectedModel?.instanceId,
-    selectedModel?.model,
-    runtimeMode,
-    interactionMode,
-  ]);
-
   const value = useMemo<NewTaskFlowContextValue>(
     () => ({
       projectScopes,
@@ -1435,4 +1406,80 @@ export function useNewTaskFlow() {
     throw new Error("useNewTaskFlow must be used within NewTaskFlowProvider.");
   }
   return value;
+}
+
+export function useNewTaskComposerPresetTarget(
+  enabled: boolean,
+  request?: {
+    readonly pendingTaskId?: string;
+    readonly draftId?: string;
+    readonly initialProjectRef?: {
+      readonly environmentId?: string;
+      readonly projectId?: string;
+    };
+  },
+): void {
+  const {
+    draftKey,
+    editingPendingTask,
+    selectedEnvironmentId,
+    selectedModel,
+    runtimeMode,
+    interactionMode,
+    selectedProject,
+  } = useNewTaskFlow();
+  const { pendingTaskId, draftId, initialProjectRef } = request ?? {};
+  const hasRouteRequest = request !== undefined;
+  const initializedProjectRef = useRef<typeof initialProjectRef>(undefined);
+  const environmentId = editingPendingTask?.environmentId ?? selectedEnvironmentId;
+  useFocusEffect(
+    useCallback(() => {
+      const ready =
+        !hasRouteRequest ||
+        (pendingTaskId
+          ? editingPendingTask?.messageId === pendingTaskId
+          : editingPendingTask === null &&
+            (draftId
+              ? draftKey === draftId
+              : !initialProjectRef?.environmentId ||
+                initializedProjectRef.current === initialProjectRef ||
+                (selectedProject?.environmentId === initialProjectRef.environmentId &&
+                  selectedProject.id === initialProjectRef.projectId)));
+      if (
+        !enabled ||
+        !ready ||
+        draftKey === null ||
+        environmentId === null ||
+        (!isNewTaskDraftKey(draftKey) && editingPendingTask === null)
+      )
+        return undefined;
+      // The route initializes once; later project or machine changes belong to the composer.
+      initializedProjectRef.current = initialProjectRef;
+      return registerActiveComposerDraftTarget({
+        draftKey,
+        environmentId,
+        effectiveAgentSettings: {
+          providerInstanceId: selectedModel?.instanceId ?? null,
+          model: selectedModel?.model ?? null,
+          runtimeMode,
+          interactionMode,
+        },
+        threadState: { hasStartedSession: false, isQueuedEdit: editingPendingTask !== null },
+      });
+    }, [
+      enabled,
+      hasRouteRequest,
+      pendingTaskId,
+      draftId,
+      initialProjectRef,
+      selectedProject,
+      draftKey,
+      environmentId,
+      editingPendingTask,
+      selectedModel?.instanceId,
+      selectedModel?.model,
+      runtimeMode,
+      interactionMode,
+    ]),
+  );
 }

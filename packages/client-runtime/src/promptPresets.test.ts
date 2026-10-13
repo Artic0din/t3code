@@ -417,6 +417,34 @@ describe("prompt preset records", () => {
     ).toEqual([]);
   });
 
+  it.each([
+    ["missing CLI", false, "authenticated", false],
+    ["signed out", true, "unauthenticated", false],
+    ["unknown authentication", true, "unknown", true],
+    ["ready", true, "authenticated", true],
+  ] as const)("matches picker eligibility for %s providers", (_, installed, status, usable) => {
+    const providers = [
+      {
+        instanceId: codex,
+        enabled: true,
+        installed,
+        auth: { status },
+        models: [{ slug: "gpt-5" }],
+      },
+    ];
+    const current = draft();
+    const result = applyPromptPreset({
+      draft: current,
+      presets: [preset({ providerInstanceId: codex, model: "gpt-5" })],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities: promptPresetCapabilitiesFromProviders(providers),
+    });
+    expect(result.ok).toBe(usable);
+    if (!usable) expect(result).toMatchObject({ code: "provider" });
+    expect(current).toEqual(draft());
+  });
+
   it("accepts catalog aliases when validating preset models", () => {
     const aliased = promptPresetCapabilitiesFromProviders([
       {

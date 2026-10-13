@@ -22,7 +22,15 @@ const fixture = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
   hold: vi.fn(),
   release: vi.fn(),
+  focused: true,
 }));
+vi.mock("@react-navigation/native", async () => {
+  const { useEffect } = await import("react");
+  return {
+    useFocusEffect: (callback: () => (() => void) | undefined) =>
+      useEffect(() => (fixture.focused ? callback() : undefined), [callback, fixture.focused]),
+  };
+});
 function patchDraft(key: string, patch: Partial<ComposerDraft>) {
   fixture.drafts = {
     ...fixture.drafts,
@@ -107,6 +115,7 @@ vi.mock("../../state/use-composer-drafts", async () => {
       ),
     getComposerDraftSnapshot: (key: string) => fixture.drafts[key] ?? fixture.empty,
     setComposerDraftText: (key: string, text: string) => patchDraft(key, { text }),
+    setComposerDraftPresetText: (key: string, text: string) => patchDraft(key, { text }),
     setComposerDraftContext: (key: string, context: ComposerDraft["context"]) =>
       patchDraft(key, { context }),
     replaceComposerDraftAttachments: (key: string, attachments: ComposerDraft["attachments"]) =>
@@ -124,7 +133,11 @@ vi.mock("../../state/use-composer-drafts", async () => {
   };
 });
 
-import { NewTaskFlowProvider, useNewTaskFlow } from "./new-task-flow-provider";
+import {
+  NewTaskFlowProvider,
+  useNewTaskFlow,
+  useNewTaskComposerPresetTarget,
+} from "./new-task-flow-provider";
 import { getActiveComposerDraftTarget } from "./active-composer-draft-target";
 import { applyPromptPresetToMobileDraft } from "../keyboard/applyPromptPresetToDraft";
 
@@ -134,7 +147,14 @@ let flow: ReturnType<typeof useNewTaskFlow>;
 const environmentId = EnvironmentId.make("env");
 const projectId = ProjectId.make("project");
 const modelSelection = createModelSelection(ProviderInstanceId.make("codex"), "test-model");
-function Probe() {
+function Probe({
+  ready = true,
+  request,
+}: {
+  ready?: boolean;
+  request?: Parameters<typeof useNewTaskComposerPresetTarget>[1];
+}) {
+  useNewTaskComposerPresetTarget(ready, request);
   const state = useNewTaskFlow();
   useLayoutEffect(() => {
     flow = state;
@@ -181,6 +201,7 @@ beforeEach(async () => {
   ];
   fixture.hold.mockClear();
   fixture.release.mockClear();
+  fixture.focused = true;
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -264,3 +285,117 @@ it.each(["other-environment", "none"])(
     await act(() => flow.reset());
   },
 );
+
+it.each(["Choose project", "Add project", "Add repository"])(
+  "withdraws the composer target on %s and restores it on return",
+  async (screen) => {
+    await act(() => flow.beginEditingPendingTask("queued"));
+    const target = getActiveComposerDraftTarget();
+    expect(target?.draftKey).toBe("pending-task:queued");
+    await act(() =>
+      root.render(
+        <NewTaskFlowProvider>
+          <div>{screen}</div>
+        </NewTaskFlowProvider>,
+      ),
+    );
+    expect(getActiveComposerDraftTarget()).toBeNull();
+    const staleResult = applyPromptPresetToMobileDraft({
+      draftKey: target!.draftKey,
+      expectedActiveTarget: target,
+      presets: [{ id: "text", name: "Text", instructions: "Hidden write" }],
+      presetId: "text",
+      disposition: "replace",
+      providers: [],
+    });
+    expect(staleResult).toMatchObject({ ok: false, code: "missing" });
+    expect(fixture.drafts["pending-task:queued"]?.text).toBe("Queued instructions");
+    await act(() =>
+      root.render(
+        <NewTaskFlowProvider>
+          <Probe />
+        </NewTaskFlowProvider>,
+      ),
+    );
+    expect(getActiveComposerDraftTarget()?.draftKey).toBe("pending-task:queued");
+  },
+);
+
+it("withdraws a mounted native-stack composer on blur and waits for the new target", async () => {
+  await act(() => flow.beginEditingPendingTask("queued"));
+  fixture.focused = false;
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()).toBeNull();
+  fixture.focused = true;
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()?.draftKey).toBe("pending-task:queued");
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe ready={false} />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()).toBeNull();
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()?.draftKey).toBe("pending-task:queued");
+});
+
+it("keeps presets on the visible composer after an intentional machine switch", async () => {
+  const initialProjectRef = { environmentId, projectId };
+  const otherEnvironment = EnvironmentId.make("other-machine");
+  fixture.projects = [
+    ...fixture.projects,
+    { ...(fixture.projects[0] as object), environmentId: otherEnvironment },
+  ];
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe request={{ initialProjectRef }} />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()?.environmentId).toBe(environmentId);
+  await act(async () => {
+    expect(await flow.switchEnvironment(otherEnvironment)).toBe(true);
+  });
+  expect(getActiveComposerDraftTarget()?.environmentId).toBe(otherEnvironment);
+  const target = getActiveComposerDraftTarget();
+  expect(target).not.toBeNull();
+  const result = applyPromptPresetToMobileDraft({
+    draftKey: target!.draftKey,
+    expectedActiveTarget: target,
+    presets: [{ id: "text", name: "Text", instructions: "Switched machine instructions" }],
+    presetId: "text",
+    disposition: "replace",
+    providers: [],
+  });
+  expect(result.ok).toBe(true);
+  expect(fixture.drafts[target!.draftKey]?.text).toBe("Switched machine instructions");
+  await act(() =>
+    root.render(
+      <NewTaskFlowProvider>
+        <Probe request={{ initialProjectRef: { environmentId, projectId } }} />
+      </NewTaskFlowProvider>,
+    ),
+  );
+  expect(getActiveComposerDraftTarget()).toBeNull();
+});

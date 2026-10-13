@@ -9,7 +9,7 @@ import {
   PromptPreset as PromptPresetSchema,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { createModelSelection } from "@t3tools/shared/model";
+import { createModelSelection, isProviderModelSelectable } from "@t3tools/shared/model";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 
 export type PromptPresetApplyDisposition = "insert" | "replace";
@@ -46,6 +46,7 @@ export interface PromptPresetProviderCapability {
 
 export interface PromptPresetCapabilities {
   readonly providers: ReadonlyArray<PromptPresetProviderCapability>;
+  readonly interactionModes?: ReadonlyArray<ProviderInteractionMode> | undefined;
 }
 
 export type PromptPresetFailureCode =
@@ -84,7 +85,9 @@ export function promptPresetCapabilitiesFromProviders(
   providers: ReadonlyArray<{
     readonly instanceId: ProviderInstanceId;
     readonly enabled: boolean;
-    readonly availability?: string | undefined;
+    readonly availability?: ServerProvider["availability"] | undefined;
+    readonly installed?: boolean | undefined;
+    readonly auth?: Pick<ServerProvider["auth"], "status"> | undefined;
     readonly models: ReadonlyArray<{
       readonly slug: string;
       readonly aliases?: ReadonlyArray<string> | undefined;
@@ -93,10 +96,12 @@ export function promptPresetCapabilitiesFromProviders(
     readonly showInteractionModeToggle?: boolean | undefined;
     readonly requiresNewThreadForModelChange?: boolean | undefined;
   }>,
+  options: { readonly planModeEnabled: boolean } = { planModeEnabled: false },
 ): PromptPresetCapabilities {
   return {
+    interactionModes: options.planModeEnabled ? ALL_INTERACTION_MODES : ["default"],
     providers: providers.flatMap((provider) => {
-      if (!provider.enabled || provider.availability === "unavailable") return [];
+      if (!isProviderModelSelectable(provider)) return [];
       const capability: PromptPresetProviderCapability = {
         instanceId: provider.instanceId,
         requiresNewThreadForModelChange: provider.requiresNewThreadForModelChange,
@@ -104,7 +109,7 @@ export function promptPresetCapabilitiesFromProviders(
         ...(provider.supportedRuntimeModes && provider.supportedRuntimeModes.length > 0
           ? { runtimeModes: provider.supportedRuntimeModes }
           : {}),
-        ...(provider.showInteractionModeToggle === false
+        ...(!options.planModeEnabled || provider.showInteractionModeToggle === false
           ? { interactionModes: ["default"] as const }
           : {}),
       };
@@ -258,7 +263,8 @@ export function applyPromptPreset(input: {
   if (
     (preset.interactionMode !== undefined || preset.providerInstanceId !== undefined) &&
     interactionMode !== null &&
-    !supportsInteractionMode(provider, interactionMode)
+    (!supportsInteractionMode(provider, interactionMode) ||
+      !(input.capabilities.interactionModes ?? ALL_INTERACTION_MODES).includes(interactionMode))
   ) {
     return failure(
       "interaction-mode",

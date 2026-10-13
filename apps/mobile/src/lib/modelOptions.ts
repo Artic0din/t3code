@@ -8,6 +8,7 @@ import type {
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
+  isProviderModelSelectable,
 } from "@t3tools/shared/model";
 
 export type ModelOption = {
@@ -165,10 +166,7 @@ export function buildModelOptions(
   for (const provider of config?.providers ?? []) {
     if (
       (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
-      !provider.enabled ||
-      !provider.installed ||
-      provider.auth.status === "unauthenticated" ||
-      (provider.driver === "antigravity" && provider.availability === "unavailable")
+      !isProviderModelSelectable(provider)
     ) {
       continue;
     }

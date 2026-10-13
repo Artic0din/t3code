@@ -199,8 +199,15 @@ import { retainComposerAttachmentFileForPreview } from "../lib/composerAttachmen
 import {
   applyPromptPresetToMobileDraft,
   mobileDraftToPromptPresetDraft,
+  buildPromptPresetFromMobileDraft,
 } from "../features/keyboard/applyPromptPresetToDraft";
+import { savePromptPreset } from "@t3tools/client-runtime/promptPresets";
 import { createModelSelection } from "@t3tools/shared/model";
+import { collectComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import {
+  referencedComposerContext,
+  serializeComposerMessageForServer,
+} from "../lib/composerContext";
 
 const DRAFT: ComposerDraft = {
   text: "hello",
@@ -246,9 +253,228 @@ function contextDraft(start: number, count: number): ComposerDraft {
 }
 
 describe("mobile composer drafts", () => {
+  it.each(["missing", "signed out", "missing CLI"] as const)(
+    "rejects a Plan-only preset with Plan disabled and a %s provider",
+    (providerState) => {
+      const codex = ProviderInstanceId.make("codex");
+      const original = {
+        text: "Original task",
+        attachments: [],
+        modelSelection: createModelSelection(codex, "gpt"),
+      };
+      appAtomRegistry.set(composerDraftsAtom, { thread: original });
+      const result = applyPromptPresetToMobileDraft({
+        draftKey: "thread",
+        presets: [{ id: "plan", name: "Plan", instructions: "Plan task", interactionMode: "plan" }],
+        presetId: "plan",
+        disposition: "replace",
+        providers:
+          providerState === "missing"
+            ? []
+            : [
+                {
+                  instanceId: codex,
+                  enabled: true,
+                  installed: providerState !== "missing CLI",
+                  auth: {
+                    status: providerState === "signed out" ? "unauthenticated" : "authenticated",
+                  },
+                  models: [{ slug: "gpt" }],
+                },
+              ],
+        planModeEnabled: false,
+      });
+      expect(result).toMatchObject({ ok: false, code: "interaction-mode" });
+      expect(getComposerDraftSnapshot("thread")).toEqual(original);
+    },
+  );
+  it("saves and reapplies a preset in the same queued mobile editor", () => {
+    setComposerDraftText("pending-task:queued", "Queued task instructions");
+    const threadState = { hasStartedSession: false, isQueuedEdit: true };
+    const effectiveAgentSettings = {
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      model: "gpt",
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+    };
+    const next = buildPromptPresetFromMobileDraft({
+      id: "queued",
+      name: "Queued",
+      draftKey: "pending-task:queued",
+      threadState,
+      effectiveAgentSettings,
+    });
+    const saved = savePromptPreset([], next);
+    if (!saved.ok) throw new Error(saved.message);
+    setComposerDraftText("pending-task:queued", "Changed instructions");
+    const result = applyPromptPresetToMobileDraft({
+      draftKey: "pending-task:queued",
+      presets: saved.value,
+      presetId: "queued",
+      disposition: "replace",
+      providers: [],
+      threadState,
+      effectiveAgentSettings,
+    });
+    expect(result.ok).toBe(true);
+    expect(getComposerDraftSnapshot("pending-task:queued")).toEqual({
+      text: "Queued task instructions",
+      attachments: [],
+    });
+    expect(next).toEqual({
+      id: "queued",
+      name: "Queued",
+      instructions: "Queued task instructions",
+    });
+  });
+  it.each(["insert", "replace"] as const)(
+    "preserves usable context and file ownership on preset %s, including queued edits",
+    async (disposition) => {
+      vi.useFakeTimers();
+      const file = {
+        id: "bound-file",
+        type: "file" as const,
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 10,
+        fileUri: "file:///notes.txt",
+      };
+      const photo = {
+        id: "photo",
+        type: "image" as const,
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 3,
+        dataUrl: "data:image/png;base64,YWJj",
+        previewUri: "data:image/png;base64,YWJj",
+      };
+      const context: NonNullable<ComposerDraft["context"]> = {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            kind: "terminal",
+            contextId: ComposerContextId.make("terminal"),
+            label: "Build log",
+            terminalId: "terminal-1",
+            terminalLabel: "Build",
+            lineStart: 0,
+            lineEnd: 1,
+            text: "Build failed: specific diagnostic",
+          },
+          {
+            version: 1,
+            kind: "file",
+            contextId: ComposerContextId.make("file"),
+            label: "notes.txt",
+            attachmentId: file.id,
+            name: file.name,
+            mimeType: file.mimeType,
+            sizeBytes: file.sizeBytes,
+          },
+          {
+            version: 1,
+            kind: "thread",
+            contextId: ComposerContextId.make("thread"),
+            label: "Prior task",
+            environmentId: EnvironmentId.make("env"),
+            threadId: ThreadId.make("prior"),
+            title: "Prior task",
+          },
+        ],
+      };
+      const original = {
+        text: "Original task " + context.records.map(formatComposerContextReference).join(" "),
+        context,
+        attachments: [file, photo],
+      };
+      appAtomRegistry.set(composerDraftsAtom, { "pending-task:queued": original });
+      const result = applyPromptPresetToMobileDraft({
+        draftKey: "pending-task:queued",
+        presets: [{ id: "text", name: "Text", instructions: "Review carefully" }],
+        presetId: "text",
+        disposition,
+        providers: [],
+        threadState: { hasStartedSession: false, isQueuedEdit: true },
+      });
+      expect(result.ok).toBe(true);
+      const stored = getComposerDraftSnapshot("pending-task:queued");
+      expect(stored.context).toEqual(context);
+      expect(stored.attachments).toEqual([file, photo]);
+      expect(collectComposerContextReferences(stored.text).map((ref) => ref.contextId)).toEqual(
+        context.records.map((record) => record.contextId),
+      );
+      expect(referencedComposerContext(stored.text, stored.context)).toEqual(context);
+      expect(serializeComposerMessageForServer(stored.text, stored.context, true).context).toEqual(
+        context,
+      );
+      expect(serializeComposerMessageForServer(stored.text, stored.context, false).text).toContain(
+        "Build failed: specific diagnostic",
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(composerAttachmentCleanupMocks.remove).not.toHaveBeenCalled();
+      // Typing still removes context the user deliberately deletes.
+      setComposerDraftText("pending-task:queued", "User removed all chips");
+      expect(getComposerDraftSnapshot("pending-task:queued").context).toBeUndefined();
+      expect(getComposerDraftSnapshot("pending-task:queued").attachments).toEqual([photo]);
+    },
+  );
+
+  it.each([false, true])(
+    "validates the mobile client's plan preference (%s) before mutation",
+    (planModeEnabled) => {
+      const codex = ProviderInstanceId.make("codex");
+      const original = {
+        text: "Original task",
+        attachments: [],
+        runtimeMode: "full-access" as const,
+      };
+      appAtomRegistry.set(composerDraftsAtom, { thread: original });
+      const result = applyPromptPresetToMobileDraft({
+        draftKey: "thread",
+        presets: [
+          {
+            id: "plan",
+            name: "Plan",
+            instructions: "Plan task",
+            providerInstanceId: codex,
+            model: "gpt",
+            interactionMode: "plan",
+          },
+        ],
+        presetId: "plan",
+        disposition: "replace",
+        providers: [
+          {
+            instanceId: codex,
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated" },
+            models: [{ slug: "gpt" }],
+            showInteractionModeToggle: true,
+          },
+        ],
+        planModeEnabled,
+      });
+      expect(result.ok).toBe(planModeEnabled);
+      expect(getComposerDraftSnapshot("thread")).toEqual(
+        planModeEnabled
+          ? {
+              ...original,
+              text: "Plan task",
+              modelSelection: { instanceId: codex, model: "gpt" },
+              interactionMode: "plan",
+            }
+          : original,
+      );
+      if (!planModeEnabled) expect(result).toMatchObject({ code: "interaction-mode" });
+    },
+  );
+
   it("persists explicit preset modes that match the displayed defaults", () => {
     const codex = ProviderInstanceId.make("codex");
     const result = applyPromptPresetToMobileDraft({
+      planModeEnabled: true,
       draftKey: "thread",
       presets: [
         {

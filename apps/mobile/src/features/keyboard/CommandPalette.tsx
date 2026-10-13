@@ -44,13 +44,19 @@ import {
 } from "./commandPaletteItems";
 import { parseActiveThreadPath, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 import { threadJumpIndex } from "./threadKeyboardShortcuts";
-import { applyPromptPresetToMobileDraft } from "./applyPromptPresetToDraft";
-import { buildPromptPreset, savePromptPreset } from "@t3tools/client-runtime/promptPresets";
+import {
+  applyPromptPresetToMobileDraft,
+  buildPromptPresetFromMobileDraft,
+} from "./applyPromptPresetToDraft";
+import { savePromptPreset } from "@t3tools/client-runtime/promptPresets";
 import { getComposerDraftSnapshot } from "../../state/use-composer-drafts";
-import { mobileDraftToPromptPresetDraft } from "./applyPromptPresetToDraft";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useActiveComposerDraftTarget } from "../threads/active-composer-draft-target";
+import {
+  getActiveComposerDraftTarget,
+  useActiveComposerDraftTarget,
+} from "../threads/active-composer-draft-target";
+import { useLegacyPlanModeState } from "../threads/use-legacy-plan-mode-enabled";
 import { uuidv4 } from "../../lib/uuid";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
@@ -174,6 +180,9 @@ export function CommandPalette(props: {
   const closing = useRef(false);
   const inputRef = useRef<TextInputInstance>(null);
   const listRef = useRef<FlatList<CommandPaletteItem>>(null);
+  const { enabled: planModeEnabled } = useLegacyPlanModeState();
+  const planModeEnabledRef = useRef(planModeEnabled);
+  planModeEnabledRef.current = planModeEnabled;
   const { width, height } = useWindowDimensions();
   const searchEnvironmentIds = useMemo(
     () =>
@@ -375,14 +384,18 @@ export function CommandPalette(props: {
         title: "Save prompt preset",
         searchTerms: ["preset", "prompt", "instructions"],
         run: () => {
+          if (getActiveComposerDraftTarget() !== activeComposerDraft) {
+            Alert.alert("Prompt preset", "Open a composer before saving a preset.");
+            return;
+          }
           const draft = getComposerDraftSnapshot(presetKey);
           const name = draft.text.trim().split("\n")[0]?.slice(0, 80) || "Preset";
-          const next = buildPromptPreset({
+          const next = buildPromptPresetFromMobileDraft({
             id: uuidv4(),
             name,
-            instructions: draft.text,
-            includeAgentSettings: true,
-            draft: mobileDraftToPromptPresetDraft(draft, effectiveAgentSettings),
+            draftKey: presetKey,
+            effectiveAgentSettings,
+            threadState,
           });
           const currentPresets =
             serverConfigs.get(environmentId)?.settings.promptPresets ?? presets;
@@ -425,6 +438,8 @@ export function CommandPalette(props: {
                 providers: presetConfig.providers,
                 effectiveAgentSettings,
                 threadState,
+                planModeEnabled: planModeEnabledRef.current,
+                expectedActiveTarget: activeComposerDraft,
               });
               if (!result.ok) Alert.alert("Prompt preset", result.message);
             },
@@ -443,6 +458,8 @@ export function CommandPalette(props: {
                 providers: presetConfig.providers,
                 effectiveAgentSettings,
                 threadState,
+                planModeEnabled: planModeEnabledRef.current,
+                expectedActiveTarget: activeComposerDraft,
               });
               if (!result.ok) Alert.alert("Prompt preset", result.message);
             },

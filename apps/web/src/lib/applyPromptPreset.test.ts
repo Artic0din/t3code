@@ -25,6 +25,113 @@ const providers = [
 beforeEach(() => useComposerDraftStore.setState({ draftsByThreadKey: {} }));
 
 describe("preset composer application", () => {
+  it.each(["missing", "signed out", "missing CLI"] as const)(
+    "rejects a Plan-only preset with Plan disabled and a %s provider",
+    (providerState) => {
+      useComposerDraftStore.getState().setPrompt(target, "Original task");
+      const original = readComposerThreadDraft(target);
+      const result = applyPromptPresetToComposer({
+        threadRef: target,
+        draft: original,
+        effectiveAgentSettings: {
+          providerInstanceId: codex,
+          model: "old",
+          runtimeMode: null,
+          interactionMode: null,
+        },
+        presets: [{ id: "plan", name: "Plan", instructions: "Plan task", interactionMode: "plan" }],
+        presetId: "plan",
+        disposition: "replace",
+        providers:
+          providerState === "missing"
+            ? []
+            : [
+                {
+                  ...providers[0]!,
+                  installed: providerState !== "missing CLI",
+                  auth: {
+                    status: providerState === "signed out" ? "unauthenticated" : "authenticated",
+                  },
+                },
+              ],
+        planModeEnabled: false,
+      });
+      expect(result).toMatchObject({ ok: false, code: "interaction-mode" });
+      expect(readComposerThreadDraft(target)).toEqual(original);
+    },
+  );
+  it("uses the live client preference when a cached palette action outlives a Plan toggle", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(target, "Original task");
+    const original = readComposerThreadDraft(target);
+    const active = {
+      environmentId: target.environmentId,
+      threadRef: target,
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "old",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+      },
+      threadState: { hasStartedSession: false },
+      planModeEnabled: true,
+    };
+    const unregister = registerActiveComposerDraftTarget(active);
+    const cachedAction = () =>
+      applyPromptPresetToComposer({
+        threadRef: target,
+        draft: readComposerThreadDraft(target),
+        presets: [{ id: "plan", name: "Plan", instructions: "Plan task", interactionMode: "plan" }],
+        presetId: "plan",
+        disposition: "replace",
+        providers,
+        expectedActiveTarget: active,
+        planModeEnabled: true,
+      });
+    const unregisterDisabled = registerActiveComposerDraftTarget({
+      ...active,
+      planModeEnabled: false,
+    });
+    expect(cachedAction()).toMatchObject({ ok: false, code: "interaction-mode" });
+    expect(readComposerThreadDraft(target)).toEqual(original);
+    unregister();
+    unregisterDisabled();
+  });
+  it.each([false, true])(
+    "respects web plan availability (%s) without a latent override",
+    (planModeEnabled) => {
+      useComposerDraftStore.getState().setPrompt(target, "Original task");
+      const original = readComposerThreadDraft(target);
+      const result = applyPromptPresetToComposer({
+        threadRef: target,
+        draft: original,
+        presets: [
+          {
+            id: "plan",
+            name: "Plan",
+            instructions: "Plan task",
+            providerInstanceId: codex,
+            model: "old",
+            interactionMode: "plan",
+          },
+        ],
+        presetId: "plan",
+        disposition: "replace",
+        providers,
+        planModeEnabled,
+      });
+      expect(result.ok).toBe(planModeEnabled);
+      if (planModeEnabled)
+        expect(readComposerThreadDraft(target)).toMatchObject({
+          prompt: "Plan task",
+          interactionMode: "plan",
+        });
+      else {
+        expect(result).toMatchObject({ code: "interaction-mode" });
+        expect(readComposerThreadDraft(target)).toEqual(original);
+      }
+    },
+  );
   it("rejects a cached palette action after pending input removes the active composer", () => {
     const store = useComposerDraftStore.getState();
     store.setPrompt(target, "Hidden ordinary draft");
@@ -57,6 +164,7 @@ describe("preset composer application", () => {
 
   it("records explicit preset choices even when they match inherited defaults", () => {
     const result = applyPromptPresetToComposer({
+      planModeEnabled: true,
       threadRef: target,
       draft: readComposerThreadDraft(target),
       effectiveAgentSettings: {
