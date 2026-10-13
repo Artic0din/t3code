@@ -217,14 +217,34 @@ describe("archivedShellStreamItemFromThreadShell", () => {
 });
 
 describe("shellStreamItemFromEnrichmentRefresh", () => {
+  it("includes prefix-only projects without marking their failed identities as resolved", () => {
+    const prefixProject = {
+      id: ProjectId.make("project-prefix"),
+      title: "App",
+      workspaceRoot: "/workspace/app",
+      repositoryIdentity: null,
+      repositoryRelativePrefix: "packages/app",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    };
+    const frame = shellStreamItemFromEnrichmentRefresh({
+      snapshot: { ...emptyShellSnapshot, projects: [prefixProject] },
+      changes: [{ workspaceRoot: prefixProject.workspaceRoot, repositoryIdentityResolved: false }],
+    });
+    expect(frame.snapshot.projects).toEqual([prefixProject]);
+    expect(frame.resolvedRepositoryIdentityRoots).toEqual([]);
+  });
+
   it("batches nearby completion roots onto one snapshot item", () => {
     expect(
       shellStreamItemFromEnrichmentRefresh({
         snapshot: emptyShellSnapshot,
         changes: [
-          { workspaceRoot: "/workspace/a" },
-          { workspaceRoot: "/workspace/b" },
-          { workspaceRoot: "/workspace/a" },
+          { workspaceRoot: "/workspace/a", repositoryIdentityResolved: true },
+          { workspaceRoot: "/workspace/b", repositoryIdentityResolved: true },
+          { workspaceRoot: "/workspace/a", repositoryIdentityResolved: true },
         ],
       }),
     ).toEqual({
@@ -297,6 +317,32 @@ describe("shellStreamItemsFromInitialSnapshot", () => {
 });
 
 describe("shellStreamItemsFromResumeSnapshot", () => {
+  it("resumes a cached prefix when identity resolution failed", () => {
+    const prefixProject = {
+      id: ProjectId.make("project-prefix-resume"),
+      title: "App",
+      workspaceRoot: "/workspace/app",
+      repositoryIdentity: null,
+      repositoryRelativePrefix: "packages/app",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    };
+    expect(
+      shellStreamItemsFromResumeSnapshot({
+        snapshot: { ...emptyShellSnapshot, projects: [prefixProject] },
+        resolvedRepositoryIdentityRoots: [],
+      }),
+    ).toEqual([
+      {
+        kind: "snapshot",
+        snapshot: { ...emptyShellSnapshot, projects: [prefixProject] },
+        resolvedRepositoryIdentityRoots: [],
+      },
+    ]);
+  });
+
   it("never repeats the authoritative shell snapshot", () => {
     expect(
       shellStreamItemsFromResumeSnapshot({
@@ -332,7 +378,7 @@ describe("composeShellStreamWithEnrichment", () => {
         const enrichment = Stream.make(
           shellStreamItemFromEnrichmentRefresh({
             snapshot: enrichmentSnapshot,
-            changes: [{ workspaceRoot: "/workspace/b" }],
+            changes: [{ workspaceRoot: "/workspace/b", repositoryIdentityResolved: true }],
           }),
         );
         const tail = Stream.make(

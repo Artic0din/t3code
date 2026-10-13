@@ -104,10 +104,13 @@ export function projectScriptActionTerminalId(input: {
   scriptId: string;
   cwd: string;
   worktreePath?: string | null;
+  invocationId?: string;
 }): string | null {
   const worktreePath = input.worktreePath ?? null;
   if (worktreePath === null || sameProjectPath(worktreePath, input.cwd)) return null;
-  return actionTerminalIdForScript(input.scriptId);
+  return actionTerminalIdForScript(
+    input.invocationId === undefined ? input.scriptId : `${input.scriptId}-${input.invocationId}`,
+  );
 }
 
 export function projectScriptRuntimeEnv(

@@ -17,24 +17,31 @@ function upsertById<T extends { readonly id: unknown }>(
   return items.map((candidate, candidateIndex) => (candidateIndex === index ? item : candidate));
 }
 
+function retainResolvedRepositoryPrefix(
+  previous: OrchestrationProjectShell | undefined,
+  next: OrchestrationProjectShell,
+): OrchestrationProjectShell {
+  if (
+    next.repositoryRelativePrefix == null &&
+    typeof previous?.repositoryRelativePrefix === "string" &&
+    previous.workspaceRoot === next.workspaceRoot
+  ) {
+    return { ...next, repositoryRelativePrefix: previous.repositoryRelativePrefix };
+  }
+  return next;
+}
+
 function retainRepositoryIdentity(
   previous: OrchestrationProjectShell | undefined,
   next: OrchestrationProjectShell,
 ): OrchestrationProjectShell {
-  let project = next;
+  let project = retainResolvedRepositoryPrefix(previous, next);
   if (
     next.repositoryIdentity == null &&
     previous?.repositoryIdentity != null &&
     previous.workspaceRoot === next.workspaceRoot
   ) {
     project = { ...project, repositoryIdentity: previous.repositoryIdentity };
-  }
-  if (
-    next.repositoryRelativePrefix === undefined &&
-    previous?.repositoryRelativePrefix !== undefined &&
-    previous.workspaceRoot === next.workspaceRoot
-  ) {
-    project = { ...project, repositoryRelativePrefix: previous.repositoryRelativePrefix };
   }
   return project;
 }
@@ -80,19 +87,23 @@ export function mergeShellSnapshotProjects(
         if (candidate === undefined || candidate.workspaceRoot !== project.workspaceRoot) {
           return project;
         }
+        const enrichedProject =
+          candidate.repositoryRelativePrefix !== undefined
+            ? retainResolvedRepositoryPrefix(project, {
+                ...project,
+                repositoryRelativePrefix: candidate.repositoryRelativePrefix,
+              })
+            : project;
         if (resolvedRootSet?.has(project.workspaceRoot) === true) {
           return {
-            ...project,
+            ...enrichedProject,
             repositoryIdentity: candidate.repositoryIdentity,
-            ...(candidate.repositoryRelativePrefix !== undefined
-              ? { repositoryRelativePrefix: candidate.repositoryRelativePrefix }
-              : {}),
           };
         }
         if (project.repositoryIdentity == null && candidate.repositoryIdentity != null) {
-          return { ...project, repositoryIdentity: candidate.repositoryIdentity };
+          return { ...enrichedProject, repositoryIdentity: candidate.repositoryIdentity };
         }
-        return project;
+        return enrichedProject;
       }),
     };
   }

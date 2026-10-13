@@ -264,4 +264,32 @@ describe("projectScripts helpers", () => {
     expect(hashedTerminalId?.length).toBeLessThanOrEqual(128);
     expect(hashedTerminalId).not.toBe(`action-${longLegacyId}`);
   });
+
+  it("keeps pending or failed prefix resolution distinct from a legacy server", () => {
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo/packages/app", repositoryRelativePrefix: null },
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo/packages/app" },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+  });
+
+  it("gives each subfolder invocation its own terminal before process metadata arrives", () => {
+    for (const invocationId of ["run-1", "run-2"]) {
+      expect(
+        projectScriptActionTerminalId({
+          scriptId: "dev",
+          invocationId,
+          cwd: "/worktree/packages/app",
+          worktreePath: "/worktree",
+        }),
+      ).toBe(`action-dev-${invocationId}`);
+    }
+  });
 });

@@ -1,4 +1,5 @@
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
+import { uuidv4 } from "../../lib/uuid";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
@@ -759,35 +760,30 @@ function ThreadRouteContent(
         worktreePath: preferredWorktreePath,
       });
       if (cwd === null) {
+        Alert.alert(
+          "Action unavailable",
+          "The project folder in this worktree has not been resolved yet.",
+        );
         terminalDebugLog("project-script:abort", {
           scriptId: script.id,
           reason: "repository-prefix-unresolved",
         });
         return;
       }
-      const preferredDedicatedTerminalId = projectScriptActionTerminalId({
+      const dedicatedTerminalId = projectScriptActionTerminalId({
         scriptId: script.id,
+        invocationId: uuidv4(),
         cwd,
         worktreePath: preferredWorktreePath,
       });
       const sessionIsBusy = (session: (typeof terminalMenuSessions)[number]) =>
         session.status === "starting" ||
         (session.status === "running" && session.hasRunningSubprocess);
-      const dedicatedTerminalBusy =
-        preferredDedicatedTerminalId !== null &&
-        terminalMenuSessions.some(
-          (session) =>
-            session.terminalId === preferredDedicatedTerminalId && sessionIsBusy(session),
-        );
-      const dedicatedTerminalId =
-        preferredDedicatedTerminalId !== null && !dedicatedTerminalBusy
-          ? preferredDedicatedTerminalId
-          : null;
       const targetTerminalId =
         dedicatedTerminalId ??
         resolveProjectScriptTerminalId({
           existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-          hasRunningTerminal: dedicatedTerminalBusy || terminalMenuSessions.some(sessionIsBusy),
+          hasRunningTerminal: terminalMenuSessions.some(sessionIsBusy),
         });
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },

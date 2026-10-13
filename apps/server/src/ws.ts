@@ -725,10 +725,7 @@ const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
               project: {
                 ...project,
                 repositoryIdentity: enrichment.repositoryIdentity,
-                ...(enrichment.repositoryRelativePrefixResolved &&
-                enrichment.repositoryRelativePrefix !== null
-                  ? { repositoryRelativePrefix: enrichment.repositoryRelativePrefix }
-                  : {}),
+                repositoryRelativePrefix: enrichment.repositoryRelativePrefix ?? null,
               },
               repositoryIdentityResolved: enrichment.repositoryIdentityResolved,
             })),
@@ -1047,7 +1044,11 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       );
 
     const enrichmentRefreshes = Stream.fromSubscription(enrichmentChanges).pipe(
-      Stream.filter((change) => change.repositoryIdentityResolved),
+      Stream.filter(
+        (change) =>
+          change.repositoryIdentityResolved ||
+          change.enrichment.repositoryRelativePrefixResolved === true,
+      ),
       Stream.groupedWithin(64, Duration.millis(25)),
       // Build the refresh from the identities the changes carry. Re-enriching
       // every project here re-requested each expired root, whose resolution
@@ -1060,9 +1061,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               change.workspaceRoot,
               {
                 repositoryIdentity: change.enrichment.repositoryIdentity,
-                repositoryRelativePrefix: change.enrichment.repositoryRelativePrefixResolved
-                  ? change.enrichment.repositoryRelativePrefix
-                  : undefined,
+                repositoryRelativePrefix: change.enrichment.repositoryRelativePrefix ?? null,
               },
             ]),
           );
@@ -1074,9 +1073,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               {
                 ...project,
                 repositoryIdentity: enrichment.repositoryIdentity,
-                ...(typeof enrichment.repositoryRelativePrefix === "string"
-                  ? { repositoryRelativePrefix: enrichment.repositoryRelativePrefix }
-                  : {}),
+                repositoryRelativePrefix: enrichment.repositoryRelativePrefix,
               },
             ];
           });

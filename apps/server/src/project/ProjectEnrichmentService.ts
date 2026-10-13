@@ -1,4 +1,5 @@
 import type { RepositoryIdentity } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -38,11 +39,18 @@ export interface ProjectEnrichment {
   readonly repositoryRelativePrefixResolved?: boolean;
 }
 
-function repositoryRelativePrefixFromShowPrefix(stdout: string): string | null {
+function repositoryRelativePrefixFromShowPrefix(
+  stdout: string,
+  platform: NodeJS.Platform,
+): string | null {
   const text = stdout.replace(/\r?\n$/, "");
   if (text.includes("\n") || text.includes("\r") || text.includes("\0")) return null;
   if (text === "") return "";
-  if (text.startsWith("/") || text.startsWith("\\") || /^[a-zA-Z]:/.test(text)) return null;
+  if (
+    text.startsWith("/") ||
+    (platform === "win32" && (text.startsWith("\\") || /^[a-zA-Z]:/.test(text)))
+  )
+    return null;
   const segments = text.split(/\/+/).filter((segment) => segment.length > 0);
   if (segments.length === 0) return "";
   if (segments.some((segment) => segment === "." || segment === "..")) return null;
@@ -116,6 +124,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const faviconResolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const platform = yield* HostProcessPlatform;
   const cacheCapacity = Math.max(1, options.cacheCapacity ?? DEFAULT_CACHE_CAPACITY);
   const maxPending = Math.max(1, options.maxPending ?? DEFAULT_MAX_PENDING);
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
@@ -159,7 +168,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
               if (result.timedOut || result.code !== 0) {
                 return Effect.fail("prefix-probe-failed" as const);
               }
-              const prefix = repositoryRelativePrefixFromShowPrefix(result.stdout);
+              const prefix = repositoryRelativePrefixFromShowPrefix(result.stdout, platform);
               return prefix === null
                 ? Effect.fail("prefix-probe-failed" as const)
                 : Effect.succeed(prefix);

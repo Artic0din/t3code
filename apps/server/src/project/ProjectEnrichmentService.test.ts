@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import type { RepositoryIdentity } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -492,5 +493,33 @@ it.effect("keeps a literal backslash in the repository prefix", () =>
       const change = yield* PubSub.take(changes);
       assert.equal(change.enrichment.repositoryRelativePrefix, "packages/a\\b");
     }).pipe(Effect.provide(layer(layerMetadata, {}, prefixProbe("packages/a\\b/\n"))));
+  }),
+);
+
+it.effect("accepts POSIX repository components that resemble Windows paths", () =>
+  Effect.gen(function* () {
+    const layerMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Effect.succeed(null),
+      }),
+    );
+    for (const prefix of ["\\app", "C:pkg"]) {
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+        const changes = yield* service.subscribeChanges;
+        yield* service.getAvailable(`/repo/${prefix}`);
+        const change = yield* PubSub.take(changes);
+        assert.equal(change.enrichment.repositoryRelativePrefix, prefix);
+      }).pipe(
+        Effect.provide(
+          layer(layerMetadata, {}, prefixProbe(`${prefix}/\n`)).pipe(
+            Layer.provide(Layer.succeed(HostProcessPlatform, "linux")),
+          ),
+        ),
+      );
+    }
   }),
 );
