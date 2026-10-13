@@ -162,7 +162,14 @@ function bindProviderContext(
 
   return SourceControlProvider.SourceControlProvider.of({
     kind: provider.kind,
+    ...(provider.resolveRepository
+      ? {
+          resolveRepository: (input) =>
+            provider.resolveRepository!({ ...input, context: input.context ?? context }),
+        }
+      : {}),
     ...(provider.resolveLink ? { resolveLink: provider.resolveLink } : {}),
+    ...(provider.isForkOfRepository ? { isForkOfRepository: provider.isForkOfRepository } : {}),
     ...(provider.getIssue
       ? {
           getIssue: (input) => provider.getIssue!({ ...input, context: input.context ?? context }),

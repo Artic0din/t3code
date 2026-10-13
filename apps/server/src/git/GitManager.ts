@@ -82,7 +82,10 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import { gitHubApiHostForRemote } from "../sourceControl/GitHubCli.ts";
+import {
+  gitHubApiHostForRemote,
+  pullRequestCheckoutBranchName,
+} from "../sourceControl/GitHubCli.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
@@ -251,6 +254,7 @@ interface BranchHeadContext {
   headRepositoryNameWithOwner: string | null;
   headRepositoryOwnerLogin: string | null;
   isCrossRepository: boolean;
+  targetRepository: string | null;
 }
 
 export function pullRequestRepositoryKey(value: string): string | null {
@@ -280,7 +284,8 @@ function issueRepositoryKey(value: string): string | null {
     url.pathname = match[1];
     url.search = "";
     url.hash = "";
-    return normalizeGitRemoteUrl(url.toString());
+    const normalized = normalizeGitRemoteUrl(url.toString());
+    return `${url.host.toLowerCase()}/${normalized.split("/").slice(1).join("/")}`;
   } catch {
     return null;
   }
@@ -290,16 +295,20 @@ function hostedRepositoryKey(
   remoteUrl: string,
   expectedRepositoryKey: string | null,
 ): string | null {
-  const url = remoteUrl.trim().replace(/^([a-zA-Z0-9._-]+@[^:/\s]+:)\/+/u, "$1");
-  if (!/^(?:(?:ssh|https?|git):\/\/|[a-zA-Z0-9._-]+@[^:/\s]+:)/iu.test(url)) {
-    return null;
-  }
+  const rawUrl = remoteUrl.trim();
+  if (/^[a-zA-Z]:/u.test(rawUrl)) return null;
+  const scp = /^(?:[a-zA-Z0-9._-]+@)?([^:/\s]+):(.+)$/u.exec(rawUrl);
+  const protocolUrl = /^(?:ssh|https?|git):\/\//iu.test(rawUrl);
+  if (!protocolUrl && scp === null) return null;
+  const url = protocolUrl ? rawUrl : `git@${scp![1]}:${scp![2]!.replace(/^\/+/u, "")}`;
   const normalized = normalizeGitRemoteUrl(url);
   if (normalized.includes("://")) return null;
   const segments = normalized.split("/").filter((segment) => segment.length > 0);
   if (!segments[0] || segments.length < 3) return null;
+  const httpUrl = /^https?:\/\//iu.test(url);
+  if (httpUrl) segments[0] = new URL(url).host.toLowerCase();
   const repositoryKey = segments.join("/");
-  if (repositoryKey === expectedRepositoryKey) return repositoryKey;
+  if (httpUrl || repositoryKey === expectedRepositoryKey) return repositoryKey;
   const apiHost = gitHubApiHostForRemote(url);
   return apiHost === null ? repositoryKey : [apiHost, ...segments.slice(1)].join("/");
 }
@@ -352,9 +361,10 @@ export function parseRepositoryNameWithOwnerFromRemoteUrl(
   if (trimmed.length === 0) {
     return null;
   }
+  if (/^[a-zA-Z]:/u.test(trimmed)) return null;
 
   const match =
-    /^(?:[^@/\s]+@[^:/\s]+:|(?:ssh|https?|git):\/\/[^/]+\/)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
+    /^(?:(?:ssh|https?|git):\/\/[^/]+\/|(?:[^@/\s]+@)?[^:/\s]+:\/*)((?:[^/\s]+\/)+[^/\s]+?)(?:\.git)?\/?$/iu.exec(
       trimmed,
     );
   const repositoryNameWithOwner = match?.[1]?.trim() ?? "";
@@ -1396,6 +1406,65 @@ export const make = Effect.gen(function* () {
   const readConfigValueNullable = (cwd: string, key: string) =>
     gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
 
+  const readRemoteFetchUrl = (cwd: string, remoteName: string) =>
+    gitCore
+      .execute({
+        operation: "GitManager.remoteRepository",
+        cwd,
+        args: ["config", "--get-all", `remote.${remoteName}.url`],
+        allowNonZeroExit: true,
+      })
+      .pipe(
+        Effect.map((result) => {
+          if (result.exitCode !== 0) return null;
+          return (
+            result.stdout
+              .split("\n")
+              .find((line) => line.trim().length > 0)
+              ?.trim() ?? null
+          );
+        }),
+      );
+  const readRemoteRepositoryUrl = Effect.fn("readRemoteRepositoryUrl")(function* (
+    cwd: string,
+    remoteName: string,
+  ) {
+    const configuredRemoteUrl = yield* readRemoteFetchUrl(cwd, remoteName).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    const effectiveRemoteUrl = yield* gitCore
+      .execute({
+        operation: "GitManager.remoteRepository.effectiveUrl",
+        cwd,
+        args: ["remote", "get-url", "--", remoteName],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+      })
+      .pipe(
+        Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : null)),
+        Effect.orElseSucceed(() => null),
+      );
+    return effectiveRemoteUrl !== null && hostedRepositoryKey(effectiveRemoteUrl, null) !== null
+      ? effectiveRemoteUrl
+      : configuredRemoteUrl;
+  });
+  const readHostedRemoteRepository = (
+    cwd: string,
+    remoteName: string,
+    repositoryKey: string | null,
+  ) =>
+    readRemoteRepositoryUrl(cwd, remoteName).pipe(
+      Effect.map((url) => (url === null ? null : hostedRepositoryKey(url, repositoryKey))),
+    );
+  const isRepositoryFork = (cwd: string, repository: string, targetRepository: string) =>
+    sourceControlProvider(cwd).pipe(
+      Effect.flatMap((provider) =>
+        provider.isForkOfRepository === undefined
+          ? Effect.succeed(false)
+          : provider.isForkOfRepository({ cwd, repository, targetRepository }),
+      ),
+    );
+
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
     branch: string | null,
@@ -1405,8 +1474,9 @@ export const make = Effect.gen(function* () {
         ? "origin"
         : ((yield* readConfigValueNullable(cwd, `branch.${branch}.remote`)) ?? "origin");
     const remoteUrl =
-      (yield* readConfigValueNullable(cwd, `remote.${preferredRemoteName}.url`)) ??
-      (yield* readConfigValueNullable(cwd, "remote.origin.url"));
+      (yield* readRemoteRepositoryUrl(cwd, preferredRemoteName).pipe(
+        Effect.orElseSucceed(() => null),
+      )) ?? (yield* readRemoteRepositoryUrl(cwd, "origin").pipe(Effect.orElseSucceed(() => null)));
 
     const provider = remoteUrl ? detectSourceControlProviderFromGitRemoteUrl(remoteUrl) : null;
     if (!remoteUrl || provider?.kind !== "unknown") return provider;
@@ -1431,7 +1501,9 @@ export const make = Effect.gen(function* () {
       };
     }
 
-    const remoteUrl = yield* readConfigValueNullable(cwd, `remote.${remoteName}.url`);
+    const remoteUrl = yield* readRemoteRepositoryUrl(cwd, remoteName).pipe(
+      Effect.orElseSucceed(() => null),
+    );
     let repositoryNameWithOwner = parseRepositoryNameWithOwnerFromRemoteUrl(remoteUrl);
     if (
       remoteUrl !== null &&
@@ -1449,7 +1521,9 @@ export const make = Effect.gen(function* () {
       repositoryNameWithOwner = parseRepositoryNameWithOwnerFromRemoteUrl(remoteUrl, kind);
     }
     return {
-      remoteUrlKey: remoteUrl ? normalizeGitRemoteUrl(remoteUrl) : null,
+      remoteUrlKey: remoteUrl
+        ? (hostedRepositoryKey(remoteUrl, null) ?? normalizeGitRemoteUrl(remoteUrl))
+        : null,
       repositoryNameWithOwner,
       ownerLogin: parseRepositoryOwnerLogin(repositoryNameWithOwner),
     };
@@ -1469,16 +1543,32 @@ export const make = Effect.gen(function* () {
           { concurrency: "unbounded" },
         );
 
+  const resolveBranchTargetRepository = Effect.fn("resolveBranchTargetRepository")(function* (
+    cwd: string,
+    branch: string,
+  ) {
+    const issueRepository = yield* gitCore.readConfigValue(
+      cwd,
+      `branch.${branch}.${issueBranchRepositoryConfig}`,
+    );
+    if (issueRepository !== null) return issueRepository;
+    const provider = yield* sourceControlProvider(cwd);
+    if (provider.resolveRepository === undefined) return null;
+    const repository = yield* provider.resolveRepository({ cwd });
+    return `${repository.host}/${repository.owner}/${repository.name}`.toLowerCase();
+  });
+
   const resolvePrLookupRepositoryIdentity = Effect.fn("resolvePrLookupRepositoryIdentity")(
     function* (cwd: string, branch: string, remoteNameOverride?: string) {
       const remoteName =
         remoteNameOverride ?? (yield* readConfigValueNullable(cwd, `branch.${branch}.remote`));
       const [headRemote, targetRemote] = yield* resolveHeadAndOriginContexts(cwd, remoteName);
+      const targetRepository = yield* resolveBranchTargetRepository(cwd, branch);
       return {
         remoteName,
         headRemoteUrlKey:
           headRemote.remoteUrlKey ?? (remoteName === null ? targetRemote.remoteUrlKey : null),
-        targetRemoteUrlKey: targetRemote.remoteUrlKey,
+        targetRemoteUrlKey: targetRepository ?? targetRemote.remoteUrlKey,
       };
     },
   );
@@ -1501,15 +1591,21 @@ export const make = Effect.gen(function* () {
       cwd,
       remoteName,
     );
+    const targetRepository = yield* resolveBranchTargetRepository(cwd, details.branch);
+    const targetNameWithOwner =
+      targetRepository === null
+        ? originRepository.repositoryNameWithOwner
+        : targetRepository.split("/").slice(1).join("/");
 
     const isCrossRepository =
-      remoteRepository.repositoryNameWithOwner !== null &&
-      originRepository.repositoryNameWithOwner !== null
-        ? remoteRepository.repositoryNameWithOwner.toLowerCase() !==
-          originRepository.repositoryNameWithOwner.toLowerCase()
-        : remoteName !== null &&
-          remoteName !== "origin" &&
-          remoteRepository.repositoryNameWithOwner !== null;
+      targetRepository !== null && remoteRepository.remoteUrlKey !== null
+        ? remoteRepository.remoteUrlKey.toLowerCase() !== targetRepository.toLowerCase()
+        : remoteRepository.repositoryNameWithOwner !== null && targetNameWithOwner !== null
+          ? remoteRepository.repositoryNameWithOwner.toLowerCase() !==
+            targetNameWithOwner.toLowerCase()
+          : remoteName !== null &&
+            remoteName !== "origin" &&
+            remoteRepository.repositoryNameWithOwner !== null;
 
     const ownerHeadSelector =
       remoteRepository.ownerLogin && headBranch.length > 0
@@ -1550,10 +1646,11 @@ export const make = Effect.gen(function* () {
       headRemoteUrlKey:
         remoteRepository.remoteUrlKey ??
         (remoteName === null ? originRepository.remoteUrlKey : null),
-      targetRemoteUrlKey: originRepository.remoteUrlKey,
+      targetRemoteUrlKey: targetRepository ?? originRepository.remoteUrlKey,
       headRepositoryNameWithOwner: remoteRepository.repositoryNameWithOwner,
       headRepositoryOwnerLogin: remoteRepository.ownerLogin,
       isCrossRepository,
+      targetRepository,
     } satisfies BranchHeadContext;
   });
 
@@ -1631,9 +1728,24 @@ export const make = Effect.gen(function* () {
     if (
       headContext.headBranch === details.branch ||
       !upstreamHeadIsDefault ||
-      headContext.isCrossRepository
+      (headContext.isCrossRepository && headContext.remoteName !== "origin")
     ) {
       return { headContext, lookup: true };
+    }
+    if (headContext.isCrossRepository) {
+      const configuredPublishBranch = yield* gitCore.readConfigValue(
+        cwd,
+        `branch.${details.branch}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
+      );
+      const checkoutAlias = pullRequestCheckoutBranchName({
+        headRefName: headContext.headBranch,
+        headOwner: headContext.headRepositoryOwnerLogin,
+        isCrossRepository: true,
+        defaultBranch: details.defaultBranch,
+      });
+      if (configuredPublishBranch === headContext.headBranch || details.branch === checkoutAlias) {
+        return { headContext, lookup: true };
+      }
     }
     const remoteName = yield* findRemoteTrackingRemote(cwd, details.branch, headContext.remoteName);
     if (remoteName === null) {
@@ -1706,6 +1818,7 @@ export const make = Effect.gen(function* () {
       | "headRepositoryNameWithOwner"
       | "headRepositoryOwnerLogin"
       | "isCrossRepository"
+      | "targetRepository"
     >,
   ) {
     const provider = yield* sourceControlProvider(cwd);
@@ -1715,6 +1828,9 @@ export const make = Effect.gen(function* () {
         cwd,
         headSelector,
         state: "open",
+        ...(headContext.targetRepository === null
+          ? {}
+          : { repository: headContext.targetRepository }),
         limit: provider.kind === "github" ? GITHUB_HEAD_BRANCH_PROBE_LIMIT : 1,
       });
       const normalizedPullRequests = pullRequests.map(toPullRequestInfo);
@@ -1746,6 +1862,9 @@ export const make = Effect.gen(function* () {
         cwd,
         headSelector,
         state: "all",
+        ...(headContext.targetRepository === null
+          ? {}
+          : { repository: headContext.targetRepository }),
         limit: provider.kind === "github" ? GITHUB_HEAD_BRANCH_PROBE_LIMIT : 20,
       });
 
@@ -1863,7 +1982,7 @@ export const make = Effect.gen(function* () {
     cwd: string,
     branch: string,
     upstreamRef: string | null,
-    headContext: Pick<BranchHeadContext, "isCrossRepository" | "remoteName">,
+    headContext: Pick<BranchHeadContext, "isCrossRepository" | "remoteName" | "targetRepository">,
   ) {
     const configured = yield* gitCore.readConfigValue(cwd, `branch.${branch}.gh-merge-base`);
     if (configured) return configured;
@@ -1872,13 +1991,28 @@ export const make = Effect.gen(function* () {
       const upstreamBranch = extractBranchNameFromRemoteRef(upstreamRef, {
         remoteName: headContext.remoteName,
       });
-      if (upstreamBranch.length > 0 && upstreamBranch !== branch) {
+      const publishBranch = yield* gitCore.readConfigValue(
+        cwd,
+        `branch.${branch}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
+      );
+      if (
+        upstreamBranch.length > 0 &&
+        upstreamBranch !== branch &&
+        upstreamBranch !== publishBranch
+      ) {
         return upstreamBranch;
       }
     }
 
     const defaultFromProvider = yield* sourceControlProvider(cwd).pipe(
-      Effect.flatMap((provider) => provider.getDefaultBranch({ cwd })),
+      Effect.flatMap((provider) =>
+        provider.getDefaultBranch({
+          cwd,
+          ...(headContext.targetRepository === null
+            ? {}
+            : { repository: headContext.targetRepository }),
+        }),
+      ),
       Effect.orElseSucceed(() => null),
     );
     if (defaultFromProvider) {
@@ -1903,7 +2037,49 @@ export const make = Effect.gen(function* () {
   const resolveBaseRangeRef = Effect.fn("resolveBaseRangeRef")(function* (
     cwd: string,
     baseBranch: string,
+    targetRepository: string | null,
   ) {
+    if (targetRepository !== null) {
+      const listed = yield* gitCore.execute({
+        operation: "GitManager.resolveBaseRangeRef.remotes",
+        cwd,
+        args: ["remote"],
+      });
+      const remotes = listed.stdout
+        .split("\n")
+        .map((name) => name.trim())
+        .filter(Boolean)
+        .sort((left, right) => Number(right === "origin") - Number(left === "origin"));
+      const otherRepositories: Array<readonly [string, string]> = [];
+      for (const remote of remotes) {
+        const remoteRepository: string | null = yield* readHostedRemoteRepository(
+          cwd,
+          remote,
+          targetRepository,
+        );
+        if (remoteRepository !== targetRepository) {
+          if (remoteRepository !== null) otherRepositories.push([remote, remoteRepository]);
+          continue;
+        }
+        const resolved = yield* gitCore
+          .resolveRemoteTrackingCommit({ cwd, refName: baseBranch, fallbackRemoteName: remote })
+          .pipe(Effect.orElseSucceed(() => null));
+        if (resolved !== null) return resolved.commitSha;
+      }
+      for (const [remote, remoteRepository] of otherRepositories) {
+        const resolved = yield* gitCore
+          .resolveRemoteTrackingCommit({ cwd, refName: baseBranch, fallbackRemoteName: remote })
+          .pipe(Effect.orElseSucceed(() => null));
+        if (
+          resolved !== null &&
+          (yield* isRepositoryFork(cwd, remoteRepository, targetRepository).pipe(
+            Effect.orElseSucceed(() => false),
+          ))
+        )
+          return resolved.commitSha;
+      }
+      return baseBranch;
+    }
     const remoteName = yield* gitCore
       .resolvePrimaryRemoteName(cwd)
       .pipe(Effect.orElseSucceed(() => null));
@@ -2133,7 +2309,7 @@ export const make = Effect.gen(function* () {
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch);
+    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch, headContext.targetRepository);
     const rangeContext = yield* gitCore.readRangeContext(cwd, baseRangeRef);
     const policy = yield* resolveStylePolicy(cwd, settings);
     const changeRequestTemplate =
@@ -2178,6 +2354,9 @@ export const make = Effect.gen(function* () {
         cwd,
         baseRefName: baseBranch,
         headSelector: headContext.preferredHeadSelector,
+        ...(headContext.targetRepository === null
+          ? {}
+          : { repository: headContext.targetRepository }),
         title: generated.title,
         bodyFile,
       })
@@ -2527,40 +2706,100 @@ export const make = Effect.gen(function* () {
           Effect.orElseSucceed(() => null),
         );
       const hostedRemoteRepository = (remoteName: string) =>
-        gitCore
-          .execute({
-            operation: "GitManager.prepareIssueThread.remoteRepository",
-            cwd: input.cwd,
-            args: ["config", "--get-all", `remote.${remoteName}.url`],
-            allowNonZeroExit: true,
-          })
-          .pipe(
-            Effect.map((result) => {
-              if (result.exitCode !== 0) return null;
-              const firstUrl = result.stdout.split("\n").find((line) => line.trim().length > 0);
-              return firstUrl === undefined ? null : hostedRepositoryKey(firstUrl, repositoryKey);
-            }),
-          );
-      // Local refs use branch config. Remote refs use that remote's URL. Missing either stays
-      // reusable so a title change still finds the branch.
-      const issueBranchPrefix = `issue/${issue.number}-`;
-      const matchesIssueRepository = (branchName: string, remoteName?: string) =>
+        readHostedRemoteRepository(input.cwd, remoteName, repositoryKey);
+      const forkRelationships = new Map<string, boolean>();
+      const isIssueRepositoryFork = (candidate: string) =>
         Effect.gen(function* () {
-          if (repositoryKey === null) return true;
-          if (remoteName !== undefined) {
-            const remoteKey = yield* hostedRemoteRepository(remoteName);
-            if (remoteKey === null) return true;
-            return remoteKey === repositoryKey;
-          }
-          const recorded = yield* readIssueBranchRepository(branchName);
-          if (recorded.length > 0) return recorded === repositoryKey;
-          return true;
+          if (repositoryKey === null) return false;
+          const cached = forkRelationships.get(candidate);
+          if (cached !== undefined) return cached;
+          const isFork = yield* isRepositoryFork(input.cwd, candidate, repositoryKey).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GitManagerError({
+                  operation: "prepareIssueThread",
+                  cwd: input.cwd,
+                  detail:
+                    "Could not verify the publishing repository's fork relationship. Retry starting work.",
+                  cause,
+                }),
+            ),
+          );
+          forkRelationships.set(candidate, isFork);
+          return isFork;
         });
+      const issueBranchPrefix = `issue/${issue.number}-`;
       const distinctIssueBranchName = (key: string) =>
         crypto.digest("SHA-256", new TextEncoder().encode(key)).pipe(
           Effect.map((digest) => `${issueBranchPrefix}${Hex.encode(digest).slice(0, 12)}`),
           Effect.orDie,
         );
+      const forkIssueBranch =
+        repositoryKey === null
+          ? null
+          : (yield* distinctIssueBranchName(repositoryKey)).replace(
+              issueBranchPrefix,
+              `${issueBranchPrefix}repo-`,
+            );
+      const resolveIssuePublishRemote = (branchName: string, remoteName: string) =>
+        Effect.gen(function* () {
+          const branchPushRemote = yield* readConfigValueNullable(
+            input.cwd,
+            `branch.${branchName}.pushRemote`,
+          );
+          if (branchPushRemote !== null) return branchPushRemote;
+          const configured = yield* readConfigValueNullable(input.cwd, "remote.pushDefault");
+          if (configured !== null) {
+            const configuredRepository = yield* hostedRemoteRepository(configured);
+            if (
+              configuredRepository === null ||
+              configuredRepository === repositoryKey ||
+              (yield* isIssueRepositoryFork(configuredRepository))
+            )
+              return configured;
+          }
+          let publishRemote = remoteName;
+          if (configured === null && remoteName !== "origin" && repositoryKey !== null) {
+            const originRepository = yield* hostedRemoteRepository("origin");
+            if (originRepository !== null && originRepository !== repositoryKey) {
+              if (yield* isIssueRepositoryFork(originRepository)) publishRemote = "origin";
+            }
+          }
+          return publishRemote;
+        });
+      const issuePublishBranch = (branchName: string, publishRemote: string | null) =>
+        Effect.gen(function* () {
+          if (forkIssueBranch === null || publishRemote === null) return branchName;
+          const remoteKey = yield* hostedRemoteRepository(publishRemote);
+          return remoteKey !== null && remoteKey !== repositoryKey ? forkIssueBranch : branchName;
+        });
+      const rememberIssuePublishRemote = (branchName: string, publishRemote: string | null) =>
+        publishRemote === null
+          ? Effect.void
+          : gitCore.execute({
+              operation: "GitManager.prepareIssueThread.publishRemote",
+              cwd: input.cwd,
+              args: ["config", "--local", `branch.${branchName}.pushRemote`, publishRemote],
+            });
+      // Local refs use branch config. Remote refs use that remote's URL. Missing either stays
+      // reusable so a title change still finds the branch.
+      const matchesIssueRepository = (branchName: string, remoteName?: string) =>
+        Effect.gen(function* () {
+          if (repositoryKey === null) return true;
+          const hasRepositoryMarker = /^issue\/\d+-repo-[a-f0-9]{12}$/u.test(branchName);
+          if (hasRepositoryMarker && branchName !== forkIssueBranch) return false;
+          if (remoteName !== undefined) {
+            const remoteKey = yield* hostedRemoteRepository(remoteName);
+            if (remoteKey === null) return true;
+            return (
+              remoteKey === repositoryKey ||
+              (branchName === forkIssueBranch && (yield* isIssueRepositoryFork(remoteKey)))
+            );
+          }
+          const recorded = yield* readIssueBranchRepository(branchName);
+          if (recorded.length > 0) return recorded === repositoryKey;
+          return true;
+        });
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
@@ -2579,9 +2818,13 @@ export const make = Effect.gen(function* () {
       ) =>
         Effect.gen(function* () {
           const ordered = [
+            ...candidates.filter((ref) => nameOf(ref) === forkIssueBranch),
             ...candidates.filter((ref) => nameOf(ref) === branch),
             ...candidates.filter(
-              (ref) => nameOf(ref) !== branch && nameOf(ref).startsWith(issueBranchPrefix),
+              (ref) =>
+                nameOf(ref) !== forkIssueBranch &&
+                nameOf(ref) !== branch &&
+                nameOf(ref).startsWith(issueBranchPrefix),
             ),
           ];
           for (const ref of ordered) {
@@ -2641,11 +2884,24 @@ export const make = Effect.gen(function* () {
       );
       if (remoteRef) {
         const remoteLocalName = localNameOf(remoteRef);
-        const newRefName =
+        const localRefName =
           repositoryKey !== null && !(yield* matchesIssueRepository(remoteLocalName))
             ? yield* distinctIssueBranchName(repositoryKey)
             : remoteLocalName;
+        const publishRemote =
+          remoteRef.remoteName === undefined
+            ? null
+            : yield* resolveIssuePublishRemote(localRefName, remoteRef.remoteName);
+        const publishBranch = yield* issuePublishBranch(remoteLocalName, publishRemote);
+        const newRefName = localRefName !== remoteLocalName ? localRefName : publishBranch;
         const baseRefName = newRefName === remoteLocalName ? null : yield* issueDefaultBranch();
+        if (publishBranch !== remoteLocalName && baseRefName === null) {
+          return yield* new GitManagerError({
+            operation: "prepareIssueThread",
+            cwd: input.cwd,
+            detail: "Could not find the default branch to continue the issue worktree from.",
+          });
+        }
         const worktree = yield* gitCore.createWorktree(
           {
             cwd: input.cwd,
@@ -2656,12 +2912,8 @@ export const make = Effect.gen(function* () {
           },
           { submodules, worktreesDirectory },
         );
-        if (newRefName !== remoteLocalName && remoteRef.remoteName !== undefined) {
-          yield* gitCore.execute({
-            operation: "GitManager.prepareIssueThread.publishRemote",
-            cwd: input.cwd,
-            args: ["config", "--local", `branch.${newRefName}.pushRemote`, remoteRef.remoteName],
-          });
+        yield* rememberIssuePublishRemote(newRefName, publishRemote);
+        if (newRefName !== publishBranch) {
           yield* gitCore.execute({
             operation: "GitManager.prepareIssueThread.publishBranch",
             cwd: input.cwd,
@@ -2669,7 +2921,7 @@ export const make = Effect.gen(function* () {
               "config",
               "--local",
               `branch.${newRefName}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
-              remoteLocalName,
+              publishBranch,
             ],
           });
         }
@@ -2739,11 +2991,12 @@ export const make = Effect.gen(function* () {
           if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
             return {
               refName: `refs/remotes/${remote}/${baseBranch}`,
+              remoteName: remote,
               isIssueRepository: matching.includes(remote),
             };
           }
         }
-        return { refName: null, isIssueRepository: matching.length > 0 };
+        return { refName: null, remoteName: null, isIssueRepository: matching.length > 0 };
       });
       const remoteBase = yield* remoteStartRef;
       const startRef = remoteBase.isIssueRepository
@@ -2758,21 +3011,34 @@ export const make = Effect.gen(function* () {
           detail: `The default branch ${baseBranch} is not available locally or on any remote. Fetch it, then start work again.`,
         });
       }
-      return finish(
-        yield* gitCore.createWorktree(
-          {
-            cwd: input.cwd,
-            refName: startRef,
-            newRefName:
-              repositoryKey !== null && !(yield* matchesIssueRepository(branch))
-                ? yield* distinctIssueBranchName(repositoryKey)
-                : branch,
-            baseRefName: baseBranch,
-            path: null,
-          },
-          { submodules, worktreesDirectory },
-        ),
+      const localRefName =
+        repositoryKey !== null && !(yield* matchesIssueRepository(branch))
+          ? yield* distinctIssueBranchName(repositoryKey)
+          : branch;
+      const fallbackRepository =
+        !remoteBase.isIssueRepository && remoteBase.remoteName !== null
+          ? yield* hostedRemoteRepository(remoteBase.remoteName)
+          : null;
+      const hasIssuePublisher =
+        remoteBase.isIssueRepository ||
+        (fallbackRepository !== null && (yield* isIssueRepositoryFork(fallbackRepository)));
+      const publishRemote =
+        hasIssuePublisher && remoteBase.remoteName !== null
+          ? yield* resolveIssuePublishRemote(localRefName, remoteBase.remoteName)
+          : null;
+      const newRefName = yield* issuePublishBranch(localRefName, publishRemote);
+      const worktree = yield* gitCore.createWorktree(
+        {
+          cwd: input.cwd,
+          refName: startRef,
+          newRefName,
+          baseRefName: baseBranch,
+          path: null,
+        },
+        { submodules, worktreesDirectory },
       );
+      yield* rememberIssuePublishRemote(worktree.worktree.refName, publishRemote);
+      return finish(worktree);
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
@@ -3106,13 +3372,39 @@ export const make = Effect.gen(function* () {
         GitManagerServiceError
       > {
         const initialStatus = yield* gitCore.statusDetails(input.cwd);
+        const initialBranch = initialStatus.branch;
         const wantsCommit = isCommitAction(input.action);
+        const needsConfiguredPublication =
+          input.action !== "create_pr" || initialBranch === null
+            ? false
+            : yield* Effect.gen(function* () {
+                const branch = initialBranch;
+                const [branchPushRemote, pushDefault, publishBranch] = yield* Effect.all([
+                  gitCore.readConfigValue(input.cwd, `branch.${branch}.pushRemote`),
+                  gitCore.readConfigValue(input.cwd, "remote.pushDefault"),
+                  gitCore.readConfigValue(
+                    input.cwd,
+                    `branch.${branch}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
+                  ),
+                ]);
+                const pushRemote = branchPushRemote ?? pushDefault;
+                if (pushRemote === null && publishBranch === null) return false;
+                const remote =
+                  pushRemote ??
+                  (yield* gitCore.readConfigValue(input.cwd, `branch.${branch}.remote`));
+                return (
+                  remote !== null &&
+                  initialStatus.upstreamRef !== `${remote}/${publishBranch ?? branch}`
+                );
+              });
         const wantsPush =
           input.action === "push" ||
           input.action === "commit_push" ||
           input.action === "commit_push_pr" ||
           (input.action === "create_pr" &&
-            (!initialStatus.hasUpstream || initialStatus.aheadCount > 0));
+            (!initialStatus.hasUpstream ||
+              initialStatus.aheadCount > 0 ||
+              needsConfiguredPublication));
         const wantsPr = input.action === "create_pr" || input.action === "commit_push_pr";
 
         if (input.featureBranch && !wantsCommit) {
