@@ -18,6 +18,40 @@ import {
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
 
+it("refreshes an already-open preset submenu when pending input disables its actions", async () => {
+  const hiddenDraftWrites: string[] = [];
+  const staleAction = {
+    kind: "action" as const,
+    value: "apply",
+    title: "Apply Text",
+    searchTerms: ["text"],
+    icon: null,
+    disabled: false,
+    run: async () => {
+      hiddenDraftWrites.push("Wrong target");
+    },
+  };
+  const storedView = [{ value: "prompt-presets", label: "Prompt presets", items: [staleAction] }];
+  const liveSubmenuGroups = [
+    {
+      ...storedView[0]!,
+      items: [{ ...staleAction, disabled: true, run: async () => {} }],
+    },
+  ];
+  const visibleGroups = filterCommandPaletteGroups({
+    activeGroups: storedView,
+    liveSubmenuGroups,
+    query: "",
+    isInSubmenu: true,
+    projectSearchItems: [],
+    threadSearchItems: [],
+  });
+  const visibleAction = visibleGroups[0]?.items[0];
+  expect(visibleAction?.disabled).toBe(true);
+  if (visibleAction?.kind === "action" && !visibleAction.disabled) await visibleAction.run();
+  expect(hiddenDraftWrites).toEqual([]);
+});
+
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {
     const environmentId = EnvironmentId.make("remote");

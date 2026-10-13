@@ -241,6 +241,32 @@ describe("isTerminalToggleShortcut", () => {
 });
 
 describe("settle thread shortcut", () => {
+  it("resolves prompt presets without using the desktop DevTools accelerator", () => {
+    assert.equal(
+      resolveShortcutCommand(
+        event({ key: "i", ctrlKey: true, altKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Win32", context: { terminalFocus: false } },
+      ),
+      "composer.promptPreset",
+    );
+    assert.equal(
+      resolveShortcutCommand(
+        event({ key: "i", metaKey: true, altKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: { terminalFocus: false } },
+      ),
+      "composer.promptPreset",
+    );
+    assert.isNull(
+      resolveShortcutCommand(
+        event({ key: "i", ctrlKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Win32", context: { terminalFocus: false } },
+      ),
+    );
+  });
+
   it("resolves outside the terminal", () => {
     assert.equal(
       resolveShortcutCommand(event({ key: "s", metaKey: true, shiftKey: true }), DEFAULT_BINDINGS, {

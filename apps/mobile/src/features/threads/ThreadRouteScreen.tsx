@@ -67,6 +67,7 @@ import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-s
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
+import { useThreadComposerPresetTarget } from "./use-thread-composer-preset-target";
 import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/thread-relationships";
 import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
 import { threadEnvironment } from "../../state/threads";
@@ -479,6 +480,42 @@ function ThreadRouteContent(
           }
         : null,
     [composer.interactionMode, composer.modelSelection, composer.runtimeMode, selectedThread],
+  );
+  const presetTarget = useMemo(() => {
+    if (!selectedThread || !composer.composerDraftKey) return null;
+    return {
+      draftKey: composer.composerDraftKey,
+      environmentId: selectedThread.environmentId,
+      effectiveAgentSettings: {
+        providerInstanceId:
+          composer.modelSelection?.instanceId ?? selectedThread.modelSelection.instanceId,
+        model: composer.modelSelection?.model ?? selectedThread.modelSelection.model,
+        runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
+        interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
+      },
+      threadState: {
+        isQueuedEdit: composer.queuedRunEdit !== null,
+        hasStartedSession:
+          selectedThread.runtime != null ||
+          selectedThread.latestRun != null ||
+          selectedThread.latestUserMessageAt != null,
+        currentProviderInstanceId: selectedThread.runtime?.providerInstanceId,
+        supportsProviderSwitchingViaHandoff: composer.canSwitchThreadProvider,
+      },
+    };
+  }, [
+    selectedThread,
+    composer.composerDraftKey,
+    composer.modelSelection,
+    composer.runtimeMode,
+    composer.interactionMode,
+    composer.canSwitchThreadProvider,
+    composer.queuedRunEdit,
+  ]);
+  useThreadComposerPresetTarget(
+    presetTarget,
+    requests.activePendingUserInput !== null,
+    selectedThreadCreation?.outcome?.kind === "failed",
   );
 
   /* ─── Native header theming ──────────────────────────────────────── */

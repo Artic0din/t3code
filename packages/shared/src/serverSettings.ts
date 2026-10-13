@@ -283,6 +283,7 @@ export function applyServerSettingsPatch(
     usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
+    promptPresetMutation,
     // Already translated into `projectSettingsOverrides` above; the legacy
     // maps are derived views and must never be merged directly.
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
@@ -396,6 +397,23 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.defaultProjectScripts !== undefined
       ? { defaultProjectScripts: patch.defaultProjectScripts }
+      : {}),
+    ...(patch.promptPresets !== undefined ? { promptPresets: patch.promptPresets } : {}),
+    ...(promptPresetMutation !== undefined
+      ? {
+          promptPresets:
+            promptPresetMutation.operation === "delete"
+              ? current.promptPresets.filter(
+                  (preset) => preset.id !== promptPresetMutation.presetId,
+                )
+              : current.promptPresets.some((preset) => preset.id === promptPresetMutation.preset.id)
+                ? current.promptPresets.map((preset) =>
+                    preset.id === promptPresetMutation.preset.id
+                      ? promptPresetMutation.preset
+                      : preset,
+                  )
+                : [...current.promptPresets, promptPresetMutation.preset],
+        }
       : {}),
     ...(usageLimitSourcesPatch !== undefined
       ? {

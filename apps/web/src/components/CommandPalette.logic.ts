@@ -440,25 +440,27 @@ function rankCommandPaletteItemMatch(
 
 export function filterCommandPaletteGroups(input: {
   activeGroups: ReadonlyArray<CommandPaletteGroup>;
+  liveSubmenuGroups?: ReadonlyArray<CommandPaletteGroup> | undefined;
   query: string;
   isInSubmenu: boolean;
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
+  const activeGroups = input.liveSubmenuGroups ?? input.activeGroups;
   const isActionsFilter = input.query.startsWith(">");
   const searchQuery = isActionsFilter ? input.query.slice(1) : input.query;
   const normalizedQuery = normalizeSearchText(searchQuery);
 
   if (normalizedQuery.length === 0) {
     if (isActionsFilter) {
-      return input.activeGroups.filter((group) => group.value === "actions");
+      return activeGroups.filter((group) => group.value === "actions");
     }
-    return [...input.activeGroups];
+    return [...activeGroups];
   }
   const queryTokens = normalizedQuery.split(" ");
 
-  let baseGroups = [...input.activeGroups];
+  let baseGroups = [...activeGroups];
   if (isActionsFilter) {
     baseGroups = baseGroups.filter((group) => group.value === "actions");
   } else if (!input.isInSubmenu) {

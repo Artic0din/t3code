@@ -117,7 +117,7 @@ import {
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
-import { useNewTaskFlow } from "./new-task-flow-provider";
+import { useNewTaskFlow, useNewTaskComposerPresetTarget } from "./new-task-flow-provider";
 import {
   nextEnvironmentId,
   useHardwareKeyboardCommand,
@@ -197,6 +197,7 @@ export function NewTaskDraftScreen(props: {
 }) {
   const projects = useProjects();
   const flow = useNewTaskFlow();
+  useNewTaskComposerPresetTarget(true, props);
   const navigation = useNavigation();
   const {
     consumeShare,

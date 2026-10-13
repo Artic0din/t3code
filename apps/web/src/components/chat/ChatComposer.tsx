@@ -126,6 +126,8 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { ComposerPromptPresetButton, ComposerPromptPresetMenu } from "./ComposerPromptPresetMenu";
+import { useComposerPromptPresets } from "./useComposerPromptPresets";
 import { useComposerMenuState } from "./useComposerMenuState";
 import { useComposerTriggerState } from "./useComposerTriggerState";
 import { useComposerFocusState } from "./useComposerFocusState";
@@ -1577,6 +1579,7 @@ export interface ChatComposerProps {
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
+  supportsProviderSwitchingViaHandoff?: boolean;
   providerStatuses: ServerProvider[];
   /** False until the environment's server config has arrived at least once. */
   providerCatalogKnown: boolean;
@@ -1726,6 +1729,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     runtimeMode,
     interactionMode: requestedInteractionMode,
     lockedProvider,
+    supportsProviderSwitchingViaHandoff = false,
     providerStatuses,
     providerCatalogKnown,
     activeProjectDefaultModelSelection,
@@ -2316,6 +2320,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
+  const promptPresets = useComposerPromptPresets({
+    enabled: activePendingProgress === null && pendingUserInputs.length === 0,
+    planModeEnabled: settings.planModeEnabled,
+    environmentId,
+    threadRef: composerDraftTarget,
+    draft: composerDraft,
+    providers: providerStatuses,
+    effectiveAgentSettings: {
+      providerInstanceId: selectedInstanceId,
+      model: selectedModel,
+      runtimeMode: compatibleRuntimeMode,
+      interactionMode,
+    },
+    threadState: {
+      hasStartedSession: threadShellHasStarted(activeThread),
+      isMultiModel: routeKind === "draft" && multipleModelSelections !== null,
+      isQueuedEdit:
+        typeof composerDraftTarget === "string" && composerDraftTarget.startsWith("queued-edit:"),
+      currentProviderInstanceId: activeThread?.runtime?.providerInstanceId,
+      supportsProviderSwitchingViaHandoff,
+    },
+  });
+  const promptPresetsEnabled = promptPresets.enabled;
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's
@@ -2402,6 +2429,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
+  const [isPromptPresetMenuOpen, setIsPromptPresetMenuOpen] = useComposerMenuState(
+    !promptPresetsEnabled,
+    JSON.stringify([environmentId, composerDraftTargetKey]),
+  );
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -5063,6 +5094,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const toggleStashMenu = useCallback(() => {
+    setIsPromptPresetMenuOpen(false);
     if (isComposerCollapsedMobile) {
       expandMobileComposer();
       setIsStashMenuOpen(true);
@@ -5070,6 +5102,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     setIsStashMenuOpen((open) => !open);
   }, [expandMobileComposer, isComposerCollapsedMobile]);
+  const togglePromptPresetMenu = useCallback(() => {
+    if (!promptPresetsEnabled) return;
+    setIsStashMenuOpen(false);
+    if (isComposerCollapsedMobile) {
+      expandMobileComposer();
+      setIsPromptPresetMenuOpen(true);
+      return;
+    }
+    setIsPromptPresetMenuOpen((open) => !open);
+  }, [expandMobileComposer, isComposerCollapsedMobile, promptPresetsEnabled]);
   const toggleTasksDrawer = useCallback(() => {
     setIsTasksDrawerOpen((open) => !open);
   }, []);
@@ -5597,6 +5639,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     if (composerMenuOpen) {
       setIsStashMenuOpen(false);
+      setIsPromptPresetMenuOpen(false);
     }
   }, [composerMenuOpen]);
   useEffect(() => {
@@ -5641,6 +5684,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     stashCurrentPrompt,
     isRevertingCheckpoint,
     terminalOpen,
+  ]);
+
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: getTerminalFocusOwner() !== null,
+          terminalOpen,
+          modelPickerOpen: isComposerModelPickerOpen,
+        },
+      });
+      if (command !== "composer.promptPreset") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (isCommandPaletteOpen() || isRevertingCheckpoint || isComposerApprovalState) return;
+      togglePromptPresetMenu();
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    isComposerApprovalState,
+    isComposerModelPickerOpen,
+    isRevertingCheckpoint,
+    keybindings,
+    terminalOpen,
+    togglePromptPresetMenu,
   ]);
 
   // ------------------------------------------------------------------
@@ -6776,6 +6845,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </ComposerBanner.Attachment>
           ) : null}
         </ComposerBanner.Column>
+        {!isComposerApprovalState && promptPresetsEnabled ? (
+          <ComposerPromptPresetButton
+            count={promptPresets.presets.length}
+            menuOpen={isPromptPresetMenuOpen}
+            onToggleMenu={togglePromptPresetMenu}
+          />
+        ) : null}
         {!isComposerApprovalState ? (
           <ComposerStashBadge
             count={stashQueue.length}
@@ -6875,6 +6951,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 isComposerResting && "py-2 sm:py-2",
               )}
             >
+              {isPromptPresetMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
+                <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
+                  <ComposerPromptPresetMenu
+                    presets={promptPresets.presets}
+                    draftText={prompt}
+                    isQueuedEdit={promptPresets.isQueuedEdit}
+                    error={promptPresets.error}
+                    onApply={promptPresets.apply}
+                    onSave={promptPresets.save}
+                    onDelete={promptPresets.remove}
+                    onClose={() => setIsPromptPresetMenuOpen(false)}
+                  />
+                </ComposerCommandMenuLayer>
+              )}
               {isStashMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerStashMenu

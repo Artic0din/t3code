@@ -11421,6 +11421,9 @@ export default function ChatView(props: ChatViewProps) {
                               runtimeMode={runtimeMode}
                               interactionMode={interactionMode}
                               lockedProvider={modelPickerLockedProvider}
+                              supportsProviderSwitchingViaHandoff={
+                                supportsProviderSwitchingViaHandoff
+                              }
                               providerStatuses={providerStatuses as ServerProvider[]}
                               providerCatalogKnown={serverConfig !== null}
                               activeProjectDefaultModelSelection={

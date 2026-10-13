@@ -4,6 +4,7 @@ import { THREAD_JUMP_KEYBINDING_COMMANDS } from "@t3tools/contracts";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -24,7 +25,13 @@ import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
-import { useProjects, useThreadShell, useThreadShells } from "../../state/entities";
+import {
+  useProjects,
+  useServerConfigs,
+  readEnvironmentServerConfig,
+  useThreadShell,
+  useThreadShells,
+} from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { useWorkspaceEnvironments } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -38,6 +45,21 @@ import {
 } from "./commandPaletteItems";
 import { parseActiveThreadPath, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 import { threadJumpIndex } from "./threadKeyboardShortcuts";
+import {
+  applyPromptPresetToMobileDraft,
+  buildPromptPresetFromMobileDraft,
+  createPromptPresetDeleteConfirmation,
+} from "./applyPromptPresetToDraft";
+import { savePromptPreset } from "@t3tools/client-runtime/promptPresets";
+import { getComposerDraftSnapshot } from "../../state/use-composer-drafts";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  getActiveComposerDraftTarget,
+  useActiveComposerDraftTarget,
+} from "../threads/active-composer-draft-target";
+import { useLegacyPlanModeState } from "../threads/use-legacy-plan-mode-enabled";
+import { uuidv4 } from "../../lib/uuid";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
   "commandPalette",
@@ -145,6 +167,12 @@ export function CommandPalette(props: {
   const threads = useThreadShells();
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
+  const activeComposerDraft = useActiveComposerDraftTarget();
+  const serverConfigs = useServerConfigs();
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "server settings update",
+    reportFailure: true,
+  });
   const environments = useWorkspaceEnvironments();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [query, setQuery] = useState("");
@@ -154,6 +182,9 @@ export function CommandPalette(props: {
   const closing = useRef(false);
   const inputRef = useRef<TextInputInstance>(null);
   const listRef = useRef<FlatList<CommandPaletteItem>>(null);
+  const { enabled: planModeEnabled } = useLegacyPlanModeState();
+  const planModeEnabledRef = useRef(planModeEnabled);
+  planModeEnabledRef.current = planModeEnabled;
   const { width, height } = useWindowDimensions();
   const searchEnvironmentIds = useMemo(
     () =>
@@ -341,16 +372,165 @@ export function CommandPalette(props: {
           run: () => selectThread(thread),
         };
       });
+    const presetEnvironmentId = activeComposerDraft?.environmentId ?? null;
+    const presetConfig =
+      presetEnvironmentId === null ? undefined : serverConfigs.get(presetEnvironmentId);
+    const presetKey = activeComposerDraft?.draftKey ?? null;
+    const presets = presetConfig?.settings.promptPresets ?? [];
+    if (
+      presetKey &&
+      presetConfig?.environment.capabilities.promptPresets === true &&
+      presetEnvironmentId &&
+      activeComposerDraft
+    ) {
+      const environmentId = presetEnvironmentId;
+      const { effectiveAgentSettings, threadState } = activeComposerDraft;
+      const currentPresetConfig = () => readEnvironmentServerConfig(environmentId);
+      actions.push({
+        key: "savePromptPreset",
+        kind: "action",
+        title: "Save prompt preset",
+        searchTerms: ["preset", "prompt", "instructions"],
+        run: () => {
+          if (
+            getActiveComposerDraftTarget() !== activeComposerDraft ||
+            currentPresetConfig()?.environment.capabilities.promptPresets !== true
+          ) {
+            Alert.alert(
+              "Prompt preset",
+              "Open a composer on a server that supports prompt presets.",
+            );
+            return;
+          }
+          const draft = getComposerDraftSnapshot(presetKey);
+          const name = draft.text.trim().split("\n")[0]?.slice(0, 80) || "Preset";
+          const next = buildPromptPresetFromMobileDraft({
+            id: uuidv4(),
+            name,
+            draftKey: presetKey,
+            effectiveAgentSettings,
+            threadState,
+          });
+          const currentPresets = currentPresetConfig()?.settings.promptPresets ?? [];
+          const saved = savePromptPreset(currentPresets, next);
+          if (!saved.ok) {
+            Alert.alert("Prompt preset", saved.message);
+            return;
+          }
+          void updateSettings({
+            environmentId,
+            input: { patch: { promptPresetMutation: { operation: "upsert", preset: next } } },
+          });
+        },
+      });
+      if (presets.length === 0) {
+        actions.push({
+          key: "promptPresetsEmpty",
+          kind: "action",
+          title: "No prompt presets",
+          detail: "Save the current draft to create one.",
+          searchTerms: ["preset", "empty"],
+          run: () => {
+            Alert.alert("Prompt preset", "No prompt presets yet. Save the current draft first.");
+          },
+        });
+      }
+      for (const preset of presets) {
+        actions.push(
+          {
+            key: `prompt-preset-apply:${preset.id}`,
+            kind: "action",
+            title: `Apply ${preset.name}`,
+            searchTerms: [preset.name, "preset", "insert"],
+            run: () => {
+              const result = applyPromptPresetToMobileDraft({
+                draftKey: presetKey,
+                presets: currentPresetConfig()?.settings.promptPresets ?? [],
+                presetId: preset.id,
+                disposition: "insert",
+                providers: currentPresetConfig()?.providers ?? [],
+                serverSupportsPromptPresets:
+                  currentPresetConfig()?.environment.capabilities.promptPresets === true,
+                effectiveAgentSettings,
+                threadState,
+                planModeEnabled: planModeEnabledRef.current,
+                expectedActiveTarget: activeComposerDraft,
+              });
+              if (!result.ok) Alert.alert("Prompt preset", result.message);
+            },
+          },
+          {
+            key: `prompt-preset-replace:${preset.id}`,
+            kind: "action",
+            title: `Replace draft with ${preset.name}`,
+            searchTerms: [preset.name, "preset", "replace"],
+            run: () => {
+              const result = applyPromptPresetToMobileDraft({
+                draftKey: presetKey,
+                presets: currentPresetConfig()?.settings.promptPresets ?? [],
+                presetId: preset.id,
+                disposition: "replace",
+                providers: currentPresetConfig()?.providers ?? [],
+                serverSupportsPromptPresets:
+                  currentPresetConfig()?.environment.capabilities.promptPresets === true,
+                effectiveAgentSettings,
+                threadState,
+                planModeEnabled: planModeEnabledRef.current,
+                expectedActiveTarget: activeComposerDraft,
+              });
+              if (!result.ok) Alert.alert("Prompt preset", result.message);
+            },
+          },
+          {
+            key: `prompt-preset-delete:${preset.id}`,
+            kind: "action",
+            title: `Delete ${preset.name}`,
+            searchTerms: [preset.name, "preset", "delete", "remove"],
+            run: () => {
+              Alert.alert("Delete prompt preset", `Remove "${preset.name}"?`, [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Delete",
+                  style: "destructive",
+                  onPress: createPromptPresetDeleteConfirmation({
+                    readSupport: () =>
+                      currentPresetConfig()?.environment.capabilities.promptPresets === true,
+                    reportUnsupported: () =>
+                      Alert.alert(
+                        "Prompt preset",
+                        "Prompt presets are not supported by this server. Update the server.",
+                      ),
+                    deletePreset: () => {
+                      void updateSettings({
+                        environmentId,
+                        input: {
+                          patch: {
+                            promptPresetMutation: { operation: "delete", presetId: preset.id },
+                          },
+                        },
+                      });
+                    },
+                  }),
+                },
+              ]);
+            },
+          },
+        );
+      }
+    }
     return [...actions, ...projectItems, ...threadItems];
   }, [
     activeThread,
     activeThreadRef,
     navigation,
+    activeComposerDraft,
     projects,
     runCommand,
     savedConnectionsById,
     selectThread,
+    serverConfigs,
     threads,
+    updateSettings,
   ]);
   const results = useMemo(
     () => filterCommandPaletteItems(items, query, matchedThreadKeys),

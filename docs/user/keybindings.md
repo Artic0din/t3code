@@ -29,6 +29,10 @@ workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
 current checkout, a new worktree, and the previous worktree when available.
 Use `mod+shift+l` to reuse the previous worktree directly.
 
+Use `mod+alt+shift+i` to open [prompt presets](./composer.md#prompt-presets) for the visible composer on web and desktop.
+Change it under **Composer: Apply prompt preset** in Keybindings.
+The shortcut opens the menu; choosing a preset prepares the draft without sending it.
+
 In the model picker, press Left in an empty search field or Shift+Tab to reach
 the provider list. Use Up/Down to move and Enter to choose. Right returns to
 model search. `mod+shift+up` and `mod+shift+down` switch providers directly and clear the
