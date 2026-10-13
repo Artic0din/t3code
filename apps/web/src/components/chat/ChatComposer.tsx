@@ -6956,6 +6956,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerPromptPresetMenu
                     presets={promptPresets.presets}
                     draftText={prompt}
+                    isQueuedEdit={promptPresets.isQueuedEdit}
                     error={promptPresets.error}
                     onApply={promptPresets.apply}
                     onSave={promptPresets.save}

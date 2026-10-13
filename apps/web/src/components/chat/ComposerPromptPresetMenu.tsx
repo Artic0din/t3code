@@ -40,6 +40,7 @@ export function ComposerPromptPresetButton(props: {
 export function ComposerPromptPresetMenu(props: {
   readonly presets: readonly PromptPreset[];
   readonly draftText: string;
+  readonly isQueuedEdit: boolean;
   readonly error: string | null;
   readonly onApply: (presetId: string, disposition: PromptPresetApplyDisposition) => boolean;
   readonly onSave: (input: {
@@ -73,7 +74,7 @@ export function ComposerPromptPresetMenu(props: {
         ...(editingId ? { id: editingId } : {}),
         name,
         instructions: props.draftText,
-        includeAgentSettings,
+        includeAgentSettings: includeAgentSettings && !props.isQueuedEdit,
         replaceInstructions: editingId === null || replaceInstructions,
       });
       if (saved)
@@ -128,8 +129,8 @@ export function ComposerPromptPresetMenu(props: {
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <input
               type="checkbox"
-              checked={includeAgentSettings}
-              disabled={saving}
+              checked={includeAgentSettings && !props.isQueuedEdit}
+              disabled={saving || props.isQueuedEdit}
               onChange={(event) => {
                 const includeAgentSettings = event.target.checked;
                 setEditor((current) => ({ ...current, includeAgentSettings }));
@@ -137,6 +138,9 @@ export function ComposerPromptPresetMenu(props: {
             />
             Include provider, model, and mode
           </label>
+          {props.isQueuedEdit ? (
+            <p className="text-sm text-muted-foreground">Queued messages save instructions only.</p>
+          ) : null}
           {editingId ? (
             <label className="flex items-center gap-2 text-sm text-muted-foreground">
               <input

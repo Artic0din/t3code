@@ -94,6 +94,7 @@ export function useComposerPromptPresets(input: {
 
   return {
     enabled,
+    isQueuedEdit: isQueuedEdit === true,
     presets,
     error,
     apply(presetId: string, disposition: PromptPresetApplyDisposition) {
@@ -141,7 +142,7 @@ export function useComposerPromptPresets(input: {
           previous && !saveInput.replaceInstructions
             ? previous.instructions
             : saveInput.instructions,
-        includeAgentSettings: saveInput.includeAgentSettings,
+        includeAgentSettings: saveInput.includeAgentSettings && !input.threadState.isQueuedEdit,
         draft: composerDraftToPromptPresetDraft(input.draft, input.effectiveAgentSettings),
       });
       const saved = savePromptPreset(presets, next);

@@ -38,11 +38,12 @@ vi.mock("../ui/toast", () => ({ toastManager: { add: mocks.toast } }));
 
 import { useComposerPromptPresets } from "./useComposerPromptPresets";
 import { getActiveComposerDraftTarget } from "../../activeComposerDraftTarget";
-import { readComposerThreadDraft, useComposerDraftStore } from "../../composerDraftStore";
+import { DraftId, readComposerThreadDraft, useComposerDraftStore } from "../../composerDraftStore";
 import { applyPromptPresetToComposer } from "../../lib/applyPromptPreset";
 
 const environmentId = EnvironmentId.make("env");
 const target = scopeThreadRef(environmentId, ThreadId.make("thread"));
+const queuedTarget = DraftId.make("queued-edit:thread:run");
 const effectiveAgentSettings = {
   providerInstanceId: ProviderInstanceId.make("codex"),
   model: "test-model",
@@ -53,14 +54,22 @@ let root: Root;
 let container: HTMLDivElement;
 let actions: ReturnType<typeof useComposerPromptPresets>;
 
-function Composer({ enabled, fanout = false }: { enabled: boolean; fanout?: boolean }) {
+function Composer({
+  enabled,
+  fanout = false,
+  queuedEdit = false,
+}: {
+  enabled: boolean;
+  fanout?: boolean;
+  queuedEdit?: boolean;
+}) {
   const state = useComposerPromptPresets({
     environmentId,
-    threadRef: target,
-    draft: readComposerThreadDraft(target),
+    threadRef: queuedEdit ? queuedTarget : target,
+    draft: readComposerThreadDraft(queuedEdit ? queuedTarget : target),
     providers: mocks.providers,
     effectiveAgentSettings,
-    threadState: { hasStartedSession: false, isMultiModel: fanout },
+    threadState: { hasStartedSession: false, isMultiModel: fanout, isQueuedEdit: queuedEdit },
     enabled,
     planModeEnabled: false,
   });
@@ -72,13 +81,14 @@ function Composer({ enabled, fanout = false }: { enabled: boolean; fanout?: bool
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  mocks.update.mockClear();
+  mocks.update.mockReset();
   mocks.presets = [{ id: "text", name: "Text", instructions: "Preset instructions" }];
   mocks.providers = [];
   mocks.hiddenModels = [];
   mocks.supported = true;
   useComposerDraftStore.setState({ draftsByThreadKey: {} });
   useComposerDraftStore.getState().setPrompt(target, "Hidden ordinary draft");
+  useComposerDraftStore.getState().setPrompt(queuedTarget, "Queued instructions");
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -161,6 +171,75 @@ it("saves fanout instructions while refusing incidental agent settings", async (
   expect(
     mocks.update.mock.calls[0]?.[0].input.patch.promptPresetMutation.preset,
   ).not.toHaveProperty("providerInstanceId");
+});
+
+it.each(["new", "update", "replace"] as const)(
+  "saves and reapplies queued-edit instructions (%s) without agent settings",
+  async (operation) => {
+    const previous = {
+      id: "existing",
+      name: "Existing",
+      instructions: "Saved instructions",
+      ...effectiveAgentSettings,
+    };
+    mocks.presets = [previous];
+    mocks.update.mockImplementation(
+      async ({
+        input,
+      }: {
+        input: { patch: { promptPresetMutation: { preset: PromptPreset } } };
+      }) => {
+        mocks.presets = [input.patch.promptPresetMutation.preset];
+        return { _tag: "Success" };
+      },
+    );
+    const original = readComposerThreadDraft(queuedTarget);
+    await act(() => root.render(<Composer enabled queuedEdit />));
+    await act(async () => {
+      expect(
+        await actions.save({
+          ...(operation !== "new" ? { id: previous.id } : {}),
+          name: "Queued instructions",
+          instructions: "Current queued instructions",
+          includeAgentSettings: true,
+          replaceInstructions: operation !== "update",
+        }),
+      ).toBe(true);
+    });
+    const saved = mocks.presets[0]!;
+    expect(saved).toEqual({
+      id: operation === "new" ? expect.any(String) : previous.id,
+      name: "Queued instructions",
+      instructions: operation === "update" ? previous.instructions : "Current queued instructions",
+    });
+    await act(() => root.render(<Composer enabled queuedEdit />));
+    await act(() => {
+      expect(actions.apply(saved.id, "replace")).toBe(true);
+    });
+    expect(readComposerThreadDraft(queuedTarget)).toEqual({
+      ...original,
+      prompt: saved.instructions,
+    });
+    expect(readComposerThreadDraft(target).prompt).toBe("Hidden ordinary draft");
+  },
+);
+
+it("preserves agent settings when saving an ordinary draft", async () => {
+  mocks.update.mockResolvedValue({ _tag: "Success" });
+  await act(() => root.render(<Composer enabled />));
+  await act(async () => {
+    expect(
+      await actions.save({
+        name: "Ordinary",
+        instructions: "Instructions",
+        includeAgentSettings: true,
+        replaceInstructions: true,
+      }),
+    ).toBe(true);
+  });
+  expect(mocks.update.mock.calls[0]?.[0].input.patch.promptPresetMutation.preset).toMatchObject(
+    effectiveAgentSettings,
+  );
 });
 
 it.each([false, undefined])(

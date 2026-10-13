@@ -29,11 +29,13 @@ function Composer({
   hidden = false,
   presetsOverride,
   delaySubscription = false,
+  queuedEdit = false,
 }: {
   targetKey?: string;
   hidden?: boolean;
   presetsOverride?: typeof presets;
   delaySubscription?: boolean;
+  queuedEdit?: boolean;
 }) {
   const [entries, setEntries] = useState(presets);
   const [open, setOpen] = useComposerMenuState(hidden, targetKey);
@@ -46,6 +48,7 @@ function Composer({
         createPortal(
           <ComposerPromptPresetMenu
             presets={presetsOverride ?? entries}
+            isQueuedEdit={queuedEdit}
             draftText="Nonempty ordinary draft"
             error={null}
             onApply={() => true}
@@ -152,6 +155,23 @@ it("initializes the settings checkbox from each edited preset", async () => {
   await click('button[type="submit"]');
   expect(save.mock.calls[1]?.[0].includeAgentSettings).toBe(true);
 });
+
+it.each(["Save", "Update"])(
+  "%s in a queued editor shows and saves instructions only",
+  async (action) => {
+    await act(() => root.render(<Composer queuedEdit />));
+    if (action === "Update") await click('[aria-label="Edit Other"]');
+    const checkbox = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(true);
+    await click('button[type="submit"]');
+    expect(save.mock.calls[0]?.[0]).toMatchObject({
+      includeAgentSettings: false,
+      replaceInstructions: action === "Save",
+    });
+    expect(dispatchTurn).not.toHaveBeenCalled();
+  },
+);
 
 it.each([true, false])("retains the editor until save acknowledgement (%s)", async (success) => {
   let finish: (success: boolean) => void = () => {};

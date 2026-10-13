@@ -26,6 +26,7 @@ Presets do not save attachments or context chips: chip labels become plain text,
 An unavailable provider or model, or an unsupported mode, leaves the draft unchanged.
 On web and desktop, models hidden in Settings are unavailable to presets too.
 Queued-message editing and multiple-model drafts accept instructions-only presets.
+Saving or updating a preset while editing a queued message saves instructions only, including when the existing preset has agent settings.
 
 On web and desktop, the command palette's **Prompt presets** actions also apply or replace a draft.
 The [preset shortcut](./keybindings.md#composer-controls) opens the composer menu.
