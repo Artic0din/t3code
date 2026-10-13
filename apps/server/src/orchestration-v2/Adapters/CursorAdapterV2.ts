@@ -1474,7 +1474,12 @@ export function makeCursorAdapterV2(
               runId: input.context.input.runId,
               nodeId,
               kind: "todo_list",
-              status: input.completed ? "active" : "draft",
+              status:
+                input.completed && !input.failed
+                  ? steps.every((step) => step.status === "completed")
+                    ? "completed"
+                    : "active"
+                  : "draft",
               steps: [...steps],
             },
           });

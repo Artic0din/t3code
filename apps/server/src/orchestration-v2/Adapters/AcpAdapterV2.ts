@@ -3486,7 +3486,18 @@ export function makeAcpAdapterV2(
         ) {
           yield* closeTextStreams(context);
           const existing = context.plans.get(update.nativePlanId);
-          if (update.kind === "removed" && existing === undefined) return;
+          if (update.kind === "removed") {
+            yield* emitProviderEvent({
+              type: "plan.removed",
+              driver,
+              threadId: context.input.threadId,
+              runId: context.input.runId,
+              providerThreadId: context.input.providerThread.id,
+              nativePlanId: update.nativePlanId,
+              occurredAt: yield* DateTime.now,
+            });
+            if (existing === undefined) return;
+          }
           const nativeItemId = `${context.nativeTurnId}:plan:${encodeURIComponent(update.nativePlanId)}`;
           const ordinal = yield* resolveItemOrdinal(context, nativeItemId);
           const now = yield* DateTime.now;

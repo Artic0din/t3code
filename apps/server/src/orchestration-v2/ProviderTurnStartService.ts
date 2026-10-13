@@ -4,6 +4,7 @@ import {
   CommandId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ContextHandoff,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
@@ -11,6 +12,7 @@ import {
   type OrchestrationV2TurnItem,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -53,6 +55,24 @@ import {
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
 } from "./RestartBackgroundNote.ts";
+
+export function deliveredHandoffTextForEstimate(
+  handoffs: ReadonlyArray<OrchestrationV2ContextHandoff>,
+): ReadonlyMap<TurnItemId, string> {
+  const text = new Map<TurnItemId, string>();
+  for (const handoff of handoffs) {
+    const deliveredItemIds = new Set(handoff.delivery?.itemIds ?? []);
+    for (const message of handoff.history?.messages ?? []) {
+      const previous = text.get(message.itemId);
+      if (
+        deliveredItemIds.has(message.itemId) &&
+        (previous === undefined || Buffer.byteLength(message.text) > Buffer.byteLength(previous))
+      )
+        text.set(message.itemId, message.text);
+    }
+  }
+  return text;
+}
 
 export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStartError>()(
   "ProviderTurnStartError",
@@ -987,16 +1007,7 @@ export const layer: Layer.Layer<
       const deliveredItemIds = new Set(
         settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
       );
-      // Prefer the text that was actually injected. Pre-cap handoffs stored the
-      // full command body; post-cap handoffs store the shortened stub.
-      const deliveredMessageText = new Map<string, string>();
-      for (const handoff of settledHandoffs) {
-        for (const message of handoff.history?.messages ?? []) {
-          if (deliveredItemIds.has(message.itemId)) {
-            deliveredMessageText.set(message.itemId, message.text);
-          }
-        }
-      }
+      const deliveredMessageText = deliveredHandoffTextForEstimate(settledHandoffs);
       const coveredItemIds = new Set([
         ...deliveredItemIds,
         ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
@@ -1040,6 +1051,7 @@ export const layer: Layer.Layer<
       // Use saved text and actual native attachments when telemetry is absent.
       // Legacy attempts lack native identity; exclude their explicitly recovered
       // history, whose attachments were not replayed into the replacement thread.
+      // Retiring a plan filters handoff replay, but its text remains in native history.
       const nativeContextEstimate = Effect.gen(function* () {
         return sameNativeThread
           ? (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
@@ -1055,7 +1067,10 @@ export const layer: Layer.Layer<
               const historical =
                 deliveredText !== undefined
                   ? { text: deliveredText }
-                  : historicalMessage(item, { truncateCommandOutput: false });
+                  : historicalMessage(item, {
+                      truncateCommandOutput: false,
+                      includeCancelledPlans: true,
+                    });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

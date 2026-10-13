@@ -7,6 +7,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -133,6 +134,30 @@ function providerTurnAnalyticsProperties(input: {
 }
 
 type TodoListPlan = Extract<OrchestrationV2PlanArtifact, { readonly kind: "todo_list" }>;
+
+function isReplacementPlanEvent(event: ProviderAdapterV2Event): boolean {
+  return (
+    (event.driver === "claudeAgent" ||
+      event.driver === "cursor" ||
+      event.driver === "opencode" ||
+      event.driver === "codex") &&
+    (event.type === "plan.updated" ||
+      (event.type === "turn_item.updated" &&
+        (event.turnItem.type === "todo_list" || event.turnItem.type === "proposed_plan")))
+  );
+}
+
+function acpPlanItemSuffix(event: ProviderAdapterV2Event): string | undefined {
+  if (
+    (event.driver !== "acpRegistry" && event.driver !== "grok" && event.driver !== "antigravity") ||
+    event.type !== "turn_item.updated" ||
+    (event.turnItem.type !== "todo_list" && event.turnItem.type !== "proposed_plan")
+  )
+    return undefined;
+  const nativeId = event.turnItem.nativeItemRef?.nativeId;
+  const separator = nativeId?.lastIndexOf(":plan:") ?? -1;
+  return separator < 0 ? undefined : nativeId?.slice(separator);
+}
 
 function withPlanStepDurations(
   plan: TodoListPlan,
@@ -386,6 +411,36 @@ export const layer: Layer.Layer<
       },
     );
 
+    const retireNativePlanItems = Effect.fnUntraced(function* (
+      input: ProviderEventIngestInput,
+      items: ReadonlyArray<{
+        readonly plan: OrchestrationV2PlanArtifact;
+        readonly turnItem: OrchestrationV2TurnItem;
+      }>,
+      updatedAt: DateTime.Utc,
+    ) {
+      const events: Array<OrchestrationV2DomainEvent> = [];
+      for (const { plan, turnItem } of items) {
+        events.push(
+          yield* makeDomainEvent(input, {
+            type: "plan.updated",
+            threadId: plan.threadId,
+            runId: plan.runId,
+            nodeId: plan.nodeId,
+            payload: { ...plan, status: "superseded" },
+          }),
+          yield* makeDomainEvent(input, {
+            type: "turn-item.updated",
+            threadId: turnItem.threadId,
+            runId: turnItem.runId,
+            nodeId: turnItem.nodeId,
+            payload: { ...turnItem, status: "cancelled", updatedAt },
+          }),
+        );
+      }
+      return events;
+    });
+
     const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
       Effect.gen(function* () {
         switch (input.event.type) {
@@ -460,8 +515,79 @@ export const layer: Layer.Layer<
                 nodeId: input.event.message.nodeId,
               }),
             ];
-          case "turn_item.updated":
+          case "turn_item.updated": {
+            const item = input.event.turnItem;
+            const superseded: Array<OrchestrationV2DomainEvent> = [];
+            const nativeItemIdSuffix = acpPlanItemSuffix(input.event);
+            if (
+              nativeItemIdSuffix !== undefined &&
+              item.providerThreadId !== null &&
+              item.providerThreadId !== undefined
+            ) {
+              const priorItems = yield* projections.getNativePlanItems({
+                threadId: item.threadId,
+                providerThreadId: item.providerThreadId,
+                driver: input.event.driver,
+                nativeItemIdSuffix,
+                includeCompleted: item.status === "cancelled",
+              });
+              superseded.push(
+                ...(yield* retireNativePlanItems(
+                  input,
+                  priorItems.filter((prior) => prior.turnItem.id !== item.id),
+                  item.updatedAt,
+                )),
+              );
+            }
+            if (isReplacementPlanEvent(input.event)) {
+              const previous = yield* projections.getTurnItem({
+                threadId: item.threadId,
+                itemId: item.id,
+              });
+              if (previous?.status === "cancelled") return [];
+              if (
+                (item.type === "todo_list" || item.type === "proposed_plan") &&
+                (item.status === "completed" ||
+                  ((input.event.driver === "opencode" || input.event.driver === "codex") &&
+                    item.type === "todo_list" &&
+                    item.status === "running")) &&
+                item.providerThreadId !== null &&
+                item.providerTurnId !== null
+              ) {
+                const priorItems = yield* projections.getPriorIncompletePlanItems({
+                  threadId: item.threadId,
+                  providerThreadId: item.providerThreadId,
+                  providerTurnId: item.providerTurnId,
+                  planId: item.planId,
+                  itemId: item.id,
+                  kind: item.type,
+                });
+                for (const prior of priorItems) {
+                  superseded.push(
+                    yield* makeDomainEvent(input, {
+                      type: "plan.updated",
+                      threadId: prior.plan.threadId,
+                      runId: prior.plan.runId,
+                      nodeId: prior.plan.nodeId,
+                      payload: { ...prior.plan, status: "superseded" },
+                    }),
+                    yield* makeDomainEvent(input, {
+                      type: "turn-item.updated",
+                      threadId: prior.turnItem.threadId,
+                      runId: prior.turnItem.runId,
+                      nodeId: prior.turnItem.nodeId,
+                      payload: {
+                        ...prior.turnItem,
+                        status: "cancelled",
+                        updatedAt: item.updatedAt,
+                      },
+                    }),
+                  );
+                }
+              }
+            }
             return [
+              ...superseded,
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
                 threadId: input.event.turnItem.threadId,
@@ -470,6 +596,7 @@ export const layer: Layer.Layer<
                 nodeId: input.event.turnItem.nodeId,
               }),
             ];
+          }
           case "runtime_request.updated":
             return [
               yield* makeDomainEvent(input, {
@@ -483,9 +610,10 @@ export const layer: Layer.Layer<
             const occurredAt = yield* DateTime.now;
             const plan = input.event.plan;
             const previous =
-              plan.kind === "todo_list"
+              plan.kind === "todo_list" || isReplacementPlanEvent(input.event)
                 ? yield* projections.getPlan(plan.threadId, plan.id)
                 : undefined;
+            if (isReplacementPlanEvent(input.event) && previous?.status === "superseded") return [];
             const payload =
               plan.kind === "todo_list"
                 ? withPlanStepDurations(
@@ -504,6 +632,17 @@ export const layer: Layer.Layer<
                 occurredAt,
               }),
             ];
+          }
+          case "plan.removed": {
+            const event = input.event;
+            const items = yield* projections.getNativePlanItems({
+              threadId: event.threadId,
+              providerThreadId: event.providerThreadId,
+              driver: event.driver,
+              nativeItemIdSuffix: `:plan:${encodeURIComponent(event.nativePlanId)}`,
+              includeCompleted: true,
+            });
+            return yield* retireNativePlanItems(input, items, event.occurredAt);
           }
           case "turn.terminal":
             const dismissed = yield* dismissNativeUserInputs(input, input.event.providerTurnId);
@@ -635,6 +774,12 @@ export const layer: Layer.Layer<
               );
             }),
           ),
+          (effect) =>
+            isReplacementPlanEvent(input.event) ||
+            input.event.type === "plan.removed" ||
+            acpPlanItemSuffix(input.event) !== undefined
+              ? threadCommands.withLock(input.threadId, effect)
+              : effect,
         ),
     });
   }),

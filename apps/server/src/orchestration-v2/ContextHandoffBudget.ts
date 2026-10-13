@@ -140,56 +140,68 @@ export function handoffBudget(input: {
 
 const COMMAND_OUTPUT_HEAD_LINES = 20;
 const COMMAND_OUTPUT_TAIL_LINES = 20;
-const COMMAND_OUTPUT_BYTE_CAP = 8_192;
+const COMMAND_RECORD_BYTE_CAP = 8_192;
 
 type HistoricalMessageOptions = {
   readonly truncateCommandOutput?: boolean;
+  readonly includeCancelledPlans?: boolean;
 };
 
-function commandTruncationMarker(itemId: OrchestrationV2TurnItem["id"]): string {
-  return `[output truncated; itemId=${itemId}; recover the full output with t3_thread_read using itemId and textOffset]`;
+function commandTruncationMarker(itemId: OrchestrationV2TurnItem["id"], part = "output"): string {
+  return `[${part} truncated; itemId=${itemId}; recover the full command with t3_thread_read using itemId and textOffset]`;
 }
 
-function commandOutputLines(output: string): string[] {
-  if (output.length === 0) return [];
-  const lines = output.split("\n");
-  // Providers usually end logs with a trailing newline. That final empty
-  // segment is a delimiter, not a printed line.
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
+function commandOutputRanges(output: string) {
+  const end = output.endsWith("\n") ? output.length - 1 : output.length;
+  const head = output.slice(0, Math.min(end, COMMAND_RECORD_BYTE_CAP));
+  const tailOffset = Math.max(0, end - COMMAND_RECORD_BYTE_CAP);
+  const tail = output.slice(tailOffset, end);
+  let headEnd = head.length;
+  let headCursor = 0;
+  for (let line = 0; line < COMMAND_OUTPUT_HEAD_LINES; line++) {
+    const boundary = head.indexOf("\n", headCursor);
+    if (boundary < 0) break;
+    headCursor = boundary + 1;
+    if (line === COMMAND_OUTPUT_HEAD_LINES - 1) headEnd = boundary;
+  }
+  let tailStart = tailOffset;
+  let tailBoundary = tail.length;
+  for (let line = 0; line < COMMAND_OUTPUT_TAIL_LINES; line++) {
+    tailBoundary = tail.lastIndexOf("\n", tailBoundary - 1);
+    if (tailBoundary < 0) break;
+    if (line === COMMAND_OUTPUT_TAIL_LINES - 1) tailStart = tailOffset + tailBoundary + 1;
+  }
+  return tailStart <= headEnd + 1 ? undefined : { headEnd, tailStart, end };
 }
 
 function jsonEncodedBytes(text: string): number {
   return Buffer.byteLength(JSON.stringify(text));
 }
 
-function truncateCommandBody(output: string, itemId: OrchestrationV2TurnItem["id"]): string {
-  const lines = commandOutputLines(output);
-  const hiddenLineCount = lines.length - COMMAND_OUTPUT_HEAD_LINES - COMMAND_OUTPUT_TAIL_LINES;
-  const lineCapped =
-    hiddenLineCount <= 0
-      ? output
-      : [
-          ...lines.slice(0, COMMAND_OUTPUT_HEAD_LINES),
-          commandTruncationMarker(itemId),
-          ...lines.slice(-COMMAND_OUTPUT_TAIL_LINES),
-        ].join("\n");
-  // selectHistory charges JSON.stringify size. Cap against that, not raw UTF-8,
-  // so control bytes that expand when escaped still leave a selectable stub.
-  if (jsonEncodedBytes(lineCapped) <= COMMAND_OUTPUT_BYTE_CAP) return lineCapped;
-  const marker = `\n${commandTruncationMarker(itemId)}\n`;
-  const source = Buffer.from(lineCapped);
-  const markerBuffer = Buffer.from(marker);
-  let retain = Math.max(0, COMMAND_OUTPUT_BYTE_CAP - jsonEncodedBytes(marker));
+function splitsSurrogatePair(text: string, index: number): boolean {
+  const previous = text.charCodeAt(index - 1);
+  const next = text.charCodeAt(index);
+  return previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+}
+
+function truncateCommandPart(
+  text: string,
+  budget: number,
+  truncationMarker: string,
+  ranges?: { readonly headEnd: number; readonly tailStart: number; readonly end: number },
+): string {
+  if (ranges === undefined && text.length + 2 <= budget && jsonEncodedBytes(text) <= budget)
+    return text;
+  const marker = `\n${truncationMarker}\n`;
+  const end = ranges?.end ?? text.length;
+  let retain = Math.max(0, budget - jsonEncodedBytes(marker));
   while (retain >= 0) {
-    const headBytes = Math.floor(retain / 2);
-    const tailBytes = retain - headBytes;
-    const candidate = Buffer.concat([
-      source.subarray(0, headBytes),
-      markerBuffer,
-      source.subarray(Math.max(0, source.length - tailBytes)),
-    ]).toString();
-    if (jsonEncodedBytes(candidate) <= COMMAND_OUTPUT_BYTE_CAP) return candidate;
+    let headEnd = Math.min(ranges?.headEnd ?? end, Math.floor(retain / 2));
+    let tailStart = Math.max(ranges?.tailStart ?? 0, end - (retain - Math.floor(retain / 2)));
+    if (splitsSurrogatePair(text, headEnd)) headEnd--;
+    if (splitsSurrogatePair(text, tailStart)) tailStart++;
+    const candidate = text.slice(0, headEnd) + marker + text.slice(tailStart, end);
+    if (jsonEncodedBytes(candidate) <= budget) return candidate;
     if (retain === 0) break;
     retain = Math.floor(retain / 2);
   }
@@ -201,8 +213,23 @@ function commandOutputText(
   truncate: boolean,
 ): string {
   const output = item.output ?? "";
-  const body = truncate ? truncateCommandBody(output, item.id) : output;
-  return [`Command: ${item.input}`, `Exit code: ${item.exitCode ?? "unknown"}`, body].join("\n");
+  if (!truncate)
+    return [`Command: ${item.input}`, `Exit code: ${item.exitCode ?? "unknown"}`, output].join(
+      "\n",
+    );
+  const input = truncateCommandPart(
+    item.input,
+    Math.floor(COMMAND_RECORD_BYTE_CAP / 2),
+    commandTruncationMarker(item.id, "input"),
+  );
+  const prefix = `Command: ${input}\nExit code: ${item.exitCode ?? "unknown"}\n`;
+  const body = truncateCommandPart(
+    output,
+    COMMAND_RECORD_BYTE_CAP - jsonEncodedBytes(prefix) + 2,
+    commandTruncationMarker(item.id),
+    commandOutputRanges(output),
+  );
+  return prefix + body;
 }
 
 function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list" }>): string {
@@ -216,7 +243,11 @@ export function historicalMessage(
   item: OrchestrationV2TurnItem,
   options?: HistoricalMessageOptions,
 ): OrchestrationV2HistoricalMessage | null {
-  if ((item.type === "todo_list" || item.type === "proposed_plan") && item.status === "cancelled") {
+  if (
+    options?.includeCancelledPlans !== true &&
+    (item.type === "todo_list" || item.type === "proposed_plan") &&
+    item.status === "cancelled"
+  ) {
     return null;
   }
   const truncateCommandOutput = options?.truncateCommandOutput !== false;
@@ -383,12 +414,7 @@ export function selectHistory(input: {
   pinPlanStates();
   pinPartialAnswer();
   pinOriginalRequest();
-  for (let index = messages.length - 1; index >= 0; index--) {
-    if (messages[index]?.kind !== "command_execution") tryAdd(index);
-  }
-  for (let index = messages.length - 1; index >= 0; index--) {
-    if (messages[index]?.kind === "command_execution") tryAdd(index);
-  }
+  for (let index = messages.length - 1; index >= 0; index--) tryAdd(index);
   return {
     messages: messages.filter((_, index) => selected.has(index)),
     omittedItemIds: [
