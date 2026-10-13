@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { createModelSelection } from "@t3tools/shared/model";
 
@@ -11,20 +18,217 @@ import {
   getActiveComposerDraftTarget,
   registerActiveComposerDraftTarget,
 } from "../activeComposerDraftTarget";
+import { getCustomModelOptionsByInstance } from "../modelSelection";
 
 const codex = ProviderInstanceId.make("codex");
 const target = scopeThreadRef(EnvironmentId.make("env"), ThreadId.make("thread"));
-const providers = [
+const providers: readonly ServerProvider[] = [
   {
     instanceId: codex,
+    driver: ProviderDriverKind.make("codex"),
     enabled: true,
-    models: [{ slug: "old" }, { slug: "new" }],
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    models: [
+      { slug: "old", name: "Old", isCustom: false, capabilities: {} },
+      { slug: "new", name: "New", isCustom: false, capabilities: {}, aliases: ["new-alias"] },
+    ],
+    slashCommands: [],
+    skills: [],
   },
 ];
 
 beforeEach(() => useComposerDraftStore.setState({ draftsByThreadKey: {} }));
 
 describe("preset composer application", () => {
+  it.each(["new", "new-alias"])(
+    "rejects a hidden built-in model or alias (%s) before mutation",
+    (model) => {
+      useComposerDraftStore.getState().setPrompt(target, "Original task");
+      const original = readComposerThreadDraft(target);
+      const settings = {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerModelPreferences: { [codex]: { hiddenModels: ["new"], modelOrder: [] } },
+      };
+      expect(
+        getCustomModelOptionsByInstance(settings, providers)
+          .get(codex)
+          ?.map((option) => option.slug),
+      ).toEqual(["old"]);
+      const result = applyPromptPresetToComposer({
+        settings,
+        threadRef: target,
+        draft: original,
+        providers,
+        presets: [
+          {
+            id: "hidden",
+            name: "Hidden",
+            instructions: "New task",
+            providerInstanceId: codex,
+            model,
+            runtimeMode: "auto",
+          },
+        ],
+        presetId: "hidden",
+        disposition: "replace",
+      });
+      expect(result).toMatchObject({ ok: false, code: "model" });
+      expect(readComposerThreadDraft(target)).toEqual(original);
+    },
+  );
+
+  it("revalidates a cached palette action against current model preferences", () => {
+    useComposerDraftStore.getState().setPrompt(target, "Original task");
+    const original = readComposerThreadDraft(target);
+    const active = {
+      environmentId: target.environmentId,
+      threadRef: target,
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "old",
+        runtimeMode: null,
+        interactionMode: null,
+      },
+      threadState: { hasStartedSession: false },
+    };
+    const unregister = registerActiveComposerDraftTarget(active);
+    let settings: UnifiedSettings = DEFAULT_UNIFIED_SETTINGS;
+    const cachedAction = () =>
+      applyPromptPresetToComposer({
+        settings,
+        threadRef: target,
+        draft: readComposerThreadDraft(target),
+        providers,
+        presets: [
+          {
+            id: "saved",
+            name: "Saved",
+            instructions: "New task",
+            providerInstanceId: codex,
+            model: "new-alias",
+          },
+        ],
+        presetId: "saved",
+        disposition: "insert",
+        expectedActiveTarget: active,
+      });
+    settings = {
+      ...settings,
+      providerModelPreferences: { [codex]: { hiddenModels: ["new"], modelOrder: [] } },
+    };
+    expect(cachedAction()).toMatchObject({ ok: false, code: "model" });
+    expect(readComposerThreadDraft(target)).toEqual(original);
+    settings = DEFAULT_UNIFIED_SETTINGS;
+    expect(cachedAction().ok).toBe(true);
+    expect(readComposerThreadDraft(target).prompt).toBe("Original task\n\nNew task");
+    unregister();
+  });
+
+  it.each(["new-alias", "custom-model"])(
+    "accepts the effective custom instance model (%s)",
+    (model) => {
+      const instanceId = ProviderInstanceId.make("codex_custom");
+      const catalog = [...providers, { ...providers[0]!, instanceId }];
+      const settings = {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: { customModels: ["custom-model"] },
+          },
+        },
+        providerModelPreferences: {
+          [codex]: { hiddenModels: ["new"], modelOrder: [] },
+          [instanceId]: { hiddenModels: ["custom-model"], modelOrder: [] },
+        },
+      };
+      const result = applyPromptPresetToComposer({
+        settings,
+        threadRef: target,
+        draft: readComposerThreadDraft(target),
+        providers: catalog,
+        presets: [
+          {
+            id: "custom",
+            name: "Custom",
+            instructions: "Task",
+            providerInstanceId: instanceId,
+            model,
+          },
+        ],
+        presetId: "custom",
+        disposition: "replace",
+      });
+      expect(result.ok).toBe(true);
+      expect(readComposerThreadDraft(target).modelSelectionByProvider[instanceId]?.model).toBe(
+        model,
+      );
+      const original = readComposerThreadDraft(target);
+      const wrongInstance = applyPromptPresetToComposer({
+        settings,
+        threadRef: target,
+        draft: original,
+        providers: catalog,
+        presets: [
+          {
+            id: "wrong",
+            name: "Wrong",
+            instructions: "Wrong task",
+            providerInstanceId: codex,
+            model,
+          },
+        ],
+        presetId: "wrong",
+        disposition: "replace",
+      });
+      expect(wrongInstance).toMatchObject({ ok: false, code: "model" });
+      expect(readComposerThreadDraft(target)).toEqual(original);
+    },
+  );
+
+  it("rejects a removed custom model still present in the raw catalog", () => {
+    useComposerDraftStore.getState().setPrompt(target, "Original task");
+    const original = readComposerThreadDraft(target);
+    const catalog = [
+      {
+        ...providers[0]!,
+        models: [
+          ...providers[0]!.models,
+          { slug: "removed", name: "Removed", isCustom: true, capabilities: {} },
+        ],
+      },
+    ];
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [codex]: { driver: ProviderDriverKind.make("codex"), config: { customModels: [] } },
+      },
+    };
+    const result = applyPromptPresetToComposer({
+      settings,
+      threadRef: target,
+      draft: original,
+      providers: catalog,
+      presets: [
+        {
+          id: "removed",
+          name: "Removed",
+          instructions: "New task",
+          providerInstanceId: codex,
+          model: "removed",
+        },
+      ],
+      presetId: "removed",
+      disposition: "replace",
+    });
+    expect(result).toMatchObject({ ok: false, code: "model" });
+    expect(readComposerThreadDraft(target)).toEqual(original);
+  });
+
   it("rejects cached agent-setting actions after the composer enters fanout mode", () => {
     useComposerDraftStore.getState().setPrompt(target, "Original task");
     const original = readComposerThreadDraft(target);
@@ -51,6 +255,7 @@ describe("preset composer application", () => {
         disposition: "replace",
         providers,
         expectedActiveTarget: active,
+        settings: DEFAULT_UNIFIED_SETTINGS,
       });
     const unregisterFanout = registerActiveComposerDraftTarget({
       ...active,
@@ -72,6 +277,7 @@ describe("preset composer application", () => {
       disposition: "replace",
       providers,
       serverSupportsPromptPresets: false,
+      settings: DEFAULT_UNIFIED_SETTINGS,
     });
     expect(result).toMatchObject({ ok: false, code: "unsupported" });
     expect(readComposerThreadDraft(target)).toEqual(original);
@@ -106,6 +312,7 @@ describe("preset composer application", () => {
                 },
               ],
         planModeEnabled: false,
+        settings: DEFAULT_UNIFIED_SETTINGS,
       });
       expect(result).toMatchObject({ ok: false, code: "interaction-mode" });
       expect(readComposerThreadDraft(target)).toEqual(original);
@@ -138,6 +345,7 @@ describe("preset composer application", () => {
         providers,
         expectedActiveTarget: active,
         planModeEnabled: true,
+        settings: DEFAULT_UNIFIED_SETTINGS,
       });
     const unregisterDisabled = registerActiveComposerDraftTarget({
       ...active,
@@ -170,6 +378,7 @@ describe("preset composer application", () => {
         disposition: "replace",
         providers,
         planModeEnabled,
+        settings: DEFAULT_UNIFIED_SETTINGS,
       });
       expect(result.ok).toBe(planModeEnabled);
       if (planModeEnabled)
@@ -203,6 +412,7 @@ describe("preset composer application", () => {
         threadRef: target,
         draft: readComposerThreadDraft(target),
         expectedActiveTarget: activeTarget,
+        settings: DEFAULT_UNIFIED_SETTINGS,
         presets: [{ id: "text", name: "Text", instructions: "Wrong target" }],
         presetId: "text",
         disposition: "replace",
@@ -216,6 +426,7 @@ describe("preset composer application", () => {
   it("records explicit preset choices even when they match inherited defaults", () => {
     const result = applyPromptPresetToComposer({
       planModeEnabled: true,
+      settings: DEFAULT_UNIFIED_SETTINGS,
       threadRef: target,
       draft: readComposerThreadDraft(target),
       effectiveAgentSettings: {
@@ -256,6 +467,7 @@ describe("preset composer application", () => {
 
   it("leaves inherited settings implicit when a preset contains only instructions", () => {
     const result = applyPromptPresetToComposer({
+      settings: DEFAULT_UNIFIED_SETTINGS,
       threadRef: target,
       draft: readComposerThreadDraft(target),
       effectiveAgentSettings: {
@@ -326,6 +538,7 @@ describe("preset composer application", () => {
     const active = getActiveComposerDraftTarget()!;
     const result = applyPromptPresetToComposer({
       ...active,
+      settings: DEFAULT_UNIFIED_SETTINGS,
       draft: readComposerThreadDraft(active.threadRef),
       presets: [{ id: "text", name: "Text", instructions: "New instructions" }],
       presetId: "text",
@@ -347,6 +560,7 @@ describe("preset composer application", () => {
         { explicit: true },
       );
     const result = applyPromptPresetToComposer({
+      settings: DEFAULT_UNIFIED_SETTINGS,
       threadRef: target,
       draft: readComposerThreadDraft(target),
       presets: [
@@ -372,6 +586,7 @@ describe("preset composer application", () => {
 
   it("validates a model-only preset against the displayed implicit provider", () => {
     const result = applyPromptPresetToComposer({
+      settings: DEFAULT_UNIFIED_SETTINGS,
       threadRef: target,
       draft: readComposerThreadDraft(target),
       effectiveAgentSettings: {

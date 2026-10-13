@@ -90,7 +90,7 @@ import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstra
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
-import { useClientSettings } from "../hooks/useSettings";
+import { mergeEnvironmentSettings, useClientSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { useCustomThemes } from "../hooks/useCustomThemes";
 import { useEnvironmentThemeDefinitions } from "../hooks/useEnvironmentTheme";
@@ -1985,6 +1985,7 @@ function OpenCommandPaletteDialog(props: {
       presetId,
       disposition,
       providers: currentConfig.providers,
+      settings: mergeEnvironmentSettings(currentConfig.settings, clientSettings),
       serverSupportsPromptPresets: true,
       effectiveAgentSettings: activeComposerDraftTarget?.effectiveAgentSettings,
       threadState: activeComposerDraftTarget?.threadState,

@@ -35,7 +35,8 @@ export function useComposerPromptPresets(input: {
   readonly threadState: PromptPresetThreadState;
   readonly planModeEnabled: boolean;
 }) {
-  const presets = useEnvironmentSettings(input.environmentId, (settings) => settings.promptPresets);
+  const settings = useEnvironmentSettings(input.environmentId);
+  const presets = settings.promptPresets;
   const supported = useEnvironmentSupportsPromptPresets(input.environmentId);
   const enabled = input.enabled && supported;
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
@@ -105,6 +106,7 @@ export function useComposerPromptPresets(input: {
         presetId,
         disposition,
         providers: input.providers,
+        settings,
         effectiveAgentSettings: input.effectiveAgentSettings,
         threadState: input.threadState,
         planModeEnabled,

@@ -1,18 +1,32 @@
 // @vitest-environment jsdom
 import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  type PromptPreset,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   toast: vi.fn(),
-  presets: [{ id: "text", name: "Text", instructions: "Preset instructions" }],
+  presets: [{ id: "text", name: "Text", instructions: "Preset instructions" }] as PromptPreset[],
+  providers: [] as ServerProvider[],
+  hiddenModels: [] as string[],
   supported: true as boolean | undefined,
 }));
 vi.mock("../../hooks/useSettings", () => ({
-  useEnvironmentSettings: () => mocks.presets,
+  useEnvironmentSettings: () => ({
+    ...DEFAULT_UNIFIED_SETTINGS,
+    promptPresets: mocks.presets,
+    providerModelPreferences: { codex: { hiddenModels: mocks.hiddenModels, modelOrder: [] } },
+  }),
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => mocks.update }));
 vi.mock("../../state/server", () => ({ serverEnvironment: { updateSettings: "update" } }));
@@ -44,7 +58,7 @@ function Composer({ enabled, fanout = false }: { enabled: boolean; fanout?: bool
     environmentId,
     threadRef: target,
     draft: readComposerThreadDraft(target),
-    providers: [],
+    providers: mocks.providers,
     effectiveAgentSettings,
     threadState: { hasStartedSession: false, isMultiModel: fanout },
     enabled,
@@ -59,12 +73,49 @@ function Composer({ enabled, fanout = false }: { enabled: boolean; fanout?: bool
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.update.mockClear();
+  mocks.presets = [{ id: "text", name: "Text", instructions: "Preset instructions" }];
+  mocks.providers = [];
+  mocks.hiddenModels = [];
   mocks.supported = true;
   useComposerDraftStore.setState({ draftsByThreadKey: {} });
   useComposerDraftStore.getState().setPrompt(target, "Hidden ordinary draft");
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+});
+
+it("uses updated model visibility in composer menu actions", async () => {
+  mocks.presets = [{ id: "model", name: "Model", instructions: "New task", model: "test-model" }];
+  mocks.providers = [
+    {
+      instanceId: effectiveAgentSettings.providerInstanceId,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      models: [{ slug: "test-model", name: "Test", isCustom: false, capabilities: {} }],
+      slashCommands: [],
+      skills: [],
+    },
+  ];
+  await act(() => root.render(<Composer enabled />));
+  mocks.hiddenModels = ["test-model"];
+  await act(() => root.render(<Composer enabled />));
+  const original = readComposerThreadDraft(target);
+  await act(() => {
+    expect(actions.apply("model", "replace")).toBe(false);
+  });
+  expect(readComposerThreadDraft(target)).toEqual(original);
+  expect(actions.error).toContain("model is not available");
+  mocks.hiddenModels = [];
+  await act(() => root.render(<Composer enabled />));
+  await act(() => {
+    expect(actions.apply("model", "replace")).toBe(true);
+  });
+  expect(readComposerThreadDraft(target).prompt).toBe("New task");
 });
 
 it.each(["Success", "Failure"] as const)(
@@ -171,6 +222,7 @@ it("removes the palette target during pending input and restores it when the ord
       presetId: "text",
       disposition: "replace",
       providers: [],
+      settings: DEFAULT_UNIFIED_SETTINGS,
     });
   }
   expect(getActiveComposerDraftTarget()).toBeNull();

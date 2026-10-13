@@ -12,6 +12,31 @@ becomes an attachment when inserting it would exceed the message limit. On a
 hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
 to keep a large paste editable in the composer instead.
 
+## Prompt presets
+
+Save repeated instructions as a named prompt preset, optionally including the current provider, model, and mode.
+On web and desktop, write the instructions in the composer, open **Presets**, enter a name, and choose **Save preset**.
+Uncheck **Include provider, model, and mode** to save instructions only and keep the destination draft's agent settings when applying it.
+To update a preset, choose **Edit**; its saved instructions stay unless you select **Replace instructions with the current draft**.
+Including agent settings on an update saves the current composer's settings; excluding them removes previously saved settings.
+
+**Apply** appends the saved instructions to your draft; **Replace** replaces its text.
+Both keep the draft's attachments and context, and neither sends a message.
+Presets do not save attachments or context chips: chip labels become plain text, so attach any needed context again.
+An unavailable provider or model, or an unsupported mode, leaves the draft unchanged.
+On web and desktop, models hidden in Settings are unavailable to presets too.
+Queued-message editing and multiple-model drafts accept instructions-only presets.
+
+On web and desktop, the command palette's **Prompt presets** actions also apply or replace a draft.
+The [preset shortcut](./keybindings.md#composer-controls) opens the composer menu.
+On mobile, open the command palette with a composer visible, then choose **Save prompt preset**, **Apply**, **Replace draft**, or **Delete**.
+Mobile names a new preset from the draft's first line and includes the current agent settings, except when editing a queued message.
+Use web or desktop to rename it or change what it saves.
+
+Presets belong to the environment where you save them.
+They survive reconnects and server restarts and are available to other clients connected to that environment; switching environments shows that environment's own presets.
+Preset actions require a server version that supports prompt presets and are unavailable while answering an agent questionnaire.
+
 ## Attach files
 
 Attach up to 100 files per message. Each image can be up to 10 MiB, with at most

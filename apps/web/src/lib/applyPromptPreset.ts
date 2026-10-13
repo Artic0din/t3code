@@ -1,5 +1,6 @@
 import { createModelSelection } from "@t3tools/shared/model";
-import type { PromptPreset } from "@t3tools/contracts";
+import type { PromptPreset, ServerProvider } from "@t3tools/contracts";
+import type { UnifiedSettings } from "@t3tools/contracts/settings";
 
 import {
   applyPromptPreset,
@@ -20,6 +21,7 @@ import {
   getActiveComposerDraftTarget,
   type ActiveComposerDraftTarget,
 } from "../activeComposerDraftTarget";
+import { getCustomModelOptionsByInstance } from "../modelSelection";
 
 export function composerDraftToPromptPresetDraft(
   draft: ComposerThreadDraftState,
@@ -51,7 +53,8 @@ export function applyPromptPresetToComposer(input: {
   readonly presets: readonly PromptPreset[];
   readonly presetId: string;
   readonly disposition: PromptPresetApplyDisposition;
-  readonly providers: Parameters<typeof promptPresetCapabilitiesFromProviders>[0];
+  readonly providers: readonly ServerProvider[];
+  readonly settings: UnifiedSettings;
   readonly effectiveAgentSettings?: PromptPresetAgentSettings | undefined;
   readonly threadState?: PromptPresetThreadState | undefined;
   readonly expectedActiveTarget?: ActiveComposerDraftTarget | null | undefined;
@@ -80,14 +83,19 @@ export function applyPromptPresetToComposer(input: {
     ...stored,
     ...(activeTarget?.effectiveAgentSettings ?? input.effectiveAgentSettings),
   };
+  const modelOptions = getCustomModelOptionsByInstance(input.settings, input.providers);
   const result = applyPromptPreset({
     draft: current,
     presets: input.presets,
     presetId: input.presetId,
     disposition: input.disposition,
-    capabilities: promptPresetCapabilitiesFromProviders(input.providers, {
-      planModeEnabled: (activeTarget?.planModeEnabled ?? input.planModeEnabled) === true,
-    }),
+    capabilities: promptPresetCapabilitiesFromProviders(
+      input.providers.map((provider) => ({
+        ...provider,
+        models: modelOptions.get(provider.instanceId) ?? [],
+      })),
+      { planModeEnabled: (activeTarget?.planModeEnabled ?? input.planModeEnabled) === true },
+    ),
     threadState: activeTarget?.threadState ?? input.threadState,
   });
   if (!result.ok) return result;
