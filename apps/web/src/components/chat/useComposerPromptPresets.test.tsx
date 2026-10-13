@@ -9,12 +9,17 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   toast: vi.fn(),
   presets: [{ id: "text", name: "Text", instructions: "Preset instructions" }],
+  supported: true as boolean | undefined,
 }));
 vi.mock("../../hooks/useSettings", () => ({
   useEnvironmentSettings: () => mocks.presets,
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => mocks.update }));
 vi.mock("../../state/server", () => ({ serverEnvironment: { updateSettings: "update" } }));
+vi.mock("../../state/entities", () => ({
+  useEnvironmentSupportsPromptPresets: () => mocks.supported === true,
+  readEnvironmentSupportsPromptPresets: () => mocks.supported === true,
+}));
 vi.mock("../ui/toast", () => ({ toastManager: { add: mocks.toast } }));
 
 import { useComposerPromptPresets } from "./useComposerPromptPresets";
@@ -34,14 +39,14 @@ let root: Root;
 let container: HTMLDivElement;
 let actions: ReturnType<typeof useComposerPromptPresets>;
 
-function Composer({ enabled }: { enabled: boolean }) {
+function Composer({ enabled, fanout = false }: { enabled: boolean; fanout?: boolean }) {
   const state = useComposerPromptPresets({
     environmentId,
     threadRef: target,
     draft: readComposerThreadDraft(target),
     providers: [],
     effectiveAgentSettings,
-    threadState: { hasStartedSession: false },
+    threadState: { hasStartedSession: false, isMultiModel: fanout },
     enabled,
     planModeEnabled: false,
   });
@@ -54,11 +59,97 @@ function Composer({ enabled }: { enabled: boolean }) {
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.update.mockClear();
+  mocks.supported = true;
   useComposerDraftStore.setState({ draftsByThreadKey: {} });
   useComposerDraftStore.getState().setPrompt(target, "Hidden ordinary draft");
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+});
+
+it.each(["Success", "Failure"] as const)(
+  "reports save persistence (%s) before success",
+  async (tag) => {
+    mocks.update.mockResolvedValue({ _tag: tag });
+    await act(() => root.render(<Composer enabled />));
+    let saved: unknown;
+    await act(async () => {
+      saved = await actions.save({
+        name: "Saved",
+        instructions: "Instructions",
+        includeAgentSettings: false,
+        replaceInstructions: true,
+      });
+    });
+    expect(saved).toBe(tag === "Success");
+  },
+);
+
+it("saves fanout instructions while refusing incidental agent settings", async () => {
+  mocks.update.mockResolvedValue({ _tag: "Success" });
+  await act(() => root.render(<Composer enabled fanout />));
+  const input = {
+    name: "Fanout",
+    instructions: "Instructions",
+    includeAgentSettings: true,
+    replaceInstructions: true,
+  };
+  let saved: unknown;
+  await act(async () => {
+    saved = await actions.save(input);
+  });
+  expect(saved).toBe(false);
+  expect(mocks.update).not.toHaveBeenCalled();
+  await act(async () => {
+    saved = await actions.save({ ...input, includeAgentSettings: false });
+  });
+  expect(saved).toBe(true);
+  expect(mocks.update.mock.calls[0]?.[0].input.patch.promptPresetMutation.preset).toEqual(
+    expect.objectContaining({ instructions: "Instructions" }),
+  );
+  expect(
+    mocks.update.mock.calls[0]?.[0].input.patch.promptPresetMutation.preset,
+  ).not.toHaveProperty("providerInstanceId");
+});
+
+it.each([false, undefined])(
+  "does not publish preset controls for unsupported server capability (%s)",
+  async (supported) => {
+    mocks.supported = supported;
+    await act(() => root.render(<Composer enabled />));
+    expect(getActiveComposerDraftTarget()).toBeNull();
+    let saved: unknown;
+    await act(async () => {
+      saved = await actions.save({
+        name: "Unavailable",
+        instructions: "Instructions",
+        includeAgentSettings: false,
+        replaceInstructions: true,
+      });
+    });
+    expect(saved).toBe(false);
+    expect(mocks.update).not.toHaveBeenCalled();
+  },
+);
+
+it("rejects cached preset actions after server support is withdrawn", async () => {
+  await act(() => root.render(<Composer enabled />));
+  const cached = actions;
+  mocks.supported = false;
+  await act(async () => {
+    expect(cached.apply("text", "replace")).toBe(false);
+    expect(
+      await cached.save({
+        name: "Unavailable",
+        instructions: "Instructions",
+        includeAgentSettings: false,
+        replaceInstructions: true,
+      }),
+    ).toBe(false);
+    expect(await cached.remove("text")).toBe(false);
+  });
+  expect(mocks.update).not.toHaveBeenCalled();
+  expect(readComposerThreadDraft(target).prompt).toBe("Hidden ordinary draft");
 });
 
 afterEach(async () => {
@@ -92,15 +183,15 @@ it("blocks preset application and saving during pending input without touching t
   await act(() => root.render(<Composer enabled={false} />));
   let applied = true;
   let saved = true;
-  await act(() => {
+  await act(async () => {
     applied = actions.apply("text", "replace");
-    saved = actions.save({
+    saved = await actions.save({
       name: "Wrong draft",
       instructions: "Hidden ordinary draft",
       includeAgentSettings: false,
       replaceInstructions: true,
     });
-    actions.remove("text");
+    await actions.remove("text");
   });
   expect(applied).toBe(false);
   expect(saved).toBe(false);

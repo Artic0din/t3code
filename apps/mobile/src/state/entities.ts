@@ -90,6 +90,10 @@ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
 }
 
+export function readEnvironmentServerConfig(environmentId: EnvironmentId): ServerConfig | null {
+  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
+}
+
 const selectReportedModelSelection = (thread: EnvironmentThread | null) =>
   thread === null ? null : deriveReportedModelSelection(thread.projection);
 

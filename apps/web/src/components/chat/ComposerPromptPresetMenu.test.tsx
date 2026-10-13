@@ -6,17 +6,21 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 import { ComposerPromptPresetMenu } from "./ComposerPromptPresetMenu";
 import { useComposerMenuState } from "./useComposerMenuState";
+import { ProviderInstanceId } from "@t3tools/contracts";
 
 let root: Root;
 let container: HTMLDivElement;
 let portal: HTMLDivElement;
 const dispatchTurn = vi.fn();
-const save = vi.fn<(input: { readonly id?: string; readonly instructions: string }) => boolean>(
-  () => true,
-);
+const save = vi.fn<Parameters<typeof ComposerPromptPresetMenu>[0]["onSave"]>(() => true);
 const presets = [
   { id: "existing", name: "Existing", instructions: "Saved instructions" },
-  { id: "other", name: "Other", instructions: "Other instructions" },
+  {
+    id: "other",
+    name: "Other",
+    instructions: "Other instructions",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
 ];
 const remove = vi.fn<(id: string) => Promise<boolean>>(async () => true);
 
@@ -74,7 +78,8 @@ beforeEach(async () => {
   portal = document.createElement("div");
   document.body.append(container, portal);
   root = createRoot(container);
-  save.mockClear();
+  save.mockReset();
+  save.mockReturnValue(true);
   dispatchTurn.mockClear();
   remove.mockReset();
   remove.mockResolvedValue(true);
@@ -135,6 +140,37 @@ it("exits editing on successful deletion before the config subscription catches 
   expect(document.querySelector<HTMLInputElement>('[aria-label="Preset name"]')?.value).toBe("");
   await click('button[type="submit"]');
   expect(save.mock.calls[0]?.[0]).not.toHaveProperty("id");
+});
+
+it("initializes the settings checkbox from each edited preset", async () => {
+  await click('[aria-label="Edit Existing"]');
+  expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(false);
+  await click('button[type="submit"]');
+  expect(save.mock.calls[0]?.[0].includeAgentSettings).toBe(false);
+  await click('[aria-label="Edit Other"]');
+  expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+  await click('button[type="submit"]');
+  expect(save.mock.calls[1]?.[0].includeAgentSettings).toBe(true);
+});
+
+it.each([true, false])("retains the editor until save acknowledgement (%s)", async (success) => {
+  let finish: (success: boolean) => void = () => {};
+  save.mockImplementation(
+    () =>
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await click('[aria-label="Edit Existing"]');
+  await click('button[type="submit"]');
+  expect(document.querySelector<HTMLInputElement>('[aria-label="Preset name"]')?.value).toBe(
+    "Existing",
+  );
+  expect(document.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+  await act(async () => finish(success));
+  expect(document.querySelector<HTMLInputElement>('[aria-label="Preset name"]')?.value).toBe(
+    success ? "" : "Existing",
+  );
 });
 
 it("blocks Update while deletion is pending and retains the editor after failure", async () => {

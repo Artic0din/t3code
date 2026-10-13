@@ -25,6 +25,57 @@ const providers = [
 beforeEach(() => useComposerDraftStore.setState({ draftsByThreadKey: {} }));
 
 describe("preset composer application", () => {
+  it("rejects cached agent-setting actions after the composer enters fanout mode", () => {
+    useComposerDraftStore.getState().setPrompt(target, "Original task");
+    const original = readComposerThreadDraft(target);
+    const active = {
+      environmentId: target.environmentId,
+      threadRef: target,
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "old",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+      },
+      threadState: { hasStartedSession: false },
+    };
+    const unregister = registerActiveComposerDraftTarget(active);
+    const cached = () =>
+      applyPromptPresetToComposer({
+        threadRef: target,
+        draft: readComposerThreadDraft(target),
+        presets: [
+          { id: "settings", name: "Settings", instructions: "New task", runtimeMode: "auto" },
+        ],
+        presetId: "settings",
+        disposition: "replace",
+        providers,
+        expectedActiveTarget: active,
+      });
+    const unregisterFanout = registerActiveComposerDraftTarget({
+      ...active,
+      threadState: { ...active.threadState, isMultiModel: true },
+    });
+    expect(cached()).toMatchObject({ ok: false, code: "agent-settings" });
+    expect(readComposerThreadDraft(target)).toEqual(original);
+    unregister();
+    unregisterFanout();
+  });
+  it("rejects a cached palette preset on a server without advertised support", () => {
+    useComposerDraftStore.getState().setPrompt(target, "Original task");
+    const original = readComposerThreadDraft(target);
+    const result = applyPromptPresetToComposer({
+      threadRef: target,
+      draft: original,
+      presets: [{ id: "text", name: "Text", instructions: "Hidden write" }],
+      presetId: "text",
+      disposition: "replace",
+      providers,
+      serverSupportsPromptPresets: false,
+    });
+    expect(result).toMatchObject({ ok: false, code: "unsupported" });
+    expect(readComposerThreadDraft(target)).toEqual(original);
+  });
   it.each(["missing", "signed out", "missing CLI"] as const)(
     "rejects a Plan-only preset with Plan disabled and a %s provider",
     (providerState) => {

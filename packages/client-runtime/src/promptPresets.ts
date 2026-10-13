@@ -32,6 +32,7 @@ export type PromptPresetAgentSettings = Pick<
 export interface PromptPresetThreadState {
   readonly hasStartedSession: boolean;
   readonly isQueuedEdit?: boolean | undefined;
+  readonly isMultiModel?: boolean | undefined;
   readonly supportsProviderSwitchingViaHandoff?: boolean | undefined;
   readonly currentProviderInstanceId?: ProviderInstanceId | null | undefined;
 }
@@ -51,6 +52,7 @@ export interface PromptPresetCapabilities {
 
 export type PromptPresetFailureCode =
   | "missing"
+  | "unsupported"
   | "provider"
   | "model"
   | "runtime-mode"
@@ -195,15 +197,14 @@ export function applyPromptPreset(input: {
   }
 
   if (
-    input.threadState?.isQueuedEdit === true &&
-    (preset.providerInstanceId !== undefined ||
-      preset.model !== undefined ||
-      preset.runtimeMode !== undefined ||
-      preset.interactionMode !== undefined)
+    (input.threadState?.isQueuedEdit === true || input.threadState?.isMultiModel === true) &&
+    promptPresetIncludesAgentSettings(preset)
   ) {
     return failure(
       "agent-settings",
-      "Queued message editing supports instructions only. Choose a preset without agent settings.",
+      input.threadState?.isMultiModel
+        ? "Multiple-model composition supports instructions-only presets. Exclude agent settings."
+        : "Queued message editing supports instructions only. Choose a preset without agent settings.",
     );
   }
 
@@ -350,6 +351,15 @@ function agentSettingsFromDraft(draft: PromptPresetDraft): PromptPreset {
     ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
     ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
   };
+}
+
+export function promptPresetIncludesAgentSettings(preset: PromptPreset): boolean {
+  return (
+    preset.providerInstanceId !== undefined ||
+    preset.model !== undefined ||
+    preset.runtimeMode !== undefined ||
+    preset.interactionMode !== undefined
+  );
 }
 
 function supportsRuntimeMode(

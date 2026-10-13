@@ -115,7 +115,13 @@ import { useScratchProject } from "../hooks/useScratchProject";
 import { useNewProject } from "../hooks/useNewProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
+import {
+  useProjects,
+  useServerConfigs,
+  useThreadShells,
+  waitForProject,
+  readEnvironmentServerConfig,
+} from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
@@ -1951,13 +1957,20 @@ function OpenCommandPaletteDialog(props: {
     null;
   const presetServerConfig =
     presetEnvironmentId === null ? null : (serverConfigs.get(presetEnvironmentId) ?? null);
-  const promptPresets = presetServerConfig?.settings.promptPresets ?? [];
+  const promptPresetsSupported =
+    presetServerConfig?.environment.capabilities.promptPresets === true;
+  const promptPresets = promptPresetsSupported ? presetServerConfig.settings.promptPresets : [];
   const presetThreadRef = activeComposerDraftTarget?.threadRef ?? null;
   const applyPalettePromptPreset = (
     presetId: string,
     disposition: "insert" | "replace",
   ): Promise<void> => {
-    if (presetThreadRef === null || presetServerConfig === null) {
+    const currentConfig =
+      presetEnvironmentId === null ? null : readEnvironmentServerConfig(presetEnvironmentId);
+    if (
+      presetThreadRef === null ||
+      currentConfig?.environment.capabilities.promptPresets !== true
+    ) {
       toastManager.add({
         type: "error",
         title: "Prompt preset",
@@ -1968,10 +1981,11 @@ function OpenCommandPaletteDialog(props: {
     const result = applyPromptPresetToComposer({
       threadRef: presetThreadRef,
       draft: readComposerThreadDraft(presetThreadRef),
-      presets: promptPresets,
+      presets: currentConfig.settings.promptPresets,
       presetId,
       disposition,
-      providers: presetServerConfig.providers,
+      providers: currentConfig.providers,
+      serverSupportsPromptPresets: true,
       effectiveAgentSettings: activeComposerDraftTarget?.effectiveAgentSettings,
       threadState: activeComposerDraftTarget?.threadState,
       expectedActiveTarget: activeComposerDraftTarget,
@@ -2033,7 +2047,7 @@ function OpenCommandPaletteDialog(props: {
       },
     ],
   };
-  actionItems.push(promptPresetItem);
+  if (promptPresetsSupported) actionItems.push(promptPresetItem);
 
   if (activeThreadReferenceCopyTarget !== null) {
     actionItems.push({

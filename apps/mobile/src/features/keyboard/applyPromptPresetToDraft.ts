@@ -39,6 +39,21 @@ export function buildPromptPresetFromMobileDraft(input: {
   });
 }
 
+export function createPromptPresetDeleteConfirmation(input: {
+  readonly readSupport: () => boolean;
+  readonly deletePreset: () => void;
+  readonly reportUnsupported: () => void;
+}): () => void {
+  // Confirmation can follow palette unmount and a server reconnect.
+  return () => {
+    if (!input.readSupport()) {
+      input.reportUnsupported();
+      return;
+    }
+    input.deletePreset();
+  };
+}
+
 export function mobileDraftToPromptPresetDraft(
   draft: ComposerDraft,
   effectiveAgentSettings?: PromptPresetAgentSettings,
@@ -64,8 +79,15 @@ export function applyPromptPresetToMobileDraft(input: {
   readonly effectiveAgentSettings?: PromptPresetAgentSettings | undefined;
   readonly threadState?: PromptPresetThreadState | undefined;
   readonly planModeEnabled?: boolean | undefined;
+  readonly serverSupportsPromptPresets?: boolean | undefined;
   readonly expectedActiveTarget?: ActiveComposerDraftTarget | null | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
+  if (input.serverSupportsPromptPresets === false)
+    return {
+      ok: false,
+      code: "unsupported",
+      message: "Prompt presets are not supported by this server. Update the server.",
+    };
   const activeTarget =
     input.expectedActiveTarget === undefined ? undefined : getActiveComposerDraftTarget();
   if (

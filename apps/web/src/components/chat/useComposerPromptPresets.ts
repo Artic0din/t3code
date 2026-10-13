@@ -13,6 +13,10 @@ import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import {
+  useEnvironmentSupportsPromptPresets,
+  readEnvironmentSupportsPromptPresets,
+} from "../../state/entities";
 import { registerActiveComposerDraftTarget } from "../../activeComposerDraftTarget";
 import {
   applyPromptPresetToComposer,
@@ -32,6 +36,8 @@ export function useComposerPromptPresets(input: {
   readonly planModeEnabled: boolean;
 }) {
   const presets = useEnvironmentSettings(input.environmentId, (settings) => settings.promptPresets);
+  const supported = useEnvironmentSupportsPromptPresets(input.environmentId);
+  const enabled = input.enabled && supported;
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "prompt preset update",
     reportFailure: true,
@@ -42,6 +48,7 @@ export function useComposerPromptPresets(input: {
   const {
     hasStartedSession,
     isQueuedEdit,
+    isMultiModel,
     currentProviderInstanceId,
     supportsProviderSwitchingViaHandoff,
   } = threadState;
@@ -54,6 +61,7 @@ export function useComposerPromptPresets(input: {
       threadState: {
         hasStartedSession,
         isQueuedEdit,
+        isMultiModel,
         currentProviderInstanceId,
         supportsProviderSwitchingViaHandoff,
       },
@@ -68,13 +76,14 @@ export function useComposerPromptPresets(input: {
       interactionMode,
       hasStartedSession,
       isQueuedEdit,
+      isMultiModel,
       currentProviderInstanceId,
       supportsProviderSwitchingViaHandoff,
     ],
   );
   useEffect(
-    () => (input.enabled ? registerActiveComposerDraftTarget(activeTarget) : undefined),
-    [activeTarget, input.enabled],
+    () => (enabled ? registerActiveComposerDraftTarget(activeTarget) : undefined),
+    [activeTarget, enabled],
   );
 
   const report = (message: string) => {
@@ -83,10 +92,12 @@ export function useComposerPromptPresets(input: {
   };
 
   return {
+    enabled,
     presets,
     error,
     apply(presetId: string, disposition: PromptPresetApplyDisposition) {
-      if (!input.enabled) return false;
+      if (!input.enabled || !readEnvironmentSupportsPromptPresets(input.environmentId))
+        return false;
       const result = applyPromptPresetToComposer({
         threadRef: input.threadRef,
         draft: input.draft,
@@ -105,14 +116,21 @@ export function useComposerPromptPresets(input: {
       setError(null);
       return true;
     },
-    save(saveInput: {
+    async save(saveInput: {
       readonly id?: string;
       readonly name: string;
       readonly instructions: string;
       readonly includeAgentSettings: boolean;
       readonly replaceInstructions: boolean;
     }) {
-      if (!input.enabled) return false;
+      if (!input.enabled || !readEnvironmentSupportsPromptPresets(input.environmentId))
+        return false;
+      if (saveInput.includeAgentSettings && input.threadState.isMultiModel) {
+        report(
+          "Multiple-model composition supports instructions-only presets. Exclude agent settings.",
+        );
+        return false;
+      }
       const previous = presets.find((preset) => preset.id === saveInput.id);
       const next = buildPromptPreset({
         id: saveInput.id ?? createPromptPresetId(),
@@ -129,15 +147,18 @@ export function useComposerPromptPresets(input: {
         report(saved.message);
         return false;
       }
-      void updateSettings({
+      setError(null);
+      const result = await updateSettings({
         environmentId: input.environmentId,
         input: { patch: { promptPresetMutation: { operation: "upsert", preset: next } } },
       });
-      setError(null);
-      return true;
+      if (result._tag === "Success") setError(null);
+      else setError("Could not save the preset. Try again.");
+      return result._tag === "Success";
     },
     async remove(presetId: string) {
-      if (!input.enabled) return false;
+      if (!input.enabled || !readEnvironmentSupportsPromptPresets(input.environmentId))
+        return false;
       const result = await updateSettings({
         environmentId: input.environmentId,
         input: { patch: { promptPresetMutation: { operation: "delete", presetId } } },

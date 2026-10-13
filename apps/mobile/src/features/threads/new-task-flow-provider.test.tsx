@@ -139,6 +139,7 @@ import {
   useNewTaskComposerPresetTarget,
 } from "./new-task-flow-provider";
 import { getActiveComposerDraftTarget } from "./active-composer-draft-target";
+import { useThreadComposerPresetTarget } from "./use-thread-composer-preset-target";
 import { applyPromptPresetToMobileDraft } from "../keyboard/applyPromptPresetToDraft";
 
 let root: Root;
@@ -397,5 +398,62 @@ it("keeps presets on the visible composer after an intentional machine switch", 
       </NewTaskFlowProvider>,
     ),
   );
+  expect(getActiveComposerDraftTarget()).toBeNull();
+});
+
+it("withdraws the ordinary thread target while a questionnaire owns the composer", async () => {
+  const target = {
+    draftKey: "thread",
+    environmentId,
+    effectiveAgentSettings: {
+      providerInstanceId: modelSelection.instanceId,
+      model: modelSelection.model,
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+    },
+    threadState: { hasStartedSession: false },
+  };
+  fixture.drafts.thread = { text: "Ordinary draft", attachments: [] };
+  function ThreadProbe({ questionnaireActive }: { questionnaireActive: boolean }) {
+    useThreadComposerPresetTarget(target, questionnaireActive);
+    return null;
+  }
+  await act(() => root.render(<ThreadProbe questionnaireActive={false} />));
+  expect(getActiveComposerDraftTarget()).toBe(target);
+  await act(() => root.render(<ThreadProbe questionnaireActive />));
+  expect(getActiveComposerDraftTarget()).toBeNull();
+  const result = applyPromptPresetToMobileDraft({
+    draftKey: "thread",
+    expectedActiveTarget: target,
+    presets: [{ id: "text", name: "Text", instructions: "Hidden write" }],
+    presetId: "text",
+    disposition: "replace",
+    providers: [],
+  });
+  expect(result).toMatchObject({ ok: false, code: "missing" });
+  expect(fixture.drafts.thread.text).toBe("Ordinary draft");
+  await act(() => root.render(<ThreadProbe questionnaireActive={false} />));
+  expect(getActiveComposerDraftTarget()).toBe(target);
+});
+
+it("withdraws the draft target while a queued creation failure card owns the slot", async () => {
+  const target = {
+    draftKey: "thread",
+    environmentId,
+    effectiveAgentSettings: {
+      providerInstanceId: modelSelection.instanceId,
+      model: modelSelection.model,
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+    },
+    threadState: { hasStartedSession: false },
+  };
+  function FailureProbe({ failed }: { failed: boolean }) {
+    useThreadComposerPresetTarget(target, false, failed);
+    return null;
+  }
+  await act(() => root.render(<FailureProbe failed={false} />));
+  expect(getActiveComposerDraftTarget()).toBe(target);
+  await act(() => root.render(<FailureProbe failed />));
   expect(getActiveComposerDraftTarget()).toBeNull();
 });

@@ -85,6 +85,10 @@ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
 }
 
+export function readEnvironmentServerConfig(environmentId: EnvironmentId): ServerConfig | null {
+  return appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId) ?? null;
+}
+
 /** Every thread shell. Pass `enabled: false` to read a stable empty list and
     skip re-rendering on each shell update while the caller does not need them. */
 export function useThreadShells(enabled = true): ReadonlyArray<EnvironmentThreadShell> {
@@ -208,6 +212,16 @@ export function useEnvironmentSupportsServerBrowser(environmentId: EnvironmentId
   return (
     environmentId !== null &&
     configs.get(environmentId)?.environment.capabilities.serverBrowser === true
+  );
+}
+
+export function useEnvironmentSupportsPromptPresets(environmentId: EnvironmentId): boolean {
+  return useServerConfigs().get(environmentId)?.environment.capabilities.promptPresets === true;
+}
+
+export function readEnvironmentSupportsPromptPresets(environmentId: EnvironmentId): boolean {
+  return (
+    readEnvironmentServerConfig(environmentId)?.environment.capabilities.promptPresets === true
   );
 }
 

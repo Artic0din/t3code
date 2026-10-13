@@ -2320,9 +2320,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
-  const promptPresetsEnabled = activePendingProgress === null && pendingUserInputs.length === 0;
   const promptPresets = useComposerPromptPresets({
-    enabled: promptPresetsEnabled,
+    enabled: activePendingProgress === null && pendingUserInputs.length === 0,
     planModeEnabled: settings.planModeEnabled,
     environmentId,
     threadRef: composerDraftTarget,
@@ -2336,12 +2335,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     threadState: {
       hasStartedSession: threadShellHasStarted(activeThread),
+      isMultiModel: routeKind === "draft" && multipleModelSelections !== null,
       isQueuedEdit:
         typeof composerDraftTarget === "string" && composerDraftTarget.startsWith("queued-edit:"),
       currentProviderInstanceId: activeThread?.runtime?.providerInstanceId,
       supportsProviderSwitchingViaHandoff,
     },
   });
+  const promptPresetsEnabled = promptPresets.enabled;
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's

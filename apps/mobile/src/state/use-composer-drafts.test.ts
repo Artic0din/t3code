@@ -200,6 +200,7 @@ import {
   applyPromptPresetToMobileDraft,
   mobileDraftToPromptPresetDraft,
   buildPromptPresetFromMobileDraft,
+  createPromptPresetDeleteConfirmation,
 } from "../features/keyboard/applyPromptPresetToDraft";
 import { savePromptPreset } from "@t3tools/client-runtime/promptPresets";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -253,6 +254,41 @@ function contextDraft(start: number, count: number): ComposerDraft {
 }
 
 describe("mobile composer drafts", () => {
+  it("rechecks server support after the palette closes before confirming deletion", () => {
+    let supported = true;
+    const deleted: string[] = [];
+    const errors: string[] = [];
+    const confirm = createPromptPresetDeleteConfirmation({
+      readSupport: () => supported,
+      deletePreset: () => {
+        deleted.push("text");
+      },
+      reportUnsupported: () => {
+        errors.push("unsupported");
+      },
+    });
+    supported = false;
+    confirm();
+    expect(deleted).toEqual([]);
+    expect(errors).toEqual(["unsupported"]);
+    supported = true;
+    confirm();
+    expect(deleted).toEqual(["text"]);
+  });
+  it("rejects a cached palette preset on a server without advertised support", () => {
+    setComposerDraftText("thread", "Original task");
+    const original = getComposerDraftSnapshot("thread");
+    const result = applyPromptPresetToMobileDraft({
+      draftKey: "thread",
+      presets: [{ id: "text", name: "Text", instructions: "Hidden write" }],
+      presetId: "text",
+      disposition: "replace",
+      providers: [],
+      serverSupportsPromptPresets: false,
+    });
+    expect(result).toMatchObject({ ok: false, code: "unsupported" });
+    expect(getComposerDraftSnapshot("thread")).toEqual(original);
+  });
   it.each(["missing", "signed out", "missing CLI"] as const)(
     "rejects a Plan-only preset with Plan disabled and a %s provider",
     (providerState) => {

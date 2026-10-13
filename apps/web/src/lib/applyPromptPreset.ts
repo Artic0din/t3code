@@ -56,7 +56,14 @@ export function applyPromptPresetToComposer(input: {
   readonly threadState?: PromptPresetThreadState | undefined;
   readonly expectedActiveTarget?: ActiveComposerDraftTarget | null | undefined;
   readonly planModeEnabled?: boolean | undefined;
+  readonly serverSupportsPromptPresets?: boolean | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
+  if (input.serverSupportsPromptPresets === false)
+    return {
+      ok: false,
+      code: "unsupported",
+      message: "Prompt presets are not supported by this server. Update the server.",
+    };
   const activeTarget =
     input.expectedActiveTarget === undefined ? null : getActiveComposerDraftTarget();
   if (

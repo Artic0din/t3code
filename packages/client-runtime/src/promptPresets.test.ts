@@ -63,6 +63,36 @@ function preset(overrides: Partial<PromptPreset> = {}): PromptPreset {
 }
 
 describe("applyPromptPreset", () => {
+  it("applies fanout instructions without changing incidental agent settings", () => {
+    const current = draft();
+    const result = applyPromptPreset({
+      draft: current,
+      presets: [preset()],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities,
+      threadState: { hasStartedSession: false, isMultiModel: true },
+    });
+    expect(result).toEqual({ ok: true, value: { ...current, text: "Write a plan." } });
+  });
+  it.each([
+    { providerInstanceId: codex },
+    { model: "gpt-5" },
+    { runtimeMode: "full-access" as const },
+    { interactionMode: "plan" as const },
+  ])("rejects agent settings on a fanout draft before mutation: %j", (settings) => {
+    const current = draft();
+    const result = applyPromptPreset({
+      draft: current,
+      presets: [preset(settings)],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities,
+      threadState: { hasStartedSession: false, isMultiModel: true },
+    });
+    expect(result).toMatchObject({ ok: false, code: "agent-settings" });
+    expect(current).toEqual(draft());
+  });
   it.each(["insert", "replace"] as const)(
     "strips legacy preset references on %s while preserving destination context",
     (disposition) => {
