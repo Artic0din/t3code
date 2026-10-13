@@ -6,6 +6,7 @@ import type { ProviderAdapterV2HistoricalContext } from "./ProviderAdapter.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { historyCost, renderHistory, selectHistory } from "./ContextHandoffBudget.ts";
+import type { SupersededHistoryPlans } from "./ContextHandoffBudget.ts";
 
 /** Persist before/after injection: an ambiguous pending delivery requires a fresh native thread. */
 export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextHandoffs")(
@@ -15,6 +16,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly budget: number | Effect.Effect<number, BudgetError>;
     readonly deferInline?: boolean;
     readonly alreadyDeliveredItemIds: ReadonlySet<string>;
+    readonly supersededPlans?: SupersededHistoryPlans;
     readonly inject?: (
       history: ProviderAdapterV2HistoricalContext,
     ) => Effect.Effect<boolean, InjectError>;
@@ -66,6 +68,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
         : coverage;
     const selected = selectHistory({
       messages,
+      ...(input.supersededPlans === undefined ? {} : { supersededPlans: input.supersededPlans }),
       coverage: fullCoverage,
       omittedItems: pending.reduce((sum, handoff) => sum + (handoff.history?.omittedItems ?? 0), 0),
       budget,

@@ -10,7 +10,6 @@ import type {
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
   OrchestrationV2PlanArtifact,
-  PlanId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProjectedTurnItem,
@@ -50,6 +49,7 @@ import {
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   orchestrationV2RunWorkStartedAt,
   RunId,
+  PlanId,
   RuntimeRequestId,
   CheckpointScopeId,
   ThreadId,
@@ -405,6 +405,9 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     planId: PlanId,
   ) => Effect.Effect<OrchestrationV2PlanArtifact | undefined, ProjectionStoreV2Error>;
+  readonly getSupersededPlanIds: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<PlanId>, ProjectionStoreV2Error>;
   readonly getPriorIncompletePlanItems: (input: {
     readonly threadId: ThreadId;
     readonly providerThreadId: ProviderThreadId;
@@ -4239,6 +4242,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getSupersededPlanIds: ProjectionStoreV2Shape["getSupersededPlanIds"] = (threadId) =>
+      sql<{ plan_id: string }>`
+        SELECT plan_id FROM orchestration_v2_projection_plans
+        WHERE thread_id = ${threadId} AND status = 'superseded'
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => PlanId.make(row.plan_id))),
+        Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+      );
+
     const getPlan: ProjectionStoreV2Shape["getPlan"] = (threadId, planId) =>
       sql
         .withTransaction(
@@ -5790,6 +5802,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadRecords,
       getRuntimeRequest,
       getPlan,
+      getSupersededPlanIds,
       getProviderControlContext,
       getLimitRecoveryCandidates,
       getRecoveryThreadIds,
@@ -6011,6 +6024,16 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
           };
         }),
+      getSupersededPlanIds: (threadId) =>
+        service
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) =>
+              projection.plans
+                .filter((plan) => plan.status === "superseded")
+                .map((plan) => plan.id),
+            ),
+          ),
       getPlan: (threadId, planId) =>
         Effect.gen(function* () {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
