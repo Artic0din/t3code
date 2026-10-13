@@ -155,6 +155,162 @@ function makeRecordLimitTranscript(cwd: string, overflow: boolean): string {
 
 it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
   describe("scan", () => {
+    it.effect.each(["claudeAgent", "codex"] as const)(
+      "only offers %s sessions inside the import modification-time window",
+      (source) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-window-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-window-codex-");
+          const workspace = yield* makeTempDir("t3code-window-workspace-");
+          const windowMs = 30 * 24 * 60 * 60 * 1000;
+          for (const [sessionId, mtimeMs] of [
+            ["cutoff", nowMs - windowMs],
+            ["now", nowMs],
+            ["old", nowMs - windowMs - 1_000],
+            ["future", nowMs + 1_000],
+          ] as const) {
+            const filePath =
+              source === "claudeAgent"
+                ? path.join(claudeHomePath, "projects", "-slug", `${sessionId}.jsonl`)
+                : path.join(
+                    codexHomePath,
+                    "sessions",
+                    "2026",
+                    "08",
+                    "24",
+                    `rollout-${sessionId}.jsonl`,
+                  );
+            yield* writeTranscript({
+              filePath,
+              contents: `${JSON.stringify(
+                source === "claudeAgent"
+                  ? {
+                      type: "user",
+                      cwd: workspace,
+                      sessionId,
+                      timestamp: "2020-01-01T00:00:00.000Z",
+                    }
+                  : {
+                      type: "session_meta",
+                      payload: { cwd: workspace, id: sessionId },
+                      timestamp: "2020-01-01T00:00:00.000Z",
+                    },
+              )}\n`,
+              mtimeMs,
+            });
+          }
+          const result = yield* runScan({
+            claudeHomePath,
+            codexHomePath,
+            importedWorkspaceRoots: [workspace],
+          });
+          expect(result.sessions?.map((session) => session.providerSessionId).toSorted()).toEqual([
+            "cutoff",
+            "now",
+          ]);
+          expect(result.sessions?.every((session) => session.projectId === "project-1")).toBe(true);
+          expect(result.candidates[0]?.threadCount).toBe(4);
+        }),
+    );
+
+    it.effect.each([
+      ["claudeAgent", "stat"],
+      ["claudeAgent", "open"],
+      ["claudeAgent", "read"],
+      ["codex", "stat"],
+      ["codex", "open"],
+      ["codex", "read"],
+    ] as const)("marks %s transcript %s failures incomplete", ([source, operation]) =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-file-error-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-file-error-codex-");
+        const failingHome = yield* makeTempDir("t3code-file-error-account-");
+        const workspace = yield* makeTempDir("t3code-file-error-workspace-");
+        const directory =
+          source === "claudeAgent"
+            ? path.join(claudeHomePath, "projects", "-slug")
+            : path.join(codexHomePath, "sessions", "2026", "08", "24");
+        const brokenPath =
+          source === "claudeAgent"
+            ? path.join(failingHome, "projects", "-slug", "broken.jsonl")
+            : path.join(failingHome, "sessions", "2026", "08", "24", "rollout-broken.jsonl");
+        const healthyPath = path.join(
+          directory,
+          source === "claudeAgent" ? "healthy.jsonl" : "rollout-healthy.jsonl",
+        );
+        for (const filePath of [brokenPath, healthyPath]) {
+          yield* writeTranscript({
+            filePath,
+            contents:
+              source === "claudeAgent" ? claudeSessionLine(workspace) : codexRolloutLine(workspace),
+            mtimeMs: nowMs,
+          });
+        }
+        const error = yield* Effect.flip(fileSystem.stat(path.join(workspace, "missing")));
+        const canonicalBrokenPath = yield* fileSystem.realPath(brokenPath);
+        const isBrokenPath = (filePath: string) =>
+          filePath === brokenPath || filePath === canonicalBrokenPath;
+        let injectedFailures = 0;
+        const simulatedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          stat: (filePath) => {
+            if (isBrokenPath(filePath) && operation === "stat") {
+              injectedFailures += 1;
+              return Effect.fail(error);
+            }
+            return fileSystem.stat(filePath);
+          },
+          open: (filePath, options) => {
+            if (!isBrokenPath(filePath)) return fileSystem.open(filePath, options);
+            if (operation === "open") {
+              injectedFailures += 1;
+              return Effect.fail(error);
+            }
+            return fileSystem.open(filePath, options).pipe(
+              Effect.map((file) =>
+                operation === "read"
+                  ? {
+                      ...file,
+                      readAlloc: () => {
+                        injectedFailures += 1;
+                        return Effect.fail(error);
+                      },
+                    }
+                  : file,
+              ),
+            );
+          },
+        });
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          providerInstances: {
+            [ProviderInstanceId.make("failing-account")]: {
+              driver: ProviderDriverKind.make(source),
+              config: { homePath: failingHome },
+            },
+          },
+        }).pipe(Effect.provideService(FileSystem.FileSystem, simulatedFileSystem));
+        expect(injectedFailures).toBe(1);
+        expect(result.sessions).toHaveLength(1);
+        expect(result.truncated).toBe(true);
+        expect(
+          result.sourceReports?.find((report) => report.providerInstanceId === "failing-account")
+            ?.truncated,
+        ).toBe(true);
+        expect(
+          result.sourceReports?.find((report) => report.providerInstanceId === source)?.truncated,
+        ).toBe(false);
+      }),
+    );
+
     it.effect("reads Claude project cwds from transcripts, newest first", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
@@ -951,6 +1107,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("keeps sessions from manually created git worktrees", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-01-03T00:00:00.000Z"));
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
@@ -1457,6 +1614,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("reads recorded activity from a partial transcript and ignores the prompt text", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-08-02T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-partial-claude-");
         const codexHomePath = yield* makeTempDir("t3code-partial-codex-");
@@ -1497,6 +1655,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("keeps scanning for later activity after the first record names cwd", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-08-02T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-activity-claude-");
         const codexHomePath = yield* makeTempDir("t3code-activity-codex-");
@@ -1537,6 +1696,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("keeps one session when a transcript rotates and uses the recorded time", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-06-02T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-rotation-claude-");
         const codexHomePath = yield* makeTempDir("t3code-rotation-codex-");
@@ -1552,7 +1712,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         yield* writeTranscript({
           filePath: path.join(claudeHomePath, "projects", "-slug", "older-file.jsonl"),
           contents: line("2026-05-01T00:00:00.000Z"),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          mtimeMs: Date.parse("2026-06-01T00:00:00.000Z"),
         });
         yield* writeTranscript({
           filePath: path.join(claudeHomePath, "projects", "-slug", "newer-file.jsonl"),
@@ -1578,6 +1738,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("omits sessions from disabled providers", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-03-03T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-enabled-claude-");
         const codexHomePath = yield* makeTempDir("t3code-enabled-codex-");
@@ -1642,6 +1803,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("bounds the session list and marks the scan partial", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-07-02T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-bounded-claude-");
         const codexHomePath = yield* makeTempDir("t3code-bounded-codex-");
@@ -1690,6 +1852,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("marks an imported project on the session without importing it", () =>
       Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse("2026-04-03T00:00:00.000Z"));
         const path = yield* Path.Path;
         const claudeHomePath = yield* makeTempDir("t3code-imported-claude-");
         const codexHomePath = yield* makeTempDir("t3code-imported-codex-");

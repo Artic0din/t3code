@@ -232,7 +232,7 @@ interface MetadataReadBudget {
   bytesRemaining: number;
   operationsRemaining: number;
   recordsRemaining: number;
-  truncated: boolean;
+  readonly truncatedInstances: Set<ProviderInstanceId>;
 }
 
 function selectMetadataTranscripts(transcripts: ReadonlyArray<TranscriptCandidate>) {
@@ -700,8 +700,16 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const statOption = (target: string) =>
-    fileSystem.stat(target).pipe(Effect.asSome, Effect.orElseSucceed(Option.none));
+  const statOption = (target: string, onError?: () => void) =>
+    fileSystem.stat(target).pipe(
+      Effect.asSome,
+      Effect.catchTags({
+        PlatformError: () => {
+          onError?.();
+          return Effect.succeed(Option.none());
+        },
+      }),
+    );
 
   const classifyDirectory = (target: string) =>
     fileSystem.stat(target).pipe(
@@ -791,7 +799,7 @@ export const make = Effect.gen(function* () {
       budget.operationsRemaining < 2 ||
       budget.recordsRemaining === 0
     ) {
-      budget.truncated = true;
+      budget.truncatedInstances.add(transcript.providerInstanceId);
       return null;
     }
     budget.operationsRemaining -= 1;
@@ -812,7 +820,7 @@ export const make = Effect.gen(function* () {
                 recordsRead === MAX_METADATA_RECORDS_PER_TRANSCRIPT ||
                 budget.recordsRemaining === 0
               ) {
-                budget.truncated = true;
+                budget.truncatedInstances.add(transcript.providerInstanceId);
                 return false;
               }
               recordsRead += 1;
@@ -842,7 +850,7 @@ export const make = Effect.gen(function* () {
 
             while (bytesRead < maxBytes) {
               if (budget.bytesRemaining === 0 || budget.operationsRemaining === 0) {
-                budget.truncated = true;
+                budget.truncatedInstances.add(transcript.providerInstanceId);
                 return finish();
               }
               const readSize = Math.min(
@@ -869,14 +877,21 @@ export const make = Effect.gen(function* () {
             }
 
             if (bytesRead < transcript.size) {
-              budget.truncated = true;
+              budget.truncatedInstances.add(transcript.providerInstanceId);
               return finish();
             }
             return readLastRecord();
           }),
         ),
       ),
-    ).pipe(Effect.orElseSucceed(() => null));
+    ).pipe(
+      Effect.catchTags({
+        PlatformError: () => {
+          budget.truncatedInstances.add(transcript.providerInstanceId);
+          return Effect.succeed(null);
+        },
+      }),
+    );
   });
 
   /**
@@ -1026,7 +1041,9 @@ export const make = Effect.gen(function* () {
             break;
           }
           operationsRemaining -= 1;
-          const stats = yield* statOption(filePath);
+          const stats = yield* statOption(filePath, () => {
+            truncated = true;
+          });
           if (
             Option.isNone(stats) ||
             stats.value.type !== "File" ||
@@ -1094,7 +1111,9 @@ export const make = Effect.gen(function* () {
               }
               const filePath = path.join(directory, entry);
               operationsRemaining -= 1;
-              const stats = yield* statOption(filePath);
+              const stats = yield* statOption(filePath, () => {
+                truncated = true;
+              });
               if (
                 Option.isSome(stats) &&
                 stats.value.type === "File" &&
@@ -1295,10 +1314,24 @@ export const make = Effect.gen(function* () {
         bytesRemaining: MAX_METADATA_BYTES_PER_SOURCE,
         operationsRemaining: MAX_METADATA_OPERATIONS_PER_SOURCE,
         recordsRemaining: MAX_METADATA_RECORDS_PER_SOURCE,
-        truncated: false,
+        truncatedInstances: new Set(),
       };
       raw.push(...(yield* groupTranscriptsByCwd(source, selectedTranscripts, metadataBudget)));
-      truncated ||= metadataBudget.truncated;
+      truncated ||= metadataBudget.truncatedInstances.size > 0;
+      const selectedPaths = new Set(selectedTranscripts.map((transcript) => transcript.filePath));
+      for (const transcript of transcriptCandidates) {
+        if (!selectedPaths.has(transcript.filePath)) {
+          metadataBudget.truncatedInstances.add(transcript.providerInstanceId);
+        }
+      }
+      for (const [index, report] of sourceReports.entries()) {
+        if (
+          report.provider === source &&
+          metadataBudget.truncatedInstances.has(report.providerInstanceId)
+        ) {
+          sourceReports[index] = { ...report, truncated: true };
+        }
+      }
     }
 
     return { candidates: raw, truncated, sourceReports };
@@ -1307,6 +1340,8 @@ export const make = Effect.gen(function* () {
   let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
     const collected = yield* collectCandidates();
     const raw = collected.candidates;
     let truncated = collected.truncated;
@@ -1372,7 +1407,13 @@ export const make = Effect.gen(function* () {
       }
       if (key === "") continue;
       for (const transcript of candidate.transcripts) {
-        if (transcript.sessionId === null) continue;
+        if (
+          transcript.sessionId === null ||
+          transcript.mtimeMs === null ||
+          transcript.mtimeMs < cutoffMs ||
+          transcript.mtimeMs > nowMs
+        )
+          continue;
         sessionFacts.push({
           key,
           provider: candidate.source,
