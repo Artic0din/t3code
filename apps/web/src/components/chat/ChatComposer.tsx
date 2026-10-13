@@ -2320,7 +2320,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
+  const promptPresetsEnabled = activePendingProgress === null && pendingUserInputs.length === 0;
   const promptPresets = useComposerPromptPresets({
+    enabled: promptPresetsEnabled,
     environmentId,
     threadRef: composerDraftTarget,
     draft: composerDraft,
@@ -2425,7 +2427,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
-  const [isPromptPresetMenuOpen, setIsPromptPresetMenuOpen] = useState(false);
+  const [isPromptPresetMenuOpen, setIsPromptPresetMenuOpen] = useComposerMenuState(
+    !promptPresetsEnabled,
+    JSON.stringify([environmentId, composerDraftTargetKey]),
+  );
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -5096,6 +5101,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setIsStashMenuOpen((open) => !open);
   }, [expandMobileComposer, isComposerCollapsedMobile]);
   const togglePromptPresetMenu = useCallback(() => {
+    if (!promptPresetsEnabled) return;
     setIsStashMenuOpen(false);
     if (isComposerCollapsedMobile) {
       expandMobileComposer();
@@ -5103,7 +5109,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return;
     }
     setIsPromptPresetMenuOpen((open) => !open);
-  }, [expandMobileComposer, isComposerCollapsedMobile]);
+  }, [expandMobileComposer, isComposerCollapsedMobile, promptPresetsEnabled]);
   const toggleTasksDrawer = useCallback(() => {
     setIsTasksDrawerOpen((open) => !open);
   }, []);
@@ -6837,7 +6843,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </ComposerBanner.Attachment>
           ) : null}
         </ComposerBanner.Column>
-        {!isComposerApprovalState ? (
+        {!isComposerApprovalState && promptPresetsEnabled ? (
           <ComposerPromptPresetButton
             count={promptPresets.presets.length}
             menuOpen={isPromptPresetMenuOpen}

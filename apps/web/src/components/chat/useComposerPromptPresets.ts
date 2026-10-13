@@ -22,6 +22,7 @@ import { toastManager } from "../ui/toast";
 import type { ComposerThreadDraftState, ComposerThreadTarget } from "../../composerDraftStore";
 
 export function useComposerPromptPresets(input: {
+  readonly enabled: boolean;
   readonly environmentId: EnvironmentId;
   readonly threadRef: ComposerThreadTarget;
   readonly draft: ComposerThreadDraftState;
@@ -68,7 +69,10 @@ export function useComposerPromptPresets(input: {
       supportsProviderSwitchingViaHandoff,
     ],
   );
-  useEffect(() => registerActiveComposerDraftTarget(activeTarget), [activeTarget]);
+  useEffect(
+    () => (input.enabled ? registerActiveComposerDraftTarget(activeTarget) : undefined),
+    [activeTarget, input.enabled],
+  );
 
   const report = (message: string) => {
     setError(message);
@@ -79,6 +83,7 @@ export function useComposerPromptPresets(input: {
     presets,
     error,
     apply(presetId: string, disposition: PromptPresetApplyDisposition) {
+      if (!input.enabled) return false;
       const result = applyPromptPresetToComposer({
         threadRef: input.threadRef,
         draft: input.draft,
@@ -103,6 +108,7 @@ export function useComposerPromptPresets(input: {
       readonly includeAgentSettings: boolean;
       readonly replaceInstructions: boolean;
     }) {
+      if (!input.enabled) return false;
       const previous = presets.find((preset) => preset.id === saveInput.id);
       const next = buildPromptPreset({
         id: saveInput.id ?? createPromptPresetId(),
@@ -127,6 +133,7 @@ export function useComposerPromptPresets(input: {
       return true;
     },
     remove(presetId: string) {
+      if (!input.enabled) return;
       void updateSettings({
         environmentId: input.environmentId,
         input: { patch: { promptPresetMutation: { operation: "delete", presetId } } },

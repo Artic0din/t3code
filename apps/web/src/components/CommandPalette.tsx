@@ -1974,6 +1974,7 @@ function OpenCommandPaletteDialog(props: {
       providers: presetServerConfig.providers,
       effectiveAgentSettings: activeComposerDraftTarget?.effectiveAgentSettings,
       threadState: activeComposerDraftTarget?.threadState,
+      expectedActiveTarget: activeComposerDraftTarget,
     });
     if (!result.ok) {
       toastManager.add({
@@ -1984,7 +1985,7 @@ function OpenCommandPaletteDialog(props: {
     }
     return Promise.resolve();
   };
-  actionItems.push({
+  const promptPresetItem: CommandPaletteSubmenuItem = {
     kind: "submenu",
     value: "action:prompt-presets",
     searchTerms: ["prompt", "preset", "instructions", "model", "mode"],
@@ -2016,6 +2017,7 @@ function OpenCommandPaletteDialog(props: {
                   searchTerms: [preset.name, "apply", "insert"],
                   title: `Apply ${preset.name}`,
                   icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+                  disabled: presetThreadRef === null,
                   run: () => applyPalettePromptPreset(preset.id, "insert"),
                 },
                 {
@@ -2024,12 +2026,14 @@ function OpenCommandPaletteDialog(props: {
                   searchTerms: [preset.name, "replace"],
                   title: `Replace draft with ${preset.name}`,
                   icon: <BookmarkIcon className={ITEM_ICON_CLASS} />,
+                  disabled: presetThreadRef === null,
                   run: () => applyPalettePromptPreset(preset.id, "replace"),
                 },
               ]),
       },
     ],
-  });
+  };
+  actionItems.push(promptPresetItem);
 
   if (activeThreadReferenceCopyTarget !== null) {
     actionItems.push({
@@ -2463,6 +2467,8 @@ function OpenCommandPaletteDialog(props: {
 
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,
+    liveSubmenuGroups:
+      currentView?.groups[0]?.value === "prompt-presets" ? promptPresetItem.groups : undefined,
     query: deferredQuery,
     isInSubmenu: currentView !== null,
     projectSearchItems: projectSearchItems,

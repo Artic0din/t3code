@@ -12,9 +12,14 @@ import {
 } from "@t3tools/client-runtime/promptPresets";
 import {
   useComposerDraftStore,
+  composerTargetKey,
   type ComposerThreadDraftState,
   type ComposerThreadTarget,
 } from "../composerDraftStore";
+import {
+  getActiveComposerDraftTarget,
+  type ActiveComposerDraftTarget,
+} from "../activeComposerDraftTarget";
 
 export function composerDraftToPromptPresetDraft(
   draft: ComposerThreadDraftState,
@@ -49,16 +54,31 @@ export function applyPromptPresetToComposer(input: {
   readonly providers: Parameters<typeof promptPresetCapabilitiesFromProviders>[0];
   readonly effectiveAgentSettings?: PromptPresetAgentSettings | undefined;
   readonly threadState?: PromptPresetThreadState | undefined;
+  readonly expectedActiveTarget?: ActiveComposerDraftTarget | null | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
+  const activeTarget =
+    input.expectedActiveTarget === undefined ? null : getActiveComposerDraftTarget();
+  if (
+    input.expectedActiveTarget !== undefined &&
+    (!input.expectedActiveTarget ||
+      !activeTarget ||
+      activeTarget.environmentId !== input.expectedActiveTarget.environmentId ||
+      composerTargetKey(activeTarget.threadRef) !== composerTargetKey(input.threadRef))
+  ) {
+    return { ok: false, code: "missing", message: "Open a composer before applying a preset." };
+  }
   const stored = composerDraftToPromptPresetDraft(input.draft);
-  const current = { ...stored, ...input.effectiveAgentSettings };
+  const current = {
+    ...stored,
+    ...(activeTarget?.effectiveAgentSettings ?? input.effectiveAgentSettings),
+  };
   const result = applyPromptPreset({
     draft: current,
     presets: input.presets,
     presetId: input.presetId,
     disposition: input.disposition,
     capabilities: promptPresetCapabilitiesFromProviders(input.providers),
-    threadState: input.threadState,
+    threadState: activeTarget?.threadState ?? input.threadState,
   });
   if (!result.ok) return result;
   const preset = input.presets.find((entry) => entry.id === input.presetId);

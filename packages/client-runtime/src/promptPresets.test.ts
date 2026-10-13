@@ -63,6 +63,39 @@ function preset(overrides: Partial<PromptPreset> = {}): PromptPreset {
 }
 
 describe("applyPromptPreset", () => {
+  it.each(["insert", "replace"] as const)(
+    "strips legacy preset references on %s while preserving destination context",
+    (disposition) => {
+      const current = draft({ text: "Keep [local](t3-context://v1/file/local)" });
+      const result = applyPromptPreset({
+        draft: current,
+        presets: [
+          preset({
+            instructions:
+              "Inspect [log](t3-context://v1/terminal/old), [src/app.ts](t3-context://v1/file/local), ![shot.png](t3-context://v1/image/old_image), and [Prior chat](t3-context://v1/thread/thread_a).",
+          }),
+        ],
+        presetId: "plan",
+        disposition,
+        capabilities,
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: {
+          ...current,
+          text:
+            disposition === "replace"
+              ? "Inspect log, src/app.ts, shot.png, and Prior chat."
+              : current.text + "\n\nInspect log, src/app.ts, shot.png, and Prior chat.",
+        },
+      });
+      if (result.ok) {
+        expect(result.value.context).toBe(current.context);
+        expect(result.value.attachments).toBe(current.attachments);
+      }
+    },
+  );
+
   it("rejects agent settings during queued editing before changing the prompt", () => {
     const current = draft();
     const result = applyPromptPreset({
@@ -301,6 +334,22 @@ describe("applyPromptPreset", () => {
 });
 
 describe("prompt preset records", () => {
+  it("saves context chips as plain labels and preserves unrelated text and links", () => {
+    const instructions =
+      "Inspect [Build output](t3-context://v1/terminal/log), [src/app.ts](t3-context://v1/file/local), ![shot.png](t3-context://v1/image/img), and [Prior chat](t3-context://v1/thread/thread_a). Keep [docs](https://example.com/docs) and literal t3-context text.";
+    const saved = buildPromptPreset({
+      id: "portable",
+      name: "Portable",
+      instructions,
+      includeAgentSettings: false,
+      draft: draft(),
+    });
+    expect(saved.instructions).toBe(
+      "Inspect Build output, src/app.ts, shot.png, and Prior chat. Keep [docs](https://example.com/docs) and literal t3-context text.",
+    );
+    expect(saved).not.toHaveProperty("context");
+  });
+
   it("rejects an empty name and a full list, and edits by id", () => {
     const saved = savePromptPreset([], preset());
     expect(saved.ok).toBe(true);

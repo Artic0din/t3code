@@ -76,6 +76,7 @@ export function ComposerPromptPresetMenu(props: {
           className="flex flex-col gap-2 px-3 pb-2"
           onSubmit={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             const saved = props.onSave({
               ...(editingId ? { id: editingId } : {}),
               name,

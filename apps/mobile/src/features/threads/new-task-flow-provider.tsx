@@ -1270,28 +1270,30 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [],
   );
 
+  const presetEnvironmentId = editingPendingTask?.environmentId ?? selectedEnvironmentId;
   useEffect(() => {
     if (
       selectedProjectDraftKey !== null &&
-      selectedEnvironmentId !== null &&
-      isNewTaskDraftKey(selectedProjectDraftKey)
+      presetEnvironmentId !== null &&
+      (isNewTaskDraftKey(selectedProjectDraftKey) || editingPendingTask !== null)
     ) {
       return registerActiveComposerDraftTarget({
         draftKey: selectedProjectDraftKey,
-        environmentId: selectedEnvironmentId,
+        environmentId: presetEnvironmentId,
         effectiveAgentSettings: {
           providerInstanceId: selectedModel?.instanceId ?? null,
           model: selectedModel?.model ?? null,
           runtimeMode,
           interactionMode,
         },
-        threadState: { hasStartedSession: false },
+        threadState: { hasStartedSession: false, isQueuedEdit: editingPendingTask !== null },
       });
     }
     return undefined;
   }, [
-    selectedEnvironmentId,
+    presetEnvironmentId,
     selectedProjectDraftKey,
+    editingPendingTask,
     selectedModel?.instanceId,
     selectedModel?.model,
     runtimeMode,

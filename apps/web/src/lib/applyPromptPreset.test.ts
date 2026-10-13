@@ -25,6 +25,36 @@ const providers = [
 beforeEach(() => useComposerDraftStore.setState({ draftsByThreadKey: {} }));
 
 describe("preset composer application", () => {
+  it("rejects a cached palette action after pending input removes the active composer", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(target, "Hidden ordinary draft");
+    const activeTarget = {
+      environmentId: target.environmentId,
+      threadRef: target,
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "old",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+      },
+      threadState: { hasStartedSession: false },
+    };
+    const unregister = registerActiveComposerDraftTarget(activeTarget);
+    const cachedAction = () =>
+      applyPromptPresetToComposer({
+        threadRef: target,
+        draft: readComposerThreadDraft(target),
+        expectedActiveTarget: activeTarget,
+        presets: [{ id: "text", name: "Text", instructions: "Wrong target" }],
+        presetId: "text",
+        disposition: "replace",
+        providers,
+      });
+    unregister();
+    expect(cachedAction()).toMatchObject({ ok: false, code: "missing" });
+    expect(readComposerThreadDraft(target).prompt).toBe("Hidden ordinary draft");
+  });
+
   it("records explicit preset choices even when they match inherited defaults", () => {
     const result = applyPromptPresetToComposer({
       threadRef: target,

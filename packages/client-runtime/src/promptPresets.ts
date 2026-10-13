@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@t3tools/shared/model";
+import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 
 export type PromptPresetApplyDisposition = "insert" | "replace";
 
@@ -123,7 +124,10 @@ export function buildPromptPreset(input: {
   return {
     id: input.id,
     name: input.name,
-    instructions: input.instructions,
+    instructions: replaceComposerContextReferences(
+      input.instructions,
+      (reference) => reference.label,
+    ),
     ...(source?.providerInstanceId !== undefined
       ? { providerInstanceId: source.providerInstanceId }
       : {}),
@@ -262,13 +266,17 @@ export function applyPromptPreset(input: {
     );
   }
 
+  const instructions = replaceComposerContextReferences(
+    preset.instructions,
+    (reference) => reference.label,
+  );
   return {
     ok: true,
     value: {
       text:
         input.disposition === "replace"
-          ? preset.instructions
-          : insertInstructions(input.draft.text, preset.instructions),
+          ? instructions
+          : insertInstructions(input.draft.text, instructions),
       attachments: input.draft.attachments,
       context: input.draft.context,
       providerInstanceId,
