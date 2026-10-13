@@ -81,6 +81,7 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { gitHubApiHostForRemote } from "../sourceControl/GitHubCli.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
@@ -284,16 +285,22 @@ function issueRepositoryKey(value: string): string | null {
   }
 }
 
-function hostedRepositoryKey(remoteUrl: string): string | null {
+function hostedRepositoryKey(
+  remoteUrl: string,
+  expectedRepositoryKey: string | null,
+): string | null {
   const url = remoteUrl.trim().replace(/^([a-zA-Z0-9._-]+@[^:/\s]+:)\/+/u, "$1");
   if (!/^(?:(?:ssh|https?|git):\/\/|[a-zA-Z0-9._-]+@[^:/\s]+:)/iu.test(url)) {
     return null;
   }
-  const segments = normalizeGitRemoteUrl(url)
-    .split("/")
-    .filter((segment) => segment.length > 0);
+  const normalized = normalizeGitRemoteUrl(url);
+  if (normalized.includes("://")) return null;
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
   if (!segments[0] || segments.length < 3) return null;
-  return segments.join("/");
+  const repositoryKey = segments.join("/");
+  if (repositoryKey === expectedRepositoryKey) return repositoryKey;
+  const apiHost = gitHubApiHostForRemote(url);
+  return apiHost === null ? repositoryKey : [apiHost, ...segments.slice(1)].join("/");
 }
 
 function parseRepositoryNameFromPullRequestUrl(url: string): string | null {
@@ -2514,13 +2521,15 @@ export const make = Effect.gen(function* () {
           .execute({
             operation: "GitManager.prepareIssueThread.remoteRepository",
             cwd: input.cwd,
-            args: ["config", "--get", `remote.${remoteName}.url`],
+            args: ["config", "--get-all", `remote.${remoteName}.url`],
             allowNonZeroExit: true,
           })
           .pipe(
-            Effect.map((result) =>
-              result.exitCode === 0 ? hostedRepositoryKey(result.stdout.trim()) : null,
-            ),
+            Effect.map((result) => {
+              if (result.exitCode !== 0) return null;
+              const firstUrl = result.stdout.split("\n").find((line) => line.trim().length > 0);
+              return firstUrl === undefined ? null : hostedRepositoryKey(firstUrl, repositoryKey);
+            }),
           );
       // Local refs use branch config. Remote refs use that remote's URL. Missing either stays
       // reusable so a title change still finds the branch.
@@ -2698,14 +2707,20 @@ export const make = Effect.gen(function* () {
         others.sort((left, right) => Number(right === "origin") - Number(left === "origin"));
         for (const remote of [...matching, ...others]) {
           if (yield* refExists(`refs/remotes/${remote}/${baseBranch}`)) {
-            return `${remote}/${baseBranch}`;
+            return {
+              refName: `refs/remotes/${remote}/${baseBranch}`,
+              isIssueRepository: matching.includes(remote),
+            };
           }
         }
         return null;
       });
-      const startRef = (yield* refExists(`refs/heads/${baseBranch}`))
-        ? baseBranch
-        : yield* remoteStartRef;
+      const remoteBase = yield* remoteStartRef;
+      const startRef = remoteBase?.isIssueRepository
+        ? remoteBase.refName
+        : (yield* refExists(`refs/heads/${baseBranch}`))
+          ? baseBranch
+          : (remoteBase?.refName ?? null);
       if (startRef === null) {
         return yield* new GitManagerError({
           operation: "prepareIssueThread",
