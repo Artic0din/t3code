@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProjectId,
+  ProviderInstanceId,
   type ServerSettings,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -99,6 +100,43 @@ const checkout = resolveSettingsScope(
   [group],
   environments,
 );
+
+describe("environment-local fallback lists", () => {
+  const models = [{ instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" }];
+
+  it("rejects a model list written to all environments", () => {
+    const plan = planScopedSettingsPatch(all, environments, { modelFallback: { models } });
+    expect(plan.serverWrites).toEqual([]);
+    expect(plan.unavailableReason).toBe("Select one environment to edit its fallback models.");
+  });
+
+  it("writes the list to the selected environment and can toggle all environments", () => {
+    expect(
+      planScopedSettingsPatch(named, environments, { modelFallback: { models } }).serverWrites,
+    ).toEqual([
+      {
+        environmentId: server.environmentId,
+        label: server.label,
+        patch: { modelFallback: { models } },
+      },
+    ]);
+    expect(
+      planScopedSettingsPatch(all, environments, { modelFallback: { enabled: false } })
+        .serverWrites,
+    ).toEqual([
+      {
+        environmentId: laptop.environmentId,
+        label: laptop.label,
+        patch: { modelFallback: { enabled: false } },
+      },
+      {
+        environmentId: server.environmentId,
+        label: server.label,
+        patch: { modelFallback: { enabled: false } },
+      },
+    ]);
+  });
+});
 
 describe("scoped settings targets", () => {
   it("uses the named environment even when a different primary is available", () => {

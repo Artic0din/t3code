@@ -7,12 +7,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
-import { decideFromProjection, modelFallbackCommand } from "./modelFallback.ts";
+import { decideFromProjection, nextModelFallbackCommand } from "./modelFallback.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSwitch from "./ProviderSwitchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -54,6 +53,8 @@ const makeSweep = Effect.gen(function* () {
         return {
           modelSelection: run.modelSelection,
           ordinal: run.ordinal,
+          status: run.status,
+          startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
           completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
           failureClass: failure?.class ?? null,
           message: failure?.message ?? "",
@@ -107,28 +108,10 @@ const makeSweep = Effect.gen(function* () {
       }
       const run = latestExecutedRun(projection.runs);
       if (run === null || decision.type === "leave-paused") continue;
-      let attempt = 1;
-      let command = modelFallbackCommand({
-        threadId: candidate.id,
-        runId: run.id,
-        decision,
-        attempt,
-      });
-      if (command === null) continue;
-      while (attempt < 8) {
-        const prior = yield* commandReceipts
-          .getByCommandId(command.commandId)
-          .pipe(Effect.orElseSucceed(() => Option.none()));
-        if (Option.isNone(prior) || prior.value.status !== "rejected") break;
-        attempt += 1;
-        command = modelFallbackCommand({
-          threadId: candidate.id,
-          runId: run.id,
-          decision,
-          attempt,
-        });
-        if (command === null) break;
-      }
+      const command = yield* nextModelFallbackCommand(
+        { threadId: candidate.id, runId: run.id, decision },
+        commandReceipts.getByCommandId,
+      );
       if (command === null) continue;
       yield* threads.dispatch(command).pipe(
         Effect.catchCause((cause) =>

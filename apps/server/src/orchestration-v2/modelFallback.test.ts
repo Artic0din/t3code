@@ -7,13 +7,17 @@ import {
   ThreadId,
   type ModelSelection,
 } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import {
   MODEL_FALLBACK_NOTE_PREFIX,
   decideFromProjection,
   modelFallbackCommand,
+  nextModelFallbackCommand,
   planModelFallback,
   presentedDelegatedStatus,
+  type FallbackRunEvidence,
   type ModelFallbackSignal,
 } from "./modelFallback.ts";
 
@@ -161,15 +165,16 @@ describe("planModelFallback", () => {
     if (first.type !== "switch") return;
     assert.deepEqual(first.to, gpt);
 
+    const spendLimit: ModelFallbackSignal = {
+      class: "usage_limit",
+      message: "You've hit your monthly spend limit",
+      resetAt: null,
+    };
     const again = plan({
       current: gpt,
       tried: [opus, gpt],
-      exhaustedInstanceIds: [claude],
-      signal: {
-        class: "usage_limit",
-        message: "You've hit your monthly spend limit",
-        resetAt: null,
-      },
+      exhausted: [{ selection: opus, signal: spendLimit }],
+      signal: spendLimit,
     });
     assert.equal(again.type, "pause");
     if (again.type !== "pause") return;
@@ -249,6 +254,22 @@ describe("planModelFallback", () => {
 });
 
 describe("decideFromProjection", () => {
+  const limited = (
+    modelSelection: ModelSelection,
+    ordinal: number,
+    code: string | null,
+  ): FallbackRunEvidence => ({
+    modelSelection,
+    ordinal,
+    status: "failed",
+    startedAt: `2026-10-12T1${ordinal}:00:00.000Z`,
+    completedAt: `2026-10-12T1${ordinal}:30:00.000Z`,
+    failureClass: "usage_limit",
+    message: "You've hit your weekly limit",
+    code,
+    resetAt: "2026-10-20T00:00:00.000Z",
+  });
+
   it("ignores queued runs when building the quota chain", () => {
     const decision = decideFromProjection({
       enabled: true,
@@ -257,17 +278,12 @@ describe("decideFromProjection", () => {
       continuation: "supported",
       current: opus,
       runs: [
-        {
-          modelSelection: opus,
-          ordinal: 1,
-          completedAt: "2026-10-12T12:00:00.000Z",
-          failureClass: "usage_limit",
-          message: "You've hit your weekly limit",
-          resetAt: "2026-10-20T00:00:00.000Z",
-        },
+        limited(opus, 1, null),
         {
           modelSelection: opus,
           ordinal: 2,
+          status: "queued",
+          startedAt: null,
           completedAt: null,
           failureClass: null,
           message: "",
@@ -279,15 +295,95 @@ describe("decideFromProjection", () => {
     if (decision.type !== "switch") return;
     assert.deepEqual(decision.to, gpt);
   });
+
+  it("ignores a queued follow-up cancelled before it started", () => {
+    const decision = decideFromProjection({
+      enabled: true,
+      models: [sonnet, gpt],
+      unavailableInstanceIds: [],
+      continuation: "supported",
+      current: opus,
+      runs: [
+        limited(opus, 1, "seven_day_opus"),
+        {
+          modelSelection: opus,
+          ordinal: 2,
+          status: "cancelled",
+          startedAt: null,
+          completedAt: "2026-10-12T12:00:00.000Z",
+          failureClass: null,
+          message: "",
+          resetAt: null,
+        },
+      ],
+    });
+    assert.equal(decision.type, "switch");
+    if (decision.type !== "switch") return;
+    assert.deepEqual(decision.to, sonnet);
+  });
+
+  it("keeps every family the chain exhausted, not only the newest", () => {
+    const decision = decideFromProjection({
+      enabled: true,
+      models: [opus, gpt, sonnet, opusNext],
+      unavailableInstanceIds: [],
+      continuation: "supported",
+      current: sonnet,
+      runs: [
+        limited(opus, 1, "seven_day_opus"),
+        limited(gpt, 2, "weekly_gpt"),
+        limited(sonnet, 3, "seven_day_sonnet"),
+      ],
+    });
+    assert.equal(decision.type, "pause");
+    if (decision.type !== "pause") return;
+    assert.equal(decision.reason, "exhausted");
+  });
+});
+
+describe("nextModelFallbackCommand", () => {
+  it.effect("keeps retrying past any number of rejected attempts", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-1");
+      const runId = RunId.make("run-1");
+      const rejected = new Set(
+        Array.from({ length: 9 }, (_, index) =>
+          String(
+            modelFallbackCommand({ threadId, runId, decision: plan(), attempt: index + 1 })
+              ?.commandId,
+          ),
+        ),
+      );
+      const command = yield* nextModelFallbackCommand({ threadId, runId, decision: plan() }, (id) =>
+        Effect.succeed(
+          rejected.has(String(id)) ? Option.some({ status: "rejected" }) : Option.none(),
+        ),
+      );
+      assert.equal(
+        command?.commandId,
+        CommandId.make(
+          `model-fallback:${threadId}:${runId}:${gpt.instanceId}:${gpt.model}:attempt-10`,
+        ),
+      );
+    }),
+  );
 });
 
 describe("presentedDelegatedStatus", () => {
-  it("does not present a quota-interrupted child as completed", () => {
+  it("requires provider failure evidence to override a completed answer", () => {
+    assert.equal(
+      presentedDelegatedStatus({
+        runStatus: "completed",
+        resultText: "Implemented usage limit handling and monthly spend limit reporting.",
+        failureClass: null,
+      }),
+      "completed",
+    );
     assert.equal(
       presentedDelegatedStatus({
         runStatus: "completed",
         resultText: "The agent terminated early due to an API error and a usage limit.",
-        failureClass: null,
+        failureClass: "usage_limit",
       }),
       "failed",
     );
@@ -295,7 +391,7 @@ describe("presentedDelegatedStatus", () => {
       presentedDelegatedStatus({
         runStatus: "completed",
         resultText: "You've hit your monthly spend limit",
-        failureClass: null,
+        failureClass: "usage_limit",
       }),
       "failed",
     );

@@ -23,31 +23,13 @@ import {
 import { planAutoSettleSettingsSync, type AutoSettleSettings } from "./autoSettleSettingsSync";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
+  mobileModelFallbackControl,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
   uniformMobileSetting,
   type ScopedMobileSettingsTarget,
 } from "./settings-scoped-server";
-
-function uniformModelFallbackEnabled(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "settings">[],
-): boolean | null {
-  const reference = targets[0];
-  if (!reference) return null;
-  const enabled = reference.settings.modelFallback.enabled;
-  return targets.every((target) => target.settings.modelFallback.enabled === enabled)
-    ? enabled
-    : null;
-}
-
-function uniformModelFallbackConfigured(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "settings">[],
-): boolean {
-  return (
-    targets.length > 0 && targets.every((target) => target.settings.modelFallback.models.length > 0)
-  );
-}
 
 export function SettingsThreadsRouteScreen() {
   const insets = useSafeAreaInsets();
@@ -177,6 +159,7 @@ function AutoSettleSettingsRows() {
   };
 
   const afterDays = referenceSettings.sidebarAutoSettleAfterDays;
+  const fallbackControl = mobileModelFallbackControl(displayTargets);
 
   return (
     <View className="gap-6">
@@ -208,11 +191,12 @@ function AutoSettleSettingsRows() {
           <SettingsSwitchRow
             icon="clock"
             label="Automatic model fallback"
-            value={uniformModelFallbackEnabled(displayTargets)}
-            disabled={disabled || !uniformModelFallbackConfigured(displayTargets)}
+            value={fallbackControl.value}
+            mixedValue={fallbackControl.mixedValue}
+            disabled={disabled || !fallbackControl.canToggle}
             onValueChange={(value) => writeToAll({ modelFallback: { enabled: value } })}
           />
-          {!uniformModelFallbackConfigured(displayTargets) ? (
+          {!fallbackControl.configured ? (
             <View className="px-4 pb-3">
               <Text className="text-muted-foreground text-sm android:text-xs">
                 Add fallback models in web or desktop Settings before enabling this on mobile.

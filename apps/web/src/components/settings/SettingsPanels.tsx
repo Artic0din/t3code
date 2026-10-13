@@ -2379,6 +2379,7 @@ export function GeneralSettingsPanel() {
                 aria-label="Automatic model fallback"
               />
               <textarea
+                disabled={scope.kind !== "environment" || !isEnvironmentScope}
                 key={formatModelFallbackList(settings.modelFallback.models)}
                 defaultValue={formatModelFallbackList(settings.modelFallback.models)}
                 rows={4}
@@ -2394,6 +2395,11 @@ export function GeneralSettingsPanel() {
                   })
                 }
               />
+              {scope.kind !== "environment" || !isEnvironmentScope ? (
+                <p className="text-muted-foreground text-xs">
+                  Select one environment to edit its fallback models.
+                </p>
+              ) : null}
             </div>
           }
         />

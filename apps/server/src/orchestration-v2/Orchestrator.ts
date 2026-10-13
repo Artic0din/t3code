@@ -60,7 +60,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import {
   decideFromProjection,
   MODEL_FALLBACK_NOTE_PREFIX,
-  modelFallbackCommand,
+  nextModelFallbackCommand,
   presentedDelegatedStatus,
 } from "./modelFallback.ts";
 import {
@@ -4474,6 +4474,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           latestExecutedRun(projection.runs)?.id !== source.id ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
+          projection.thread.settledOverride === "settled" ||
           (projection.thread.snoozedUntil != null &&
             DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
         ) {
@@ -4569,6 +4570,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           latestExecutedRun(projection.runs)?.id !== source.id ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
+          projection.thread.settledOverride === "settled" ||
           projection.runtimeRequests.some((request) => request.status === "pending") ||
           (projection.thread.snoozedUntil != null &&
             DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
@@ -9782,8 +9784,17 @@ ${result.text}`;
       const parentTurnItem = parentProjection.turnItems.find(
         (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
       );
+      const childProviderThread =
+        childRun.providerThreadId === null
+          ? undefined
+          : childProjection.providerThreads.find(
+              (candidate) => candidate.id === childRun.providerThreadId,
+            );
       const updatedTask: OrchestrationV2Subagent = {
         ...task,
+        driver: childProviderThread?.driver ?? task.driver,
+        providerInstanceId: childRun.providerInstanceId,
+        model: childRun.modelSelection.model,
         providerThreadId: childRun.providerThreadId,
         status: statusForParent,
         result: resultText,
@@ -9802,12 +9813,6 @@ ${result.text}`;
         targetThreadId: parentThreadId,
         type: "subagent_result",
       });
-      const childProviderThread =
-        childRun.providerThreadId === null
-          ? undefined
-          : childProjection.providerThreads.find(
-              (candidate) => candidate.id === childRun.providerThreadId,
-            );
       const parentProviderThread =
         parentRun?.providerThreadId === null || parentRun?.providerThreadId === undefined
           ? undefined
@@ -9877,7 +9882,8 @@ ${result.text}`;
           threadId: parentThreadId,
           ...(task.runId === null ? {} : { runId: task.runId }),
           nodeId: task.id,
-          driver: task.driver,
+          driver: updatedTask.driver,
+          providerInstanceId: updatedTask.providerInstanceId,
           occurredAt: now,
           payload: completionPlan.task,
         },
@@ -9923,7 +9929,7 @@ ${result.text}`;
                 threadId: parentThreadId,
                 ...(parentNode.runId === null ? {} : { runId: parentNode.runId }),
                 nodeId: parentNode.id,
-                driver: task.driver,
+                driver: updatedTask.driver,
                 occurredAt: now,
                 payload: {
                   ...parentNode,
@@ -9941,10 +9947,12 @@ ${result.text}`;
                 threadId: parentThreadId,
                 ...(parentTurnItem.runId === null ? {} : { runId: parentTurnItem.runId }),
                 ...(parentTurnItem.nodeId === null ? {} : { nodeId: parentTurnItem.nodeId }),
-                driver: task.driver,
+                driver: updatedTask.driver,
                 occurredAt: now,
                 payload: {
                   ...parentTurnItem,
+                  driver: updatedTask.driver,
+                  providerInstanceId: updatedTask.providerInstanceId,
                   status: statusForParent,
                   result: resultText,
                   completedAt: now,
@@ -10754,7 +10762,7 @@ ${result.text}`;
             ),
           ),
         );
-      if (projection === null) {
+      if (projection === null || projection.thread.settledOverride === "settled") {
         return { switched: false, dispatchPending: false, pauseDetail: null };
       }
       const evidence = projection.runs.map((run) => {
@@ -10762,6 +10770,8 @@ ${result.text}`;
         return {
           modelSelection: run.modelSelection,
           ordinal: run.ordinal,
+          status: run.status,
+          startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
           completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
           failureClass: failure?.class ?? null,
           message: failure?.message ?? "",
@@ -10817,21 +10827,12 @@ ${result.text}`;
       if (run === null || decision.type === "leave-paused") {
         return { switched: false, dispatchPending: false, pauseDetail: null };
       }
-      let attempt = 1;
-      let command = modelFallbackCommand({ threadId, runId: run.id, decision, attempt });
+      const command = yield* nextModelFallbackCommand(
+        { threadId, runId: run.id, decision },
+        commandReceipts.getByCommandId,
+      );
       if (command === null) {
         return { switched: false, dispatchPending: false, pauseDetail: null };
-      }
-      while (attempt < 8) {
-        const prior = yield* commandReceipts
-          .getByCommandId(command.commandId)
-          .pipe(Effect.orElseSucceed(() => Option.none()));
-        if (Option.isNone(prior) || prior.value.status !== "rejected") break;
-        attempt += 1;
-        command = modelFallbackCommand({ threadId, runId: run.id, decision, attempt });
-        if (command === null) {
-          return { switched: false, dispatchPending: false, pauseDetail: null };
-        }
       }
       const dispatched = yield* dispatchWithReceipt(command).pipe(
         Effect.as(true),
@@ -10841,9 +10842,20 @@ ${result.text}`;
           ),
         ),
       );
+      const dispatchPending =
+        !dispatched && decision.type === "switch"
+          ? yield* projectionStore.getThread(threadId).pipe(
+              Effect.map((thread) => thread.settledOverride !== "settled"),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("model-fallback.recheck-failed", { threadId, cause }).pipe(
+                  Effect.as(true),
+                ),
+              ),
+            )
+          : false;
       return {
         switched: dispatched && decision.type === "switch",
-        dispatchPending: !dispatched && decision.type === "switch",
+        dispatchPending,
         pauseDetail: decision.type === "pause" ? decision.detail : null,
       };
     });
