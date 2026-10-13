@@ -1030,6 +1030,7 @@ export const layer: Layer.Layer<
       // Use saved text and actual native attachments when telemetry is absent.
       // Legacy attempts lack native identity; exclude their explicitly recovered
       // history, whose attachments were not replayed into the replacement thread.
+      // Retiring a plan filters handoff replay, but its text remains in native history.
       const nativeContextEstimate = Effect.gen(function* () {
         return sameNativeThread
           ? (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
@@ -1041,7 +1042,7 @@ export const layer: Layer.Layer<
                 (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
               )
                 return sum;
-              const historical = historicalMessage(item);
+              const historical = historicalMessage(item, { includeCancelledPlans: true });
               const nativeAttachments =
                 item.type === "user_message" &&
                 item.providerThreadId === providerThread.id &&

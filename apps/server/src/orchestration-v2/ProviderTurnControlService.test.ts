@@ -223,6 +223,7 @@ it.effect(
           getRuntimeRecoveryProjection: () => Effect.die("unused getRuntimeRecoveryProjection"),
           getPlan: () => Effect.die("unused"),
           getPriorIncompletePlanItems: () => Effect.die("unused plan replacement read"),
+          getNativePlanItems: () => Effect.die("unused native plan read"),
           hasUnpairedRunInterruptRequest: () => Effect.die("unused interrupt read"),
           getThreadAttachmentIds: () => Effect.die("Unused attachment lookup"),
           getTimelinePage: () => Effect.die("Unused timeline read"),

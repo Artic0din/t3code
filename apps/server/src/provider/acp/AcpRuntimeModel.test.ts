@@ -1091,6 +1091,20 @@ describe("AcpRuntimeModel", () => {
     });
   });
 
+  it("preserves empty legacy plan snapshots", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: { sessionUpdate: "plan", entries: [] },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(result.events).toEqual([
+      {
+        _tag: "PlanUpdated",
+        payload: { nativePlanId: "legacy", kind: "items", plan: [] },
+        rawPayload: { sessionId: "session-1", update: { sessionUpdate: "plan", entries: [] } },
+      },
+    ]);
+  });
+
   it("projects ACP v2 plan replacement and removal updates", () => {
     const replaced = parseSessionUpdateEvent({
       sessionId: "session-1",

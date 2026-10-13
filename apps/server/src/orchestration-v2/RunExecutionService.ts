@@ -444,6 +444,8 @@ export function routeProviderEvent(
     }
     case "plan.updated":
       return [ownsRun(event.plan.runId) || ownsChildThread(event.plan.threadId), state];
+    case "plan.removed":
+      return [ownsRun(event.runId) || ownsChildThread(event.threadId), state];
     case "runtime_request.updated":
       return [
         (event.threadId !== undefined && ownsChildThread(event.threadId)) ||

@@ -122,7 +122,7 @@ function todoTurn(input: {
     readonly status: "pending" | "running" | "completed";
   }>;
   readonly explanation?: string;
-}): OrchestrationV2TurnItem {
+}): Extract<OrchestrationV2TurnItem, { readonly type: "todo_list" }> {
   return {
     ...turnBase,
     id: TurnItemId.make(input.id),
@@ -340,6 +340,37 @@ describe("handoff budget", () => {
       [TurnItemId.make("item:todo-live")],
     );
   });
+
+  it.each(["todo_list", "proposed_plan"] as const)(
+    "counts retired %s text only for native occupancy",
+    (kind) => {
+      const plan = {
+        ...todoTurn({
+          id: "item:retired-native",
+          planId: "plan:retired-native",
+          ordinal: 1,
+          steps: [{ status: "pending", text: "RETIRED_NATIVE_TEXT" }],
+        }),
+        status: "cancelled" as const,
+      };
+      const item =
+        kind === "todo_list"
+          ? plan
+          : {
+              ...plan,
+              type: "proposed_plan" as const,
+              markdown: "RETIRED_NATIVE_TEXT",
+              streaming: false,
+            };
+      assert.isNull(historicalMessage(item));
+      const native = historicalMessage(item, { includeCancelledPlans: true });
+      assert.equal(
+        native?.text,
+        kind === "todo_list" ? "pending: RETIRED_NATIVE_TEXT" : "RETIRED_NATIVE_TEXT",
+      );
+      assert.equal(Buffer.byteLength(native!.text), kind === "todo_list" ? 28 : 19);
+    },
+  );
 
   it("keeps the newest distinct plan when older plans fill a tight budget", () => {
     const selected = selectHistory({

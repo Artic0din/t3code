@@ -294,7 +294,9 @@ export function findLatestProposedPlan(
   latestRunId: RunId | string | null | undefined,
 ): LatestProposedPlanState | null {
   if (projection === null) return null;
-  const plans = projection.plans.filter((plan) => plan.kind === "proposed_plan");
+  const plans = projection.plans
+    .filter((plan) => plan.kind === "proposed_plan")
+    .filter((plan) => plan.status !== "superseded");
   const candidates = latestRunId ? plans.filter((plan) => plan.runId === latestRunId) : plans;
   const plan = [...(candidates.length > 0 ? candidates : plans)]
     .toSorted(

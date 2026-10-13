@@ -147,8 +147,13 @@ function todoListText(item: Extract<OrchestrationV2TurnItem, { type: "todo_list"
 
 export function historicalMessage(
   item: OrchestrationV2TurnItem,
+  options?: { readonly includeCancelledPlans?: boolean },
 ): OrchestrationV2HistoricalMessage | null {
-  if ((item.type === "todo_list" || item.type === "proposed_plan") && item.status === "cancelled") {
+  if (
+    options?.includeCancelledPlans !== true &&
+    (item.type === "todo_list" || item.type === "proposed_plan") &&
+    item.status === "cancelled"
+  ) {
     return null;
   }
   let text: string;
