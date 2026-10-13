@@ -17,6 +17,16 @@ import {
 } from "./git.ts";
 
 describe("normalizeGitRemoteUrl", () => {
+  it("normalizes userless SCP repositories without reclassifying local paths", () => {
+    expect(normalizeGitRemoteUrl("github.com:T3Tools/T3Code.git")).toBe(
+      "github.com/t3tools/t3code",
+    );
+    expect(normalizeGitRemoteUrl("gitlab.example.com:group/project.git")).toBe(
+      "gitlab.example.com/group/project",
+    );
+    expect(normalizeGitRemoteUrl("C:/repos/project.git")).toBe("c:/repos/project");
+    expect(normalizeGitRemoteUrl("C:repos/project.git")).toBe("c:repos/project");
+  });
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {
     expect(normalizeGitRemoteUrl("git@github.com:T3Tools/T3Code.git")).toBe(
       "github.com/t3tools/t3code",

@@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -104,6 +105,8 @@ const node = (number: number, headRefName: string, owner = "acme") => ({
 function harness(input: {
   readonly remotes: string;
   readonly api: Partial<GitHubApi.GitHubApi["Service"]>;
+  readonly resolved?: string;
+  readonly environment?: NodeJS.ProcessEnv;
   readonly localBranches?: ReadonlyArray<string>;
 }) {
   const git: Array<readonly [string, unknown]> = [];
@@ -136,7 +139,11 @@ function harness(input: {
   const process = Layer.mock(VcsProcess.VcsProcess)({
     run: (args) =>
       Effect.succeed(
-        args.args[0] === "remote" ? processOutput(input.remotes) : processOutput("", 1),
+        args.args[0] === "remote"
+          ? processOutput(input.remotes)
+          : input.resolved === undefined
+            ? processOutput("", 1)
+            : processOutput(input.resolved),
       ),
   });
   const layer = Layer.effect(GitHubCli.GitHubCli, GitHubCli.make).pipe(
@@ -146,6 +153,7 @@ function harness(input: {
         process,
         Layer.mock(GitHubApi.GitHubApi)(input.api),
         NodeServices.layer,
+        Layer.succeed(HostProcessEnvironment, input.environment ?? {}),
       ),
     ),
   );
@@ -223,6 +231,208 @@ describe("selectGitHubBaseRepository", () => {
 });
 
 describe("GitHubCli repository resolution", () => {
+  it.effect.each([
+    {
+      repository: undefined,
+      environment: {},
+      resolved: undefined,
+      remoteHost: "github.com",
+      expected: { host: "github.com", owner: "upstream", name: "r" },
+    },
+    {
+      repository: undefined,
+      environment: { GH_REPO: "other/r" },
+      resolved: undefined,
+      remoteHost: "github.com",
+      expected: { host: "github.com", owner: "other", name: "r" },
+    },
+    {
+      repository: undefined,
+      environment: { GH_REPO: "other/r", GH_HOST: "enterprise.test:8443" },
+      resolved: undefined,
+      remoteHost: "github.com",
+      expected: { host: "enterprise.test:8443", owner: "other", name: "r" },
+    },
+    {
+      repository: "enterprise.test:9443/explicit/r",
+      environment: { GH_REPO: "other/r" },
+      resolved: undefined,
+      remoteHost: "github.com",
+      expected: { host: "enterprise.test:9443", owner: "explicit", name: "r" },
+    },
+    {
+      repository: undefined,
+      environment: {},
+      resolved: "remote.origin.gh-resolved base",
+      remoteHost: "github-fork",
+      expected: { host: "github.com", owner: "fork", name: "r" },
+    },
+    {
+      repository: undefined,
+      environment: {},
+      resolved: "remote.origin.gh-resolved base",
+      remoteHost: "enterprise.test:8443",
+      expected: { host: "enterprise.test:8443", owner: "fork", name: "r" },
+    },
+  ])(
+    "resolves the actual PR target $expected.host/$expected.owner/$expected.name",
+    ({ repository, environment, resolved, remoteHost, expected }) => {
+      const paths: string[] = [];
+      const remote = (owner: string) =>
+        remoteHost.includes(":")
+          ? `https://${remoteHost}/${owner}/r.git`
+          : `git@${remoteHost}:${owner}/r.git`;
+      const { layer } = harness({
+        remotes: remotesOutput(["origin", remote("fork")], ["upstream", remote("upstream")]),
+        environment,
+        ...(resolved === undefined ? {} : { resolved }),
+        api: {
+          rest: (input) =>
+            Effect.sync(() => {
+              paths.push(`${input.host} ${input.path}`);
+              return restResponse({
+                full_name: `${expected.owner}/r`,
+                html_url: `https://${expected.host}/${expected.owner}/r`,
+                ssh_url: `git@${expected.host}:${expected.owner}/r.git`,
+                default_branch: "main",
+              });
+            }),
+        },
+      });
+      return Effect.gen(function* () {
+        const gh = yield* GitHubCli.GitHubCli;
+        const target = yield* gh.resolveRepository({
+          cwd: "/repo",
+          ...(repository === undefined ? {} : { repository }),
+          ...(remoteHost.includes(":") ? { host: remoteHost } : {}),
+        });
+        assert.deepStrictEqual(target, expected);
+        yield* gh.getDefaultBranch({
+          cwd: "/repo",
+          repository: `${target.host}/${target.owner}/${target.name}`,
+        });
+        assert.deepStrictEqual(paths, [
+          `${expected.host} repos/${expected.owner}/${expected.name}`,
+        ]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+  it.effect("honors the default repository mark on SSH aliases", () => {
+    const paths: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(
+        ["origin", "git@github-fork:fork/r.git"],
+        ["upstream", "git@github-upstream:upstream/r.git"],
+      ),
+      resolved: "remote.origin.gh-resolved base",
+      api: {
+        rest: (input) =>
+          Effect.sync(() => {
+            paths.push(`${input.host} ${input.path}`);
+            return restResponse({
+              full_name: "fork/r",
+              html_url: "https://github.com/fork/r",
+              ssh_url: "git@github.com:fork/r.git",
+              default_branch: "main",
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      assert.strictEqual(yield* gh.getDefaultBranch({ cwd: "/repo" }), "main");
+      assert.deepStrictEqual(paths, ["github.com repos/fork/r"]);
+    }).pipe(Effect.provide(layer));
+  });
+  it.effect("resolves a userless SCP checkout through GitHub repository discovery", () => {
+    const paths: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "github.com:acme/web.git"]),
+      api: {
+        rest: (input) =>
+          Effect.sync(() => {
+            paths.push(`${input.host} ${input.path}`);
+            return restResponse({
+              full_name: "acme/web",
+              html_url: "https://github.com/acme/web",
+              ssh_url: "git@github.com:acme/web.git",
+              default_branch: "master",
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      assert.strictEqual(yield* gh.getDefaultBranch({ cwd: "/repo" }), "master");
+      assert.deepStrictEqual(paths, ["github.com repos/acme/web"]);
+    }).pipe(Effect.provide(layer));
+  });
+  it.effect.each([
+    { target: "github.com/base/r", targetNetwork: null, expected: true },
+    { target: "github.com/another-fork/r", targetNetwork: "base/r", expected: true },
+    { target: "github.com/unrelated/r", targetNetwork: null, expected: false },
+    { target: "enterprise.test:8443/base/r", targetNetwork: null, expected: false },
+  ])("verifies fork ancestry for $target", ({ target, targetNetwork, expected }) => {
+    const { layer } = harness({
+      remotes: "",
+      api: {
+        rest: (input) =>
+          Effect.succeed(
+            restResponse({
+              full_name: input.path.slice("repos/".length),
+              html_url: `https://${input.host}/${input.path.slice("repos/".length)}`,
+              ssh_url: `git@${input.host}:repo.git`,
+              fork: input.path === "repos/fork/r" || targetNetwork !== null,
+              ...(input.path === "repos/fork/r"
+                ? { source: { full_name: "base/r" } }
+                : targetNetwork === null
+                  ? {}
+                  : { source: { full_name: targetNetwork } }),
+            }),
+          ),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      assert.strictEqual(
+        yield* gh.isForkOfRepository({
+          cwd: "/repo",
+          repository: "github.com/fork/r",
+          targetRepository: target,
+        }),
+        expected,
+      );
+    }).pipe(Effect.provide(layer));
+  });
+  it.effect.each([
+    "github.com/beta/two",
+    "enterprise.test/beta/two",
+    "enterprise.test:8443/beta/two",
+  ])("reads the explicit default repository %s instead of the checkout", (repository) => {
+    const paths: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "git@github.com:alpha/one.git"]),
+      api: {
+        rest: (input) =>
+          Effect.sync(() => {
+            paths.push(`${input.host} ${input.path}`);
+            return restResponse({
+              full_name: input.path === "repos/beta/two" ? "beta/two" : "alpha/one",
+              html_url: `https://${input.host}/beta/two`,
+              ssh_url: `git@${input.host}:beta/two.git`,
+              default_branch: input.path === "repos/beta/two" ? "master" : "main",
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      const input = { cwd: "/repo", repository };
+      assert.strictEqual(yield* gh.getDefaultBranch(input), "master");
+      assert.deepStrictEqual(paths, [`${repository.split("/")[0]} repos/beta/two`]);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reads the repository gh would pick from the remotes", () => {
     const paths: string[] = [];
     const { layer } = harness({
@@ -297,6 +507,35 @@ describe("GitHubCli repository resolution", () => {
 
 describe("GitHubCli.listPullRequestsByHead", () => {
   const remotes = remotesOutput(["origin", "git@github.com:acme/web.git"]);
+
+  it.effect("reads issue repository PRs on its explicit enterprise authority", () => {
+    const documents: GitHubApi.GitHubGraphQlInput[] = [];
+    const { layer } = harness({
+      remotes,
+      api: {
+        graphql: (input) =>
+          Effect.sync(() => {
+            documents.push(input);
+            return encodeJson({ data: { repository: { h0: { nodes: [] } } } });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const gh = yield* GitHubCli.GitHubCli;
+      const lookup = yield* gh
+        .listOpenPullRequests({
+          cwd: "/repo",
+          repository: "enterprise.test:8443/beta/two",
+          headSelector: "issue/31-work",
+        })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("50 millis");
+      assert.deepStrictEqual(yield* Fiber.join(lookup), []);
+      assert.strictEqual(documents[0]?.host, "enterprise.test:8443");
+      assert.strictEqual(documents[0]?.variables?.owner, "beta");
+      assert.strictEqual(documents[0]?.variables?.name, "two");
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("reads heads on one repository in one GraphQL document", () => {
     const documents: Array<GitHubApi.GitHubGraphQlInput> = [];
@@ -456,44 +695,56 @@ describe("GitHubCli.getPullRequest", () => {
 });
 
 describe("GitHubCli writes", () => {
-  it.effect("creates a cross-repository pull request with an owner:branch head", () => {
-    const requests: Array<GitHubApi.GitHubRestInput> = [];
-    const { layer } = harness({
-      remotes: remotesOutput(
-        ["origin", "git@github.com:me/web.git"],
-        ["upstream", "git@github.com:acme/web.git"],
-      ),
-      api: {
-        rest: (input) =>
-          Effect.sync(() => {
-            requests.push(input);
-            return restResponse({ number: 1 }, 201);
-          }),
-      },
-    });
-    return Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
-      yield* fs.writeFileString(bodyFile, "Body");
-      const gh = yield* GitHubCli.GitHubCli;
-      yield* gh.createPullRequest({
-        cwd: "/repo",
-        baseBranch: "main",
-        headSelector: "me:feature",
-        title: "Title",
-        bodyFile,
+  it.effect.each([null, "enterprise.test:8443/beta/two"])(
+    "creates a pull request with an explicit repository %s",
+    (repository) => {
+      const requests: Array<GitHubApi.GitHubRestInput> = [];
+      const { layer } = harness({
+        remotes: remotesOutput(
+          ["origin", "git@github.com:me/web.git"],
+          ["upstream", "git@github.com:acme/web.git"],
+        ),
+        api: {
+          rest: (input) =>
+            Effect.sync(() => {
+              requests.push(input);
+              return restResponse({ number: 1 }, 201);
+            }),
+        },
       });
-      assert.strictEqual(requests[0]!.method, "POST");
-      assert.strictEqual(requests[0]!.path, "repos/acme/web/pulls");
-      assert.deepStrictEqual(requests[0]!.body, {
-        base: "main",
-        head: "me:feature",
-        title: "Title",
-        body: "Body",
-        maintainer_can_modify: true,
-      });
-    }).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer)), Effect.scoped);
-  });
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
+        yield* fs.writeFileString(bodyFile, "Body");
+        const gh = yield* GitHubCli.GitHubCli;
+        const input = {
+          cwd: "/repo",
+          baseBranch: "main",
+          headSelector: "me:feature",
+          title: "Title",
+          bodyFile,
+          ...(repository === null ? {} : { repository }),
+        };
+        yield* gh.createPullRequest(input);
+        assert.strictEqual(requests[0]!.method, "POST");
+        assert.strictEqual(
+          requests[0]!.host,
+          repository === null ? "github.com" : "enterprise.test:8443",
+        );
+        assert.strictEqual(
+          requests[0]!.path,
+          repository === null ? "repos/acme/web/pulls" : "repos/beta/two/pulls",
+        );
+        assert.deepStrictEqual(requests[0]!.body, {
+          base: "main",
+          head: "me:feature",
+          title: "Title",
+          body: "Body",
+          maintainer_can_modify: true,
+        });
+      }).pipe(Effect.provide(Layer.merge(layer, NodeServices.layer)), Effect.scoped);
+    },
+  );
 
   it.effect("creates a repository under an organization the viewer is not", () => {
     const requests: Array<string> = [];

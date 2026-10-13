@@ -44,6 +44,16 @@ describe("source control presentation", () => {
 });
 
 describe("detectSourceControlProviderFromRemoteUrl", () => {
+  it("detects userless SCP providers while preserving local paths", () => {
+    expect(detectSourceControlProviderFromRemoteUrl("github.com:owner/repo.git")).toEqual({
+      kind: "github",
+      name: "GitHub",
+      baseUrl: "https://github.com",
+    });
+    expect(detectSourceControlProviderFromRemoteUrl("C:/repos/project.git")).toBeNull();
+    expect(detectSourceControlProviderFromRemoteUrl("C:repos/project.git")).toBeNull();
+    expect(detectSourceControlProviderFromRemoteUrl("./folder:repos/project.git")).toBeNull();
+  });
   it("detects common source control hosts", () => {
     expect(detectSourceControlProviderFromRemoteUrl("git@github.com:owner/repo.git")?.kind).toBe(
       "github",

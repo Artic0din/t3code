@@ -139,7 +139,7 @@ export function getChangeRequestTerminologyForKind(
   };
 }
 
-const SCP_SSH_REMOTE_PATTERN = /^[a-zA-Z0-9._-]+@([^:/]+):/;
+const SCP_SSH_REMOTE_PATTERN = /^(?![a-zA-Z]:)(?:[a-zA-Z0-9._-]+@)?([^:/\s]+):(?!\/\/)/;
 
 export function isSshRemoteUrl(remoteUrl: string): boolean {
   const trimmed = remoteUrl.trim();

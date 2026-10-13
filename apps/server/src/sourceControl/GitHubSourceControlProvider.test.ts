@@ -50,6 +50,32 @@ const restResponse = (body: string): GitHubApi.GitHubRestResponse => ({
   invalidUtf8: false,
 });
 
+it.effect("preserves explicit repository identity and context when resolving a PR target", () =>
+  Effect.gen(function* () {
+    const inputs: Parameters<GitHubCli.GitHubCli["Service"]["resolveRepository"]>[0][] = [];
+    const provider = yield* makeProvider({
+      resolveRepository: (input) =>
+        Effect.sync(() => {
+          inputs.push(input);
+          return { host: "enterprise.test:9443", owner: "upstream", name: "r" };
+        }),
+    });
+    const locator = yield* provider.resolveRepository!({
+      cwd: "/repo",
+      repository: "enterprise.test:9443/upstream/r",
+      context: {
+        provider: { kind: "github", name: "GitHub", baseUrl: "https://github.com" },
+        remoteName: "origin",
+        remoteUrl: "git@github.com:fork/r.git",
+      },
+    });
+    assert.deepStrictEqual(locator, { host: "enterprise.test:9443", owner: "upstream", name: "r" });
+    assert.deepStrictEqual(inputs, [
+      { cwd: "/repo", repository: "enterprise.test:9443/upstream/r", host: "github.com" },
+    ]);
+  }),
+);
+
 it.effect.each([
   { source: "saved", environment: {}, tokens: { "enterprise.test": "test-token" } },
   {
