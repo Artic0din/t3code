@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -54,9 +55,10 @@ const layerTestFor = (
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
+  enrichmentLayer = ProjectEnrichmentService.layer,
 ) =>
   RuntimeLayer.layerProjectService.pipe(
-    Layer.provideMerge(ProjectEnrichmentService.layer),
+    Layer.provideMerge(enrichmentLayer),
     Layer.provideMerge(layerWorkspacePaths),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -65,6 +67,56 @@ const layerTestFor = (
   );
 
 const layerTest = layerTestFor(layerMetadata);
+
+it.effect("includes cached prefixes in structural project shells after creation and a move", () =>
+  Effect.gen(function* () {
+    const enrichmentFor = (workspaceRoot: string): ProjectEnrichmentService.ProjectEnrichment => ({
+      repositoryIdentity: null,
+      repositoryIdentityResolved: true,
+      faviconPath: null,
+      repositoryRelativePrefix:
+        workspaceRoot === "/repo/packages/app" ? "packages/app" : "apps/api",
+      repositoryRelativePrefixResolved: true,
+    });
+    const enrichmentLayer = Layer.succeed(ProjectEnrichmentService.ProjectEnrichmentService, {
+      peek: (workspaceRoot) => Effect.succeed(enrichmentFor(workspaceRoot)),
+      getAvailable: (workspaceRoot) => Effect.succeed(enrichmentFor(workspaceRoot)),
+      request: () => Effect.void,
+      invalidate: () => Effect.void,
+      subscribeChanges: Effect.gen(function* () {
+        return yield* PubSub.subscribe(
+          yield* PubSub.unbounded<ProjectEnrichmentService.ProjectEnrichmentChange>(),
+        );
+      }),
+    });
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const projectId = ProjectId.make("project:prefix-shell");
+      yield* service.create({
+        commandId: CommandId.make("command:prefix:create"),
+        projectId,
+        title: "App",
+        workspaceRoot: "/repo/packages/app",
+        defaultModelSelection: null,
+        scripts: [],
+      });
+      assert.equal(
+        Option.getOrThrow(yield* service.getShell(projectId)).repositoryRelativePrefix,
+        "packages/app",
+      );
+      yield* service.update({
+        commandId: CommandId.make("command:prefix:move"),
+        projectId,
+        workspaceRoot: "/repo/apps/api",
+      });
+      assert.equal(
+        Option.getOrThrow(yield* service.getShell(projectId)).repositoryRelativePrefix,
+        "apps/api",
+      );
+      assert.equal((yield* service.listShells())[0]?.repositoryRelativePrefix, "apps/api");
+    }).pipe(Effect.provide(layerTestFor(layerMetadata, enrichmentLayer)));
+  }),
+);
 
 /** Every dependency of ProjectService.make, so a test can swap one of them. */
 const layerProjectServiceDependencies = Layer.mergeAll(

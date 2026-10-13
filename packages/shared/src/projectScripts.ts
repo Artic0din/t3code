@@ -1,4 +1,10 @@
+import { sha256 } from "@noble/hashes/sha2";
 import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
+
+import { normalizeProjectPathForComparison } from "./path.ts";
+
+const ACTION_TERMINAL_ID_PREFIX = "action-";
+const ACTION_TERMINAL_ID_MAX_LENGTH = 128;
 
 type ProjectScriptSettings = Pick<
   ServerSettings,
@@ -53,6 +59,58 @@ export function projectScriptCwd(input: {
   worktreePath?: string | null;
 }): string {
   return input.worktreePath ?? input.project.cwd;
+}
+
+function sameProjectPath(left: string, right: string): boolean {
+  return normalizeProjectPathForComparison(left) === normalizeProjectPathForComparison(right);
+}
+
+function joinRepositoryPrefix(root: string, prefix: string): string | null {
+  const segments = prefix.split(/\/+/).filter((segment) => segment.length > 0);
+  if (segments.some((segment) => segment === "." || segment === "..")) return null;
+  if (segments.length === 0) return root;
+  const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+  const base = root.replace(/[\\/]+$/g, "");
+  return `${base}${separator}${segments.join(separator)}`;
+}
+
+function actionTerminalIdForScript(scriptId: string): string {
+  const candidate = `${ACTION_TERMINAL_ID_PREFIX}${scriptId}`;
+  if (candidate.length <= ACTION_TERMINAL_ID_MAX_LENGTH) return candidate;
+  const digest = Array.from(sha256(new TextEncoder().encode(scriptId)).slice(0, 16), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${ACTION_TERMINAL_ID_PREFIX}${digest}`;
+}
+
+export function projectScriptRunCwd(input: {
+  project: {
+    cwd: string;
+    repositoryRelativePrefix?: string | null;
+  };
+  worktreePath?: string | null;
+}): string | null {
+  const worktreePath = input.worktreePath ?? null;
+  if (worktreePath === null || sameProjectPath(worktreePath, input.project.cwd)) {
+    return input.project.cwd;
+  }
+  const prefix = input.project.repositoryRelativePrefix;
+  if (prefix === null) return null;
+  if (prefix === undefined) return worktreePath;
+  return joinRepositoryPrefix(worktreePath, prefix);
+}
+
+export function projectScriptActionTerminalId(input: {
+  scriptId: string;
+  cwd: string;
+  worktreePath?: string | null;
+  invocationId?: string;
+}): string | null {
+  const worktreePath = input.worktreePath ?? null;
+  if (worktreePath === null || sameProjectPath(worktreePath, input.cwd)) return null;
+  return actionTerminalIdForScript(
+    input.invocationId === undefined ? input.scriptId : `${input.scriptId}-${input.invocationId}`,
+  );
 }
 
 export function projectScriptRuntimeEnv(

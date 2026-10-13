@@ -725,6 +725,7 @@ const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
               project: {
                 ...project,
                 repositoryIdentity: enrichment.repositoryIdentity,
+                repositoryRelativePrefix: enrichment.repositoryRelativePrefix ?? null,
               },
               repositoryIdentityResolved: enrichment.repositoryIdentityResolved,
             })),
@@ -1043,7 +1044,11 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       );
 
     const enrichmentRefreshes = Stream.fromSubscription(enrichmentChanges).pipe(
-      Stream.filter((change) => change.repositoryIdentityResolved),
+      Stream.filter(
+        (change) =>
+          change.repositoryIdentityResolved ||
+          change.enrichment.repositoryRelativePrefixResolved === true,
+      ),
       Stream.groupedWithin(64, Duration.millis(25)),
       // Build the refresh from the identities the changes carry. Re-enriching
       // every project here re-requested each expired root, whose resolution
@@ -1054,15 +1059,24 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           const identities = new Map(
             Array.from(changes, (change) => [
               change.workspaceRoot,
-              change.enrichment.repositoryIdentity,
+              {
+                repositoryIdentity: change.enrichment.repositoryIdentity,
+                repositoryRelativePrefix: change.enrichment.repositoryRelativePrefix ?? null,
+              },
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const changedProjects = (yield* projects.listShells()).flatMap((project) =>
-            identities.has(project.workspaceRoot)
-              ? [{ ...project, repositoryIdentity: identities.get(project.workspaceRoot) ?? null }]
-              : [],
-          );
+          const changedProjects = (yield* projects.listShells()).flatMap((project) => {
+            const enrichment = identities.get(project.workspaceRoot);
+            if (enrichment === undefined) return [];
+            return [
+              {
+                ...project,
+                repositoryIdentity: enrichment.repositoryIdentity,
+                repositoryRelativePrefix: enrichment.repositoryRelativePrefix,
+              },
+            ];
+          });
           return shellStreamItemFromEnrichmentRefresh({
             snapshot: {
               schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,

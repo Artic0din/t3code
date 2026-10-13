@@ -1,12 +1,15 @@
 import { assert, it } from "@effect/vitest";
 import type { RepositoryIdentity } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 
+import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectEnrichment from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
@@ -34,15 +37,31 @@ const waitForAvailable = Effect.fn("ProjectEnrichmentServiceTest.waitForAvailabl
   return yield* Effect.die(`Project metadata for ${workspaceRoot} was not resolved in time.`);
 });
 
+const prefixProbe = (stdout: string): ProcessRunner.ProcessRunner["Service"] => ({
+  run: () =>
+    Effect.succeed({
+      stdout,
+      stderr: "",
+      code: ChildProcessSpawner.ExitCode(0),
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      stdoutInvalidUtf8: false,
+      stderrInvalidUtf8: false,
+    }),
+});
+
 const layer = (
   metadataLayer: Layer.Layer<
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
   options: ProjectEnrichment.ProjectEnrichmentServiceOptions = {},
+  processRunner: ProcessRunner.ProcessRunner["Service"] = prefixProbe("\n"),
 ) =>
   Layer.effect(ProjectEnrichment.ProjectEnrichmentService, ProjectEnrichment.make(options)).pipe(
     Layer.provide(metadataLayer),
+    Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, processRunner)),
   );
 
 it.effect("preserves either enrichment field when the other resolver fails", () =>
@@ -430,4 +449,77 @@ it.effect(
         assert.equal(yield* Ref.get(faviconScans), 1);
       }).pipe(Effect.provide(layer(layerMetadata)));
     }),
+);
+
+it.effect("sends the repository prefix without a git remote", () =>
+  Effect.gen(function* () {
+    const layerMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Effect.succeed(null),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      const changes = yield* service.subscribeChanges;
+      const immediate = yield* service.getAvailable("/repo/packages/app");
+      assert.equal(immediate.repositoryRelativePrefixResolved, false);
+      assert.isNull(immediate.repositoryRelativePrefix);
+      const change = yield* PubSub.take(changes);
+      assert.equal(change.workspaceRoot, "/repo/packages/app");
+      assert.equal(change.enrichment.repositoryRelativePrefixResolved, true);
+      assert.equal(change.enrichment.repositoryRelativePrefix, "packages/app");
+      assert.isNull(change.enrichment.repositoryIdentity);
+    }).pipe(Effect.provide(layer(layerMetadata, {}, prefixProbe("packages/app/\n"))));
+  }),
+);
+
+it.effect("keeps a literal backslash in the repository prefix", () =>
+  Effect.gen(function* () {
+    const layerMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Effect.succeed(null),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      const changes = yield* service.subscribeChanges;
+      yield* service.getAvailable("/repo/packages/a\\b");
+      const change = yield* PubSub.take(changes);
+      assert.equal(change.enrichment.repositoryRelativePrefix, "packages/a\\b");
+    }).pipe(Effect.provide(layer(layerMetadata, {}, prefixProbe("packages/a\\b/\n"))));
+  }),
+);
+
+it.effect("accepts POSIX repository components that resemble Windows paths", () =>
+  Effect.gen(function* () {
+    const layerMetadata = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Effect.succeed(null),
+      }),
+    );
+    for (const prefix of ["\\app", "C:pkg"]) {
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+        const changes = yield* service.subscribeChanges;
+        yield* service.getAvailable(`/repo/${prefix}`);
+        const change = yield* PubSub.take(changes);
+        assert.equal(change.enrichment.repositoryRelativePrefix, prefix);
+      }).pipe(
+        Effect.provide(
+          layer(layerMetadata, {}, prefixProbe(`${prefix}/\n`)).pipe(
+            Layer.provide(Layer.succeed(HostProcessPlatform, "linux")),
+          ),
+        ),
+      );
+    }
+  }),
 );

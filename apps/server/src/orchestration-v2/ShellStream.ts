@@ -132,17 +132,25 @@ export function dedupeShellEnrichment<E, R>(
 /** Build a shell snapshot stream item for a batched enrichment completion. */
 export function shellStreamItemFromEnrichmentRefresh(input: {
   readonly snapshot: OrchestrationV2ShellSnapshot;
-  readonly changes: ReadonlyArray<{ readonly workspaceRoot: string }>;
+  readonly changes: ReadonlyArray<{
+    readonly workspaceRoot: string;
+    readonly repositoryIdentityResolved: boolean;
+  }>;
 }): Extract<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }> {
+  const changedRoots = new Set(input.changes.map((change) => change.workspaceRoot));
   const resolvedRepositoryIdentityRoots = [
-    ...new Set(input.changes.map((change) => change.workspaceRoot)),
+    ...new Set(
+      input.changes
+        .filter((change) => change.repositoryIdentityResolved)
+        .map((change) => change.workspaceRoot),
+    ),
   ];
   return {
     kind: "snapshot",
     snapshot: {
       ...input.snapshot,
       projects: input.snapshot.projects.filter((project) =>
-        resolvedRepositoryIdentityRoots.includes(project.workspaceRoot),
+        changedRoots.has(project.workspaceRoot),
       ),
       threads: [],
       archivedThreads: [],
@@ -153,7 +161,7 @@ export function shellStreamItemFromEnrichmentRefresh(input: {
 
 /**
  * Initial subscribe frames: always emit the unmarked authoritative snapshot,
- * then a same-sequence enrichment frame only when some roots already resolved.
+ * then a same-sequence enrichment frame when metadata has resolved.
  */
 export function shellStreamItemsFromInitialSnapshot(input: {
   readonly snapshot: OrchestrationV2ShellSnapshot;
@@ -163,24 +171,7 @@ export function shellStreamItemsFromInitialSnapshot(input: {
     kind: "snapshot" as const,
     snapshot: input.snapshot,
   };
-  if (input.resolvedRepositoryIdentityRoots.length === 0) {
-    return [authoritative];
-  }
-  return [
-    authoritative,
-    {
-      kind: "snapshot" as const,
-      snapshot: {
-        ...input.snapshot,
-        projects: input.snapshot.projects.filter((project) =>
-          input.resolvedRepositoryIdentityRoots.includes(project.workspaceRoot),
-        ),
-        threads: [],
-        archivedThreads: [],
-      },
-      resolvedRepositoryIdentityRoots: [...new Set(input.resolvedRepositoryIdentityRoots)],
-    },
-  ];
+  return [authoritative, ...shellStreamItemsFromResumeSnapshot(input)];
 }
 
 /** Resume after HTTP/cache hydration with metadata only, never another full shell body. */
@@ -188,9 +179,24 @@ export function shellStreamItemsFromResumeSnapshot(input: {
   readonly snapshot: OrchestrationV2ShellSnapshot;
   readonly resolvedRepositoryIdentityRoots: ReadonlyArray<string>;
 }): ReadonlyArray<Extract<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }>> {
-  return shellStreamItemsFromInitialSnapshot(input).filter(
-    (item) => item.resolvedRepositoryIdentityRoots !== undefined,
+  const projects = input.snapshot.projects.filter(
+    (project) =>
+      input.resolvedRepositoryIdentityRoots.includes(project.workspaceRoot) ||
+      typeof project.repositoryRelativePrefix === "string",
   );
+  if (input.resolvedRepositoryIdentityRoots.length === 0 && projects.length === 0) return [];
+  return [
+    {
+      kind: "snapshot" as const,
+      snapshot: {
+        ...input.snapshot,
+        projects,
+        threads: [],
+        archivedThreads: [],
+      },
+      resolvedRepositoryIdentityRoots: [...new Set(input.resolvedRepositoryIdentityRoots)],
+    },
+  ];
 }
 
 const sameThreadShell = Schema.toEquivalence(ThreadShellSchema);

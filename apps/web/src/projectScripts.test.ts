@@ -2,7 +2,9 @@ import { MAX_SCRIPT_ID_LENGTH } from "@t3tools/contracts";
 import { shortcutLabelForCommand } from "./keybindings";
 import { describe, expect, it } from "vite-plus/test";
 import {
+  projectScriptActionTerminalId,
   projectScriptCwd,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   setupProjectScript,
 } from "@t3tools/shared/projectScripts";
@@ -169,5 +171,125 @@ describe("projectScripts helpers", () => {
         worktreePath: null,
       }),
     ).toBe("/repo");
+  });
+
+  it("runs a subfolder action in the matching worktree directory", () => {
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app/",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo", repositoryRelativePrefix: "" },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: "packages/app",
+        },
+        worktreePath: null,
+      }),
+    ).toBe("/repo/packages/app");
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+          repositoryRelativePrefix: null,
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/app",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "dev",
+        cwd: "/worktree/packages/app",
+        worktreePath: "/worktree",
+      }),
+    ).toBe("action-dev");
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "lint",
+        cwd: "/worktree/packages/app",
+        worktreePath: "/worktree",
+      }),
+    ).toBe("action-lint");
+    expect(
+      projectScriptActionTerminalId({
+        scriptId: "dev",
+        cwd: "/worktree",
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
+    expect(
+      projectScriptRunCwd({
+        project: {
+          cwd: "/repo/packages/a\\b",
+          repositoryRelativePrefix: "packages/a\\b",
+        },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree/packages/a\\b");
+    const longLegacyId = "x".repeat(130);
+    const hashedTerminalId = projectScriptActionTerminalId({
+      scriptId: longLegacyId,
+      cwd: "/worktree/packages/app",
+      worktreePath: "/worktree",
+    });
+    expect(hashedTerminalId?.startsWith("action-")).toBe(true);
+    expect(hashedTerminalId?.length).toBeLessThanOrEqual(128);
+    expect(hashedTerminalId).not.toBe(`action-${longLegacyId}`);
+  });
+
+  it("keeps pending or failed prefix resolution distinct from a legacy server", () => {
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo/packages/app", repositoryRelativePrefix: null },
+        worktreePath: "/worktree",
+      }),
+    ).toBeNull();
+    expect(
+      projectScriptRunCwd({
+        project: { cwd: "/repo/packages/app" },
+        worktreePath: "/worktree",
+      }),
+    ).toBe("/worktree");
+  });
+
+  it("gives each subfolder invocation its own terminal before process metadata arrives", () => {
+    for (const invocationId of ["run-1", "run-2"]) {
+      expect(
+        projectScriptActionTerminalId({
+          scriptId: "dev",
+          invocationId,
+          cwd: "/worktree/packages/app",
+          worktreePath: "/worktree",
+        }),
+      ).toBe(`action-dev-${invocationId}`);
+    }
   });
 });

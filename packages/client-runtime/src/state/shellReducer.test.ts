@@ -247,6 +247,94 @@ describe("applyShellStreamEvent", () => {
     expect(next.projects[0]?.repositoryIdentity).toEqual(repositoryIdentity);
   });
 
+  it("keeps a resolved repository prefix across enrichment and a later shell without it", () => {
+    const previous = {
+      ...v2ShellSnapshot,
+      snapshotSequence: 5,
+      projects: [{ ...v2Project, repositoryIdentity: null }],
+    };
+    const enriched = mergeShellSnapshotProjects(
+      previous,
+      {
+        ...v2ShellSnapshot,
+        snapshotSequence: 4,
+        projects: [
+          {
+            ...v2Project,
+            repositoryIdentity: null,
+            repositoryRelativePrefix: "packages/app",
+          },
+        ],
+      },
+      { resolvedRepositoryIdentityRoots: [v2Project.workspaceRoot] },
+    );
+    expect(enriched.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+
+    const refreshed = mergeShellSnapshotProjects(enriched, {
+      ...v2ShellSnapshot,
+      snapshotSequence: 6,
+      projects: [{ ...v2Project, repositoryIdentity: null }],
+    });
+    expect(refreshed.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+  });
+
+  it("keeps a resolved prefix against an older pending update until the workspace root changes", () => {
+    const previous = {
+      ...v2ShellSnapshot,
+      snapshotSequence: 5,
+      projects: [{ ...v2Project, repositoryIdentity, repositoryRelativePrefix: "packages/app" }],
+    };
+    const pendingProject = {
+      ...v2Project,
+      repositoryIdentity: null,
+      repositoryRelativePrefix: null,
+    };
+    const updated = applyShellStreamEvent(previous, {
+      kind: "project.updated",
+      sequence: 6,
+      project: pendingProject,
+    });
+    expect(updated.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+    const refreshed = mergeShellSnapshotProjects(
+      previous,
+      {
+        ...v2ShellSnapshot,
+        projects: [pendingProject],
+      },
+      { resolvedRepositoryIdentityRoots: [v2Project.workspaceRoot] },
+    );
+    expect(refreshed.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+    expect(refreshed.projects[0]?.repositoryIdentity).toBeNull();
+    const moved = applyShellStreamEvent(updated, {
+      kind: "project.updated",
+      sequence: 7,
+      project: { ...pendingProject, workspaceRoot: "/another/repo/app" },
+    });
+    expect(moved.projects[0]?.workspaceRoot).toBe("/another/repo/app");
+    expect(moved.projects[0]?.repositoryRelativePrefix).toBeNull();
+  });
+
+  it("accepts a resolved prefix even when repository identity resolution failed", () => {
+    const previous = {
+      ...v2ShellSnapshot,
+      snapshotSequence: 5,
+      projects: [{ ...v2Project, repositoryIdentity, repositoryRelativePrefix: null }],
+    };
+    const next = mergeShellSnapshotProjects(
+      previous,
+      {
+        ...v2ShellSnapshot,
+        projects: [
+          { ...v2Project, repositoryIdentity: null, repositoryRelativePrefix: "packages/app" },
+        ],
+      },
+      { resolvedRepositoryIdentityRoots: [] },
+    );
+    expect(next.projects[0]?.repositoryRelativePrefix).toBe("packages/app");
+    expect(next.projects[0]?.repositoryIdentity).toEqual(repositoryIdentity);
+    expect(next.snapshotSequence).toBe(5);
+  });
+
   it("treats higher-sequence compact enrichment as metadata-only", () => {
     const previous = {
       ...v2ShellSnapshot,

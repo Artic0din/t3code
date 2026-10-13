@@ -2,6 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
+import { OrchestrationProjectShell } from "./orchestrationProject.ts";
+
 import {
   CheckpointId,
   CheckpointRef,
@@ -45,6 +47,27 @@ import {
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
+
+it("decodes pending project prefixes without confusing older server snapshots", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationProjectShell);
+  const project = {
+    id: "project:prefix",
+    title: "App",
+    workspaceRoot: "/repo/packages/app",
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-04-20T00:00:00.000Z",
+    updatedAt: "2026-04-20T00:00:00.000Z",
+  };
+  expect(
+    decode({ ...project, repositoryRelativePrefix: null }).repositoryRelativePrefix,
+  ).toBeNull();
+  expect(
+    decode({ ...project, repositoryRelativePrefix: "packages/app" }).repositoryRelativePrefix,
+  ).toBe("packages/app");
+  expect(decode(project).workspaceRoot).toBe("/repo/packages/app");
+  expect(decode(project).repositoryRelativePrefix).toBeUndefined();
+});
 const LegacyShellStreamItem = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("synchronized") }),
   Schema.Struct({

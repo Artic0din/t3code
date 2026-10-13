@@ -1,4 +1,5 @@
 import type { RepositoryIdentity } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -12,6 +13,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import type * as Scope from "effect/Scope";
 
+import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 
@@ -22,8 +24,9 @@ const DEFAULT_SUCCESS_TTL = Duration.minutes(1);
 // A favicon scan checks about 20 files. Shell reads (and PR sync through them) ask for every
 // linked project about once a minute, and icons rarely change, so a resolved favicon is kept
 // longer than the identity, which is only a hit on RepositoryIdentityResolver's own cache.
-// Moving a project's workspace root, and deleting it, invalidate both at once.
+// The repository prefix is likewise stable for a workspace root; invalidate still clears it.
 const DEFAULT_FAVICON_TTL = Duration.minutes(15);
+const DEFAULT_REPOSITORY_PREFIX_TTL = Duration.minutes(15);
 const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
@@ -31,6 +34,27 @@ export interface ProjectEnrichment {
   readonly faviconPath: string | null;
   /** True when identity resolution completed successfully, including cached null. */
   readonly repositoryIdentityResolved: boolean;
+  /** `git rev-parse --show-prefix`, without a trailing slash. Absent until that probe succeeds. */
+  readonly repositoryRelativePrefix?: string | null;
+  readonly repositoryRelativePrefixResolved?: boolean;
+}
+
+function repositoryRelativePrefixFromShowPrefix(
+  stdout: string,
+  platform: NodeJS.Platform,
+): string | null {
+  const text = stdout.replace(/\r?\n$/, "");
+  if (text.includes("\n") || text.includes("\r") || text.includes("\0")) return null;
+  if (text === "") return "";
+  if (
+    text.startsWith("/") ||
+    (platform === "win32" && (text.startsWith("\\") || /^[a-zA-Z]:/.test(text)))
+  )
+    return null;
+  const segments = text.split(/\/+/).filter((segment) => segment.length > 0);
+  if (segments.length === 0) return "";
+  if (segments.some((segment) => segment === "." || segment === "..")) return null;
+  return segments.join("/");
 }
 
 export interface ProjectEnrichmentChange {
@@ -47,6 +71,7 @@ export interface ProjectEnrichmentServiceOptions {
   readonly concurrency?: number;
   readonly successTtl?: Duration.Input;
   readonly faviconTtl?: Duration.Input;
+  readonly repositoryPrefixTtl?: Duration.Input;
   readonly failureTtl?: Duration.Input;
 }
 
@@ -98,12 +123,15 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
 ) {
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const faviconResolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const platform = yield* HostProcessPlatform;
   const cacheCapacity = Math.max(1, options.cacheCapacity ?? DEFAULT_CACHE_CAPACITY);
   const maxPending = Math.max(1, options.maxPending ?? DEFAULT_MAX_PENDING);
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
   const successTtl = options.successTtl ?? DEFAULT_SUCCESS_TTL;
   const failureTtl = options.failureTtl ?? DEFAULT_FAILURE_TTL;
   const faviconTtl = options.faviconTtl ?? DEFAULT_FAVICON_TTL;
+  const repositoryPrefixTtl = options.repositoryPrefixTtl ?? DEFAULT_REPOSITORY_PREFIX_TTL;
 
   const repositoryIdentityCache = yield* Cache.makeWith(
     (workspaceRoot: string) => Effect.exit(repositoryIdentityResolver.resolve(workspaceRoot)),
@@ -122,6 +150,36 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
       timeToLive: Exit.match({
         onFailure: () => failureTtl,
         onSuccess: (result) => (Exit.isSuccess(result) ? faviconTtl : failureTtl),
+      }),
+    },
+  );
+  const repositoryRelativePrefixCache = yield* Cache.makeWith(
+    (workspaceRoot: string) =>
+      Effect.exit(
+        processRunner
+          .run({
+            command: "git",
+            args: ["-C", workspaceRoot, "rev-parse", "--show-prefix"],
+            timeoutBehavior: "timedOutResult",
+          })
+          .pipe(
+            Effect.mapError(() => "prefix-probe-failed" as const),
+            Effect.flatMap((result) => {
+              if (result.timedOut || result.code !== 0) {
+                return Effect.fail("prefix-probe-failed" as const);
+              }
+              const prefix = repositoryRelativePrefixFromShowPrefix(result.stdout, platform);
+              return prefix === null
+                ? Effect.fail("prefix-probe-failed" as const)
+                : Effect.succeed(prefix);
+            }),
+          ),
+      ),
+    {
+      capacity: cacheCapacity,
+      timeToLive: Exit.match({
+        onFailure: () => failureTtl,
+        onSuccess: (result) => (Exit.isSuccess(result) ? repositoryPrefixTtl : failureTtl),
       }),
     },
   );
@@ -174,8 +232,13 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
     function* (workspaceRoot: string) {
       const repositoryIdentity = yield* Cache.get(repositoryIdentityCache, workspaceRoot);
       yield* logFailure(workspaceRoot, "repositoryIdentity", repositoryIdentity);
+      const repositoryRelativePrefix = yield* Cache.get(
+        repositoryRelativePrefixCache,
+        workspaceRoot,
+      );
       const faviconPath = yield* Cache.getSuccess(faviconCache, workspaceRoot);
       const repositoryIdentityResolved = Exit.isSuccess(repositoryIdentity);
+      const repositoryRelativePrefixResolved = Exit.isSuccess(repositoryRelativePrefix);
       yield* PubSub.publish(changes, {
         workspaceRoot,
         repositoryIdentityResolved,
@@ -183,6 +246,10 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
           repositoryIdentity: availableValue(Option.some(repositoryIdentity)),
           faviconPath: availableValue(faviconPath),
           repositoryIdentityResolved,
+          repositoryRelativePrefix: repositoryRelativePrefixResolved
+            ? availableValue(Option.some(repositoryRelativePrefix))
+            : null,
+          repositoryRelativePrefixResolved,
         },
       });
     },
@@ -235,30 +302,40 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   const peek: ProjectEnrichmentService["Service"]["peek"] = Effect.fn(
     "ProjectEnrichmentService.peek",
   )(function* (workspaceRoot) {
-    const [repositoryIdentity, faviconPath] = yield* Effect.all(
+    const [repositoryIdentity, faviconPath, repositoryRelativePrefix] = yield* Effect.all(
       [
         Cache.getSuccess(repositoryIdentityCache, workspaceRoot),
         Cache.getSuccess(faviconCache, workspaceRoot),
+        Cache.getSuccess(repositoryRelativePrefixCache, workspaceRoot),
       ] as const,
       { concurrency: "unbounded" },
     );
+    const repositoryRelativePrefixResolved = isSuccessfullyResolved(repositoryRelativePrefix);
     return {
       repositoryIdentity: availableValue(repositoryIdentity),
       faviconPath: availableValue(faviconPath),
       repositoryIdentityResolved: isSuccessfullyResolved(repositoryIdentity),
+      repositoryRelativePrefix: repositoryRelativePrefixResolved
+        ? availableValue(repositoryRelativePrefix)
+        : null,
+      repositoryRelativePrefixResolved,
     };
   });
 
   const request: ProjectEnrichmentService["Service"]["request"] = Effect.fn(
     "ProjectEnrichmentService.request",
   )(function* (workspaceRoot) {
-    const [hasRepositoryIdentity, hasFaviconPath] = yield* Effect.all(
-      [Cache.has(repositoryIdentityCache, workspaceRoot), Cache.has(faviconCache, workspaceRoot)],
+    const [hasRepositoryIdentity, hasFaviconPath, hasRepositoryRelativePrefix] = yield* Effect.all(
+      [
+        Cache.has(repositoryIdentityCache, workspaceRoot),
+        Cache.has(faviconCache, workspaceRoot),
+        Cache.has(repositoryRelativePrefixCache, workspaceRoot),
+      ],
       { concurrency: "unbounded" },
     );
     yield* Effect.all(
       [
-        hasRepositoryIdentity
+        hasRepositoryIdentity && hasRepositoryRelativePrefix
           ? Effect.void
           : requestLane(repositoryIdentityLane, workspaceRoot, "repositoryIdentity"),
         hasFaviconPath ? Effect.void : requestLane(faviconLane, workspaceRoot, "faviconPath"),
@@ -285,6 +362,7 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
           [
             Cache.invalidate(repositoryIdentityCache, workspaceRoot),
             Cache.invalidate(faviconCache, workspaceRoot),
+            Cache.invalidate(repositoryRelativePrefixCache, workspaceRoot),
           ],
           { concurrency: "unbounded", discard: true },
         ),
@@ -301,4 +379,6 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
   });
 });
 
-export const layer = Layer.effect(ProjectEnrichmentService, make());
+export const layer = Layer.effect(ProjectEnrichmentService, make()).pipe(
+  Layer.provide(ProcessRunner.layer),
+);

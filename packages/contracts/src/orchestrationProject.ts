@@ -11,6 +11,9 @@ export const OrchestrationProjectShell = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  // Null means pending or unavailable. Older servers omit the field.
+  // Empty string means the project is the repository root.
+  repositoryRelativePrefix: Schema.optional(Schema.NullOr(Schema.String)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   // Per-project override for where new threads start. Null/absent means
   // "no override": clients fall back to t3.json, then the global setting.

@@ -1,4 +1,5 @@
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
+import { uuidv4 } from "../../lib/uuid";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
@@ -21,7 +22,8 @@ import {
   type ProjectScript,
 } from "@t3tools/contracts";
 import {
-  projectScriptCwd,
+  projectScriptActionTerminalId,
+  projectScriptRunCwd,
   projectScriptRuntimeEnv,
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
@@ -744,20 +746,45 @@ function ThreadRouteContent(
         return;
       }
 
-      const targetTerminalId = resolveProjectScriptTerminalId({
-        existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
-        hasRunningTerminal: terminalMenuSessions.some(
-          (session) => session.status === "running" || session.status === "starting",
-        ),
-      });
       const preferredWorktreePath = resolvePreferredThreadWorktreePath({
         threadShellWorktreePath: selectedThread.worktreePath ?? null,
         threadDetailWorktreePath: selectedThreadDetailWorktreePath,
       });
-      const cwd = projectScriptCwd({
-        project: { cwd: selectedThreadProject.workspaceRoot },
+      const cwd = projectScriptRunCwd({
+        project: {
+          cwd: selectedThreadProject.workspaceRoot,
+          ...(selectedThreadProject.repositoryRelativePrefix !== undefined
+            ? { repositoryRelativePrefix: selectedThreadProject.repositoryRelativePrefix }
+            : {}),
+        },
         worktreePath: preferredWorktreePath,
       });
+      if (cwd === null) {
+        Alert.alert(
+          "Action unavailable",
+          "The project folder in this worktree has not been resolved yet.",
+        );
+        terminalDebugLog("project-script:abort", {
+          scriptId: script.id,
+          reason: "repository-prefix-unresolved",
+        });
+        return;
+      }
+      const dedicatedTerminalId = projectScriptActionTerminalId({
+        scriptId: script.id,
+        invocationId: uuidv4(),
+        cwd,
+        worktreePath: preferredWorktreePath,
+      });
+      const sessionIsBusy = (session: (typeof terminalMenuSessions)[number]) =>
+        session.status === "starting" ||
+        (session.status === "running" && session.hasRunningSubprocess);
+      const targetTerminalId =
+        dedicatedTerminalId ??
+        resolveProjectScriptTerminalId({
+          existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
+          hasRunningTerminal: terminalMenuSessions.some(sessionIsBusy),
+        });
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
         worktreePath: preferredWorktreePath,
