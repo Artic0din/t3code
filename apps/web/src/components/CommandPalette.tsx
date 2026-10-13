@@ -17,8 +17,7 @@ import {
 } from "@t3tools/client-runtime/operations/projects";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import { applyPromptPresetToComposer } from "../lib/applyPromptPreset";
-import { getStartedThreadModelChangeBlockReason } from "./ChatView.logic";
-import { createModelSelection } from "@t3tools/shared/model";
+import { useActiveComposerDraftTarget } from "../activeComposerDraftTarget";
 import { readComposerThreadDraft } from "../composerDraftStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
@@ -751,6 +750,7 @@ function OpenCommandPaletteDialog(props: {
     select: (params) => resolveThreadRouteTarget(params),
   });
   const routeDraftId = paletteRouteTarget?.kind === "draft" ? paletteRouteTarget.draftId : null;
+  const activeComposerDraftTarget = useActiveComposerDraftTarget();
   const projects = useProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
@@ -1945,13 +1945,14 @@ function OpenCommandPaletteDialog(props: {
   }
 
   const presetEnvironmentId =
-    activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
+    activeComposerDraftTarget?.environmentId ??
+    activeThread?.environmentId ??
+    activeDraftThread?.environmentId ??
+    null;
   const presetServerConfig =
     presetEnvironmentId === null ? null : (serverConfigs.get(presetEnvironmentId) ?? null);
   const promptPresets = presetServerConfig?.settings.promptPresets ?? [];
-  const presetThreadRef =
-    routeDraftId ??
-    (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null);
+  const presetThreadRef = activeComposerDraftTarget?.threadRef ?? null;
   const applyPalettePromptPreset = (
     presetId: string,
     disposition: "insert" | "replace",
@@ -1971,21 +1972,8 @@ function OpenCommandPaletteDialog(props: {
       presetId,
       disposition,
       providers: presetServerConfig.providers,
-      modelChangeGuard: activeThread
-        ? ({ currentProviderInstanceId, currentModel, nextProviderInstanceId, nextModel }) => {
-            if (!currentProviderInstanceId || !currentModel) return null;
-            const reason = getStartedThreadModelChangeBlockReason({
-              providers: presetServerConfig.providers,
-              hasStartedSession: activeThread.runtime != null,
-              currentModelSelection: createModelSelection(currentProviderInstanceId, currentModel),
-              currentProviderInstanceId: activeThread.runtime?.providerInstanceId ?? null,
-              nextModelSelection: createModelSelection(nextProviderInstanceId, nextModel),
-            });
-            return reason
-              ? `${reason.description} Start a new thread to use this preset's model.`
-              : null;
-          }
-        : undefined,
+      effectiveAgentSettings: activeComposerDraftTarget?.effectiveAgentSettings,
+      threadState: activeComposerDraftTarget?.threadState,
     });
     if (!result.ok) {
       toastManager.add({

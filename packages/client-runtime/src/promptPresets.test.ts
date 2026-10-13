@@ -63,6 +63,80 @@ function preset(overrides: Partial<PromptPreset> = {}): PromptPreset {
 }
 
 describe("applyPromptPreset", () => {
+  it("rejects agent settings during queued editing before changing the prompt", () => {
+    const current = draft();
+    const result = applyPromptPreset({
+      draft: current,
+      presets: [preset({ runtimeMode: "approval-required" })],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities,
+      threadState: { hasStartedSession: true, isQueuedEdit: true },
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "agent-settings",
+      message:
+        "Queued message editing supports instructions only. Choose a preset without agent settings.",
+    });
+    expect(current.text).toBe("keep this");
+  });
+
+  it("rejects provider changes on started threads without changing their prompt", () => {
+    const current = draft();
+    const result = applyPromptPreset({
+      draft: current,
+      presets: [preset({ providerInstanceId: claude, model: "opus" })],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities,
+      threadState: { hasStartedSession: true, supportsProviderSwitchingViaHandoff: false },
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "provider",
+      message:
+        "This thread does not support switching providers after it has started. Start a new thread to use this preset's model.",
+    });
+    expect(current.text).toBe("keep this");
+  });
+
+  it("permits provider changes when the started thread supports handoff", () => {
+    const result = applyPromptPreset({
+      draft: draft(),
+      presets: [preset({ providerInstanceId: claude, model: "opus" })],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities,
+      threadState: { hasStartedSession: true, supportsProviderSwitchingViaHandoff: true },
+    });
+    expect(result).toEqual({
+      ok: true,
+      value: draft({ text: "Write a plan.", providerInstanceId: claude, model: "opus" }),
+    });
+  });
+
+  it("rejects same-provider model changes when a new thread is required", () => {
+    const result = applyPromptPreset({
+      draft: draft(),
+      presets: [preset({ model: "next" })],
+      presetId: "plan",
+      disposition: "replace",
+      capabilities: {
+        providers: [
+          { instanceId: codex, models: ["gpt-5", "next"], requiresNewThreadForModelChange: true },
+        ],
+      },
+      threadState: { hasStartedSession: true, supportsProviderSwitchingViaHandoff: true },
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "model",
+      message:
+        "This provider does not allow switching models after a conversation has started. Start a new thread to use this preset's model.",
+    });
+  });
+
   it("inserts instructions and keeps attachments, context, and omitted settings", () => {
     const current = draft();
     const result = applyPromptPreset({
@@ -242,11 +316,12 @@ describe("prompt preset records", () => {
     expect(deletePromptPreset(renamed.value, "missing")).toEqual(renamed.value);
   });
 
-  it("keeps previous agent settings unless the draft settings are included", () => {
+  it("removes excluded agent settings from an existing preset", () => {
     const previous = preset({
       providerInstanceId: codex,
       model: "gpt-5",
       runtimeMode: "full-access",
+      interactionMode: "plan",
     });
     const kept = buildPromptPreset({
       id: previous.id,
@@ -254,17 +329,18 @@ describe("prompt preset records", () => {
       instructions: previous.instructions,
       includeAgentSettings: false,
       draft: draft({ providerInstanceId: claude, model: "opus", runtimeMode: "approval-required" }),
-      previous,
     });
-    expect(kept.providerInstanceId).toBe(codex);
-    expect(kept.model).toBe("gpt-5");
+    expect(kept).toEqual({ id: "plan", name: "Plan", instructions: "Write a plan." });
+    expect(savePromptPreset([previous], kept)).toEqual({
+      ok: true,
+      value: [{ id: "plan", name: "Plan", instructions: "Write a plan." }],
+    });
     const replaced = buildPromptPreset({
       id: previous.id,
       name: "Plan",
       instructions: "next",
       includeAgentSettings: true,
       draft: draft({ providerInstanceId: claude, model: "opus", runtimeMode: "approval-required" }),
-      previous,
     });
     expect(replaced).toMatchObject({
       instructions: "next",

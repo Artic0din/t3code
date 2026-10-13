@@ -184,6 +184,7 @@ import {
   restoreCloudComposerDrafts,
   retargetNewTaskDraft,
   setComposerDraftText,
+  updateComposerDraftSettings,
   insertComposerDraftContext,
   insertComposerDraftText,
   rememberComposerDraftSelection,
@@ -195,6 +196,11 @@ import {
   undoComposerDraftMergeState,
 } from "./use-composer-drafts";
 import { retainComposerAttachmentFileForPreview } from "../lib/composerAttachmentPreviewRetention";
+import {
+  applyPromptPresetToMobileDraft,
+  mobileDraftToPromptPresetDraft,
+} from "../features/keyboard/applyPromptPresetToDraft";
+import { createModelSelection } from "@t3tools/shared/model";
 
 const DRAFT: ComposerDraft = {
   text: "hello",
@@ -240,6 +246,120 @@ function contextDraft(start: number, count: number): ComposerDraft {
 }
 
 describe("mobile composer drafts", () => {
+  it("persists explicit preset modes that match the displayed defaults", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const result = applyPromptPresetToMobileDraft({
+      draftKey: "thread",
+      presets: [
+        {
+          id: "same",
+          name: "Same",
+          instructions: "Task",
+          providerInstanceId: codex,
+          model: "gpt",
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+        },
+      ],
+      presetId: "same",
+      disposition: "replace",
+      providers: [{ instanceId: codex, enabled: true, models: [{ slug: "gpt" }] }],
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "gpt",
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+      },
+    });
+    expect(result.ok).toBe(true);
+    const stored = mobileDraftToPromptPresetDraft(getComposerDraftSnapshot("thread"));
+    expect({
+      providerInstanceId: stored.providerInstanceId,
+      model: stored.model,
+      runtimeMode: stored.runtimeMode,
+      interactionMode: stored.interactionMode,
+    }).toEqual({
+      providerInstanceId: codex,
+      model: "gpt",
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+    });
+    expect(stored.text).toBe("Task");
+  });
+
+  it("rejects a locked preset without changing text or attachments", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const claude = ProviderInstanceId.make("claude");
+    setComposerDraftText("thread", "Original task");
+    const original = getComposerDraftSnapshot("thread");
+    const result = applyPromptPresetToMobileDraft({
+      draftKey: "thread",
+      presets: [
+        {
+          id: "other",
+          name: "Other",
+          instructions: "Replace task",
+          providerInstanceId: claude,
+          model: "opus",
+        },
+      ],
+      presetId: "other",
+      disposition: "replace",
+      providers: [
+        { instanceId: codex, enabled: true, models: [{ slug: "gpt" }] },
+        { instanceId: claude, enabled: true, models: [{ slug: "opus" }] },
+      ],
+      effectiveAgentSettings: {
+        providerInstanceId: codex,
+        model: "gpt",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      },
+      threadState: { hasStartedSession: true, supportsProviderSwitchingViaHandoff: false },
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "provider",
+      message:
+        "This thread does not support switching providers after it has started. Start a new thread to use this preset's model.",
+    });
+    expect(getComposerDraftSnapshot("thread")).toEqual(original);
+  });
+
+  it("applies a handoff preset and replaces options from the previous model", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const claude = ProviderInstanceId.make("claude");
+    setComposerDraftText("thread", "Original task");
+    updateComposerDraftSettings("thread", {
+      modelSelection: createModelSelection(codex, "old", [{ id: "effort", value: "high" }]),
+    });
+    const result = applyPromptPresetToMobileDraft({
+      draftKey: "thread",
+      presets: [
+        {
+          id: "other",
+          name: "Other",
+          instructions: "Replace task",
+          providerInstanceId: claude,
+          model: "opus",
+        },
+      ],
+      presetId: "other",
+      disposition: "replace",
+      providers: [
+        { instanceId: codex, enabled: true, models: [{ slug: "old" }] },
+        { instanceId: claude, enabled: true, models: [{ slug: "opus" }] },
+      ],
+      threadState: { hasStartedSession: true, supportsProviderSwitchingViaHandoff: true },
+    });
+    expect(result.ok).toBe(true);
+    expect(getComposerDraftSnapshot("thread").text).toBe("Replace task");
+    expect(getComposerDraftSnapshot("thread").modelSelection).toEqual({
+      instanceId: claude,
+      model: "opus",
+    });
+  });
+
   it.each([false, true])(
     "restores visible file chips from legacy drafts (archived: %s)",
     async (archived) => {

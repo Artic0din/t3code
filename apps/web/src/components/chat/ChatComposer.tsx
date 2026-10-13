@@ -87,7 +87,6 @@ import { listContinuationForEnter, listIndentForTab } from "../../composer-list-
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
-  getStartedThreadModelChangeBlockReason,
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
@@ -1823,29 +1822,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   attachmentTargetKeyRef.current = attachmentTargetKey;
   const questionPreparations = useQuestionAttachmentPreparation((state) => state.counts);
   const prompt = composerDraft.prompt;
-  const promptPresets = useComposerPromptPresets({
-    environmentId,
-    threadRef: composerDraftTarget,
-    draft: composerDraft,
-    providers: providerStatuses,
-    modelChangeGuard: ({
-      currentProviderInstanceId,
-      currentModel,
-      nextProviderInstanceId,
-      nextModel,
-    }) => {
-      if (!currentProviderInstanceId || !currentModel) return null;
-      const reason = getStartedThreadModelChangeBlockReason({
-        providers: providerStatuses,
-        hasStartedSession: activeThread?.runtime != null,
-        supportsProviderSwitchingViaHandoff,
-        currentModelSelection: createModelSelection(currentProviderInstanceId, currentModel),
-        currentProviderInstanceId: activeThread?.runtime?.providerInstanceId ?? null,
-        nextModelSelection: createModelSelection(nextProviderInstanceId, nextModel),
-      });
-      return reason ? `${reason.description} Start a new thread to use this preset's model.` : null;
-    },
-  });
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;
   // A question answer has no chips: its files live in the question draft and show in the
@@ -2344,6 +2320,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
+  const promptPresets = useComposerPromptPresets({
+    environmentId,
+    threadRef: composerDraftTarget,
+    draft: composerDraft,
+    providers: providerStatuses,
+    effectiveAgentSettings: {
+      providerInstanceId: selectedInstanceId,
+      model: selectedModel,
+      runtimeMode: compatibleRuntimeMode,
+      interactionMode,
+    },
+    threadState: {
+      hasStartedSession: threadShellHasStarted(activeThread),
+      isQueuedEdit:
+        typeof composerDraftTarget === "string" && composerDraftTarget.startsWith("queued-edit:"),
+      currentProviderInstanceId: activeThread?.runtime?.providerInstanceId,
+      supportsProviderSwitchingViaHandoff,
+    },
+  });
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's

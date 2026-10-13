@@ -1,5 +1,5 @@
 import { createModelSelection } from "@t3tools/shared/model";
-import type { PromptPreset, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import type { PromptPreset } from "@t3tools/contracts";
 
 import {
   applyPromptPreset,
@@ -7,6 +7,8 @@ import {
   type PromptPresetApplyDisposition,
   type PromptPresetDraft,
   type PromptPresetResult,
+  type PromptPresetAgentSettings,
+  type PromptPresetThreadState,
 } from "@t3tools/client-runtime/promptPresets";
 import {
   useComposerDraftStore,
@@ -16,6 +18,7 @@ import {
 
 export function composerDraftToPromptPresetDraft(
   draft: ComposerThreadDraftState,
+  effectiveAgentSettings?: PromptPresetAgentSettings,
 ): PromptPresetDraft {
   const providerInstanceId = draft.activeProvider;
   return {
@@ -33,15 +36,9 @@ export function composerDraftToPromptPresetDraft(
       : null,
     runtimeMode: draft.runtimeMode,
     interactionMode: draft.interactionMode,
+    ...effectiveAgentSettings,
   };
 }
-
-export type PromptPresetModelChangeGuard = (input: {
-  readonly currentProviderInstanceId: ProviderInstanceId | null;
-  readonly currentModel: string | null;
-  readonly nextProviderInstanceId: ProviderInstanceId;
-  readonly nextModel: string;
-}) => string | null;
 
 export function applyPromptPresetToComposer(input: {
   readonly threadRef: ComposerThreadTarget;
@@ -49,40 +46,22 @@ export function applyPromptPresetToComposer(input: {
   readonly presets: readonly PromptPreset[];
   readonly presetId: string;
   readonly disposition: PromptPresetApplyDisposition;
-  readonly providers: readonly ServerProvider[];
-  readonly modelChangeGuard?: PromptPresetModelChangeGuard | undefined;
+  readonly providers: Parameters<typeof promptPresetCapabilitiesFromProviders>[0];
+  readonly effectiveAgentSettings?: PromptPresetAgentSettings | undefined;
+  readonly threadState?: PromptPresetThreadState | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
-  const current = composerDraftToPromptPresetDraft(input.draft);
+  const stored = composerDraftToPromptPresetDraft(input.draft);
+  const current = { ...stored, ...input.effectiveAgentSettings };
   const result = applyPromptPreset({
     draft: current,
     presets: input.presets,
     presetId: input.presetId,
     disposition: input.disposition,
     capabilities: promptPresetCapabilitiesFromProviders(input.providers),
+    threadState: input.threadState,
   });
   if (!result.ok) return result;
-
-  if (
-    input.modelChangeGuard &&
-    result.value.providerInstanceId &&
-    result.value.model &&
-    (result.value.providerInstanceId !== current.providerInstanceId ||
-      result.value.model !== current.model)
-  ) {
-    const message = input.modelChangeGuard({
-      currentProviderInstanceId: current.providerInstanceId,
-      currentModel: current.model,
-      nextProviderInstanceId: result.value.providerInstanceId,
-      nextModel: result.value.model,
-    });
-    if (message) {
-      return {
-        ok: false,
-        code: "provider",
-        message,
-      };
-    }
-  }
+  const preset = input.presets.find((entry) => entry.id === input.presetId);
 
   const store = useComposerDraftStore.getState();
   if (result.value.text !== current.text) {
@@ -91,19 +70,23 @@ export function applyPromptPresetToComposer(input: {
   if (
     result.value.providerInstanceId &&
     result.value.model &&
-    (result.value.providerInstanceId !== current.providerInstanceId ||
-      result.value.model !== current.model)
+    (preset?.providerInstanceId !== undefined || preset?.model !== undefined) &&
+    (result.value.providerInstanceId !== stored.providerInstanceId ||
+      result.value.model !== stored.model)
   ) {
     store.setModelSelection(
       input.threadRef,
       createModelSelection(result.value.providerInstanceId, result.value.model),
-      { explicit: true },
+      { explicit: true, replaceOptions: true },
     );
   }
-  if (result.value.runtimeMode !== current.runtimeMode) {
+  if (preset?.runtimeMode !== undefined && result.value.runtimeMode !== stored.runtimeMode) {
     store.setRuntimeMode(input.threadRef, result.value.runtimeMode);
   }
-  if (result.value.interactionMode !== current.interactionMode) {
+  if (
+    preset?.interactionMode !== undefined &&
+    result.value.interactionMode !== stored.interactionMode
+  ) {
     store.setInteractionMode(input.threadRef, result.value.interactionMode);
   }
   return result;

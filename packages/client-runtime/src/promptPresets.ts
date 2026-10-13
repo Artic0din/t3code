@@ -1,12 +1,15 @@
 import {
   type PromptPreset,
+  type ModelSelection,
   type ProviderInstanceId,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ServerProvider,
   MAX_PROMPT_PRESETS,
   PromptPreset as PromptPresetSchema,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { createModelSelection } from "@t3tools/shared/model";
 
 export type PromptPresetApplyDisposition = "insert" | "replace";
 
@@ -20,11 +23,24 @@ export interface PromptPresetDraft {
   readonly interactionMode: ProviderInteractionMode | null;
 }
 
+export type PromptPresetAgentSettings = Pick<
+  PromptPresetDraft,
+  "providerInstanceId" | "model" | "runtimeMode" | "interactionMode"
+>;
+
+export interface PromptPresetThreadState {
+  readonly hasStartedSession: boolean;
+  readonly isQueuedEdit?: boolean | undefined;
+  readonly supportsProviderSwitchingViaHandoff?: boolean | undefined;
+  readonly currentProviderInstanceId?: ProviderInstanceId | null | undefined;
+}
+
 export interface PromptPresetProviderCapability {
   readonly instanceId: ProviderInstanceId;
   readonly models: ReadonlyArray<string>;
   readonly runtimeModes?: ReadonlyArray<RuntimeMode> | undefined;
   readonly interactionModes?: ReadonlyArray<ProviderInteractionMode> | undefined;
+  readonly requiresNewThreadForModelChange?: boolean | undefined;
 }
 
 export interface PromptPresetCapabilities {
@@ -37,6 +53,7 @@ export type PromptPresetFailureCode =
   | "model"
   | "runtime-mode"
   | "interaction-mode"
+  | "agent-settings"
   | "invalid"
   | "full";
 
@@ -73,6 +90,7 @@ export function promptPresetCapabilitiesFromProviders(
     }>;
     readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode> | undefined;
     readonly showInteractionModeToggle?: boolean | undefined;
+    readonly requiresNewThreadForModelChange?: boolean | undefined;
   }>,
 ): PromptPresetCapabilities {
   return {
@@ -80,6 +98,7 @@ export function promptPresetCapabilitiesFromProviders(
       if (!provider.enabled || provider.availability === "unavailable") return [];
       const capability: PromptPresetProviderCapability = {
         instanceId: provider.instanceId,
+        requiresNewThreadForModelChange: provider.requiresNewThreadForModelChange,
         models: provider.models.flatMap((model) => [model.slug, ...(model.aliases ?? [])]),
         ...(provider.supportedRuntimeModes && provider.supportedRuntimeModes.length > 0
           ? { runtimeModes: provider.supportedRuntimeModes }
@@ -99,9 +118,8 @@ export function buildPromptPreset(input: {
   readonly instructions: string;
   readonly includeAgentSettings: boolean;
   readonly draft: PromptPresetDraft;
-  readonly previous?: PromptPreset | undefined;
 }): PromptPreset {
-  const source = input.includeAgentSettings ? agentSettingsFromDraft(input.draft) : input.previous;
+  const source = input.includeAgentSettings ? agentSettingsFromDraft(input.draft) : undefined;
   return {
     id: input.id,
     name: input.name,
@@ -156,6 +174,7 @@ export function applyPromptPreset(input: {
   readonly presetId: string;
   readonly disposition: PromptPresetApplyDisposition;
   readonly capabilities: PromptPresetCapabilities;
+  readonly threadState?: PromptPresetThreadState | undefined;
 }): PromptPresetResult<PromptPresetDraft> {
   const preset = input.presets.find((entry) => entry.id === input.presetId);
   if (!preset) {
@@ -164,6 +183,19 @@ export function applyPromptPreset(input: {
       code: "missing",
       message: "That prompt preset was deleted. Refresh the list and choose another.",
     };
+  }
+
+  if (
+    input.threadState?.isQueuedEdit === true &&
+    (preset.providerInstanceId !== undefined ||
+      preset.model !== undefined ||
+      preset.runtimeMode !== undefined ||
+      preset.interactionMode !== undefined)
+  ) {
+    return failure(
+      "agent-settings",
+      "Queued message editing supports instructions only. Choose a preset without agent settings.",
+    );
   }
 
   const providerInstanceId = preset.providerInstanceId ?? input.draft.providerInstanceId;
@@ -186,6 +218,23 @@ export function applyPromptPreset(input: {
         "model",
         "That model is not available on the selected provider. The provider was left unchanged.",
       );
+    }
+    if (input.threadState && providerInstanceId !== null && model !== null) {
+      const reason = getStartedThreadModelChangeBlockReason({
+        ...input.threadState,
+        providers: input.capabilities.providers,
+        currentModelSelection: createModelSelection(
+          input.draft.providerInstanceId ?? providerInstanceId,
+          input.draft.model ?? model,
+        ),
+        nextModelSelection: createModelSelection(providerInstanceId, model),
+      });
+      if (reason) {
+        return failure(
+          input.draft.providerInstanceId === providerInstanceId ? "model" : "provider",
+          `${reason.description} Start a new thread to use this preset's model.`,
+        );
+      }
     }
   }
 
@@ -228,6 +277,40 @@ export function applyPromptPreset(input: {
       interactionMode,
     },
   };
+}
+
+export function getStartedThreadModelChangeBlockReason(input: {
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "requiresNewThreadForModelChange">>;
+  hasStartedSession: boolean;
+  supportsProviderSwitchingViaHandoff?: boolean | undefined;
+  currentModelSelection: ModelSelection;
+  currentProviderInstanceId?: ModelSelection["instanceId"] | null | undefined;
+  nextModelSelection: ModelSelection;
+}): { title: string; description: string } | null {
+  if (!input.hasStartedSession) return null;
+  const currentInstanceId =
+    input.currentProviderInstanceId ?? input.currentModelSelection.instanceId;
+  if (
+    currentInstanceId === input.nextModelSelection.instanceId &&
+    input.currentModelSelection.model === input.nextModelSelection.model
+  )
+    return null;
+  if (currentInstanceId !== input.nextModelSelection.instanceId) {
+    return input.supportsProviderSwitchingViaHandoff === true
+      ? null
+      : {
+          title: "Start a new chat to switch providers",
+          description: "This thread does not support switching providers after it has started.",
+        };
+  }
+  const provider = input.providers.find((entry) => entry.instanceId === currentInstanceId);
+  return provider?.requiresNewThreadForModelChange === true
+    ? {
+        title: "Start a new chat to change models",
+        description:
+          "This provider does not allow switching models after a conversation has started.",
+      }
+    : null;
 }
 
 function failure(

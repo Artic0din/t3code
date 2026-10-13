@@ -45,17 +45,13 @@ import {
 import { parseActiveThreadPath, type HardwareKeyboardCommand } from "./hardwareKeyboardCommands";
 import { threadJumpIndex } from "./threadKeyboardShortcuts";
 import { applyPromptPresetToMobileDraft } from "./applyPromptPresetToDraft";
-import {
-  buildPromptPreset,
-  createPromptPresetId,
-  deletePromptPreset,
-  savePromptPreset,
-} from "@t3tools/client-runtime/promptPresets";
+import { buildPromptPreset, savePromptPreset } from "@t3tools/client-runtime/promptPresets";
 import { getComposerDraftSnapshot } from "../../state/use-composer-drafts";
 import { mobileDraftToPromptPresetDraft } from "./applyPromptPresetToDraft";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useActiveNewTaskDraftTarget } from "../threads/active-new-task-draft-target";
+import { useActiveComposerDraftTarget } from "../threads/active-composer-draft-target";
+import { uuidv4 } from "../../lib/uuid";
 
 const PALETTE_COMMANDS: ReadonlyArray<HardwareKeyboardCommand> = [
   "commandPalette",
@@ -163,7 +159,7 @@ export function CommandPalette(props: {
   const threads = useThreadShells();
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
-  const activeNewTaskDraft = useActiveNewTaskDraftTarget();
+  const activeComposerDraft = useActiveComposerDraftTarget();
   const serverConfigs = useServerConfigs();
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "server settings update",
@@ -365,16 +361,14 @@ export function CommandPalette(props: {
           run: () => selectThread(thread),
         };
       });
-    const presetEnvironmentId =
-      activeThread?.environmentId ?? activeNewTaskDraft?.environmentId ?? null;
+    const presetEnvironmentId = activeComposerDraft?.environmentId ?? null;
     const presetConfig =
       presetEnvironmentId === null ? undefined : serverConfigs.get(presetEnvironmentId);
-    const presetKey = activeThread
-      ? scopedThreadKey(activeThread.environmentId, activeThread.id)
-      : (activeNewTaskDraft?.draftKey ?? null);
+    const presetKey = activeComposerDraft?.draftKey ?? null;
     const presets = presetConfig?.settings.promptPresets ?? [];
-    if (presetKey && presetConfig && presetEnvironmentId) {
+    if (presetKey && presetConfig && presetEnvironmentId && activeComposerDraft) {
       const environmentId = presetEnvironmentId;
+      const { effectiveAgentSettings, threadState } = activeComposerDraft;
       actions.push({
         key: "savePromptPreset",
         kind: "action",
@@ -384,11 +378,11 @@ export function CommandPalette(props: {
           const draft = getComposerDraftSnapshot(presetKey);
           const name = draft.text.trim().split("\n")[0]?.slice(0, 80) || "Preset";
           const next = buildPromptPreset({
-            id: createPromptPresetId(),
+            id: uuidv4(),
             name,
             instructions: draft.text,
             includeAgentSettings: true,
-            draft: mobileDraftToPromptPresetDraft(draft),
+            draft: mobileDraftToPromptPresetDraft(draft, effectiveAgentSettings),
           });
           const currentPresets =
             serverConfigs.get(environmentId)?.settings.promptPresets ?? presets;
@@ -399,7 +393,7 @@ export function CommandPalette(props: {
           }
           void updateSettings({
             environmentId,
-            input: { patch: { promptPresets: [...saved.value] } },
+            input: { patch: { promptPresetMutation: { operation: "upsert", preset: next } } },
           });
         },
       });
@@ -429,6 +423,8 @@ export function CommandPalette(props: {
                 presetId: preset.id,
                 disposition: "insert",
                 providers: presetConfig.providers,
+                effectiveAgentSettings,
+                threadState,
               });
               if (!result.ok) Alert.alert("Prompt preset", result.message);
             },
@@ -445,6 +441,8 @@ export function CommandPalette(props: {
                 presetId: preset.id,
                 disposition: "replace",
                 providers: presetConfig.providers,
+                effectiveAgentSettings,
+                threadState,
               });
               if (!result.ok) Alert.alert("Prompt preset", result.message);
             },
@@ -461,13 +459,11 @@ export function CommandPalette(props: {
                   text: "Delete",
                   style: "destructive",
                   onPress: () => {
-                    const currentPresets =
-                      serverConfigs.get(environmentId)?.settings.promptPresets ?? presets;
                     void updateSettings({
                       environmentId,
                       input: {
                         patch: {
-                          promptPresets: [...deletePromptPreset(currentPresets, preset.id)],
+                          promptPresetMutation: { operation: "delete", presetId: preset.id },
                         },
                       },
                     });
@@ -484,7 +480,7 @@ export function CommandPalette(props: {
     activeThread,
     activeThreadRef,
     navigation,
-    activeNewTaskDraft,
+    activeComposerDraft,
     projects,
     runCommand,
     savedConnectionsById,

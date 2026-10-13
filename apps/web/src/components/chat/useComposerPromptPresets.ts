@@ -1,19 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   buildPromptPreset,
   createPromptPresetId,
-  deletePromptPreset,
   savePromptPreset,
   type PromptPresetApplyDisposition,
+  type PromptPresetAgentSettings,
+  type PromptPresetThreadState,
 } from "@t3tools/client-runtime/promptPresets";
-import type { EnvironmentId, PromptPreset, ServerProvider } from "@t3tools/contracts";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
 
-import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { serverEnvironment } from "../../state/server";
+import { registerActiveComposerDraftTarget } from "../../activeComposerDraftTarget";
 import {
   applyPromptPresetToComposer,
   composerDraftToPromptPresetDraft,
-  type PromptPresetModelChangeGuard,
 } from "../../lib/applyPromptPreset";
 import { toastManager } from "../ui/toast";
 import type { ComposerThreadDraftState, ComposerThreadTarget } from "../../composerDraftStore";
@@ -23,16 +26,49 @@ export function useComposerPromptPresets(input: {
   readonly threadRef: ComposerThreadTarget;
   readonly draft: ComposerThreadDraftState;
   readonly providers: readonly ServerProvider[];
-  readonly modelChangeGuard?: PromptPresetModelChangeGuard | undefined;
+  readonly effectiveAgentSettings: PromptPresetAgentSettings;
+  readonly threadState: PromptPresetThreadState;
 }) {
   const presets = useEnvironmentSettings(input.environmentId, (settings) => settings.promptPresets);
-  const updateSettings = useUpdateEnvironmentSettings(input.environmentId);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "prompt preset update",
+    reportFailure: true,
+  });
   const [error, setError] = useState<string | null>(null);
-  const localPresetsRef = useRef<readonly PromptPreset[]>(presets);
-
-  useEffect(() => {
-    localPresetsRef.current = presets;
-  }, [presets]);
+  const { environmentId, threadRef, effectiveAgentSettings, threadState } = input;
+  const { providerInstanceId, model, runtimeMode, interactionMode } = effectiveAgentSettings;
+  const {
+    hasStartedSession,
+    isQueuedEdit,
+    currentProviderInstanceId,
+    supportsProviderSwitchingViaHandoff,
+  } = threadState;
+  const activeTarget = useMemo(
+    () => ({
+      environmentId,
+      threadRef,
+      effectiveAgentSettings: { providerInstanceId, model, runtimeMode, interactionMode },
+      threadState: {
+        hasStartedSession,
+        isQueuedEdit,
+        currentProviderInstanceId,
+        supportsProviderSwitchingViaHandoff,
+      },
+    }),
+    [
+      environmentId,
+      threadRef,
+      providerInstanceId,
+      model,
+      runtimeMode,
+      interactionMode,
+      hasStartedSession,
+      isQueuedEdit,
+      currentProviderInstanceId,
+      supportsProviderSwitchingViaHandoff,
+    ],
+  );
+  useEffect(() => registerActiveComposerDraftTarget(activeTarget), [activeTarget]);
 
   const report = (message: string) => {
     setError(message);
@@ -46,11 +82,12 @@ export function useComposerPromptPresets(input: {
       const result = applyPromptPresetToComposer({
         threadRef: input.threadRef,
         draft: input.draft,
-        presets: localPresetsRef.current,
+        presets,
         presetId,
         disposition,
         providers: input.providers,
-        modelChangeGuard: input.modelChangeGuard,
+        effectiveAgentSettings: input.effectiveAgentSettings,
+        threadState: input.threadState,
       });
       if (!result.ok) {
         report(result.message);
@@ -66,7 +103,7 @@ export function useComposerPromptPresets(input: {
       readonly includeAgentSettings: boolean;
       readonly replaceInstructions: boolean;
     }) {
-      const previous = localPresetsRef.current.find((preset) => preset.id === saveInput.id);
+      const previous = presets.find((preset) => preset.id === saveInput.id);
       const next = buildPromptPreset({
         id: saveInput.id ?? createPromptPresetId(),
         name: saveInput.name,
@@ -75,23 +112,25 @@ export function useComposerPromptPresets(input: {
             ? previous.instructions
             : saveInput.instructions,
         includeAgentSettings: saveInput.includeAgentSettings,
-        draft: composerDraftToPromptPresetDraft(input.draft),
-        ...(previous ? { previous } : {}),
+        draft: composerDraftToPromptPresetDraft(input.draft, input.effectiveAgentSettings),
       });
-      const saved = savePromptPreset(localPresetsRef.current, next);
+      const saved = savePromptPreset(presets, next);
       if (!saved.ok) {
         report(saved.message);
         return false;
       }
-      localPresetsRef.current = saved.value;
-      updateSettings({ promptPresets: [...saved.value] });
+      void updateSettings({
+        environmentId: input.environmentId,
+        input: { patch: { promptPresetMutation: { operation: "upsert", preset: next } } },
+      });
       setError(null);
       return true;
     },
     remove(presetId: string) {
-      const next = deletePromptPreset(localPresetsRef.current, presetId);
-      localPresetsRef.current = next;
-      updateSettings({ promptPresets: [...next] });
+      void updateSettings({
+        environmentId: input.environmentId,
+        input: { patch: { promptPresetMutation: { operation: "delete", presetId } } },
+      });
       setError(null);
     },
   };

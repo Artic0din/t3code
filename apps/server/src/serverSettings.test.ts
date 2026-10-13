@@ -97,6 +97,73 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("preserves concurrent prompt preset mutations in persisted settings", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const first = { id: "first", name: "First", instructions: "First instructions" };
+      const second = { id: "second", name: "Second", instructions: "Second instructions" };
+      const patches = yield* Effect.all(
+        [first, second].map((preset) =>
+          decodeSettingsPatch({ promptPresetMutation: { operation: "upsert", preset } }),
+        ),
+      );
+      yield* Effect.all(
+        patches.map((patch) => service.updateSettings(patch)),
+        {
+          concurrency: "unbounded",
+        },
+      );
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.promptPresets, [first, second]);
+      const renamed = { ...second, name: "Renamed" };
+      yield* Effect.all(
+        [
+          service.updateSettings({
+            promptPresetMutation: { operation: "delete", presetId: first.id },
+          }),
+          service.updateSettings({
+            promptPresetMutation: { operation: "upsert", preset: renamed },
+          }),
+        ],
+        { concurrency: "unbounded" },
+      );
+      const afterEdits = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(afterEdits.promptPresets, [renamed]);
+      yield* service.updateSettings({
+        promptPresetMutation: { operation: "delete", presetId: "missing" },
+      });
+      assert.deepEqual((yield* service.getSettings).promptPresets, [renamed]);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("rejects an atomic addition beyond the preset limit without writing it", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const presets = Array.from({ length: 32 }, (_, index) => ({
+        id: `preset-${index}`,
+        name: `Preset ${index}`,
+        instructions: "Task",
+      }));
+      yield* service.updateSettings({ promptPresets: presets });
+      const error = yield* service
+        .updateSettings({
+          promptPresetMutation: {
+            operation: "upsert",
+            preset: { id: "overflow", name: "Overflow", instructions: "Task" },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ServerSettingsError");
+      assert.deepEqual((yield* service.getSettings).promptPresets, presets);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

@@ -24,3 +24,8 @@ export const PromptPresets = Schema.Array(PromptPreset).check(
   Schema.isMaxLength(MAX_PROMPT_PRESETS),
 );
 export type PromptPresets = typeof PromptPresets.Type;
+
+export const PromptPresetMutation = Schema.Union([
+  Schema.Struct({ operation: Schema.Literal("upsert"), preset: PromptPreset }),
+  Schema.Struct({ operation: Schema.Literal("delete"), presetId: PromptPresetId }),
+]);
