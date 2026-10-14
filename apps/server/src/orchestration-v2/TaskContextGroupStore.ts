@@ -10,7 +10,6 @@ import {
   turnReceivedTaskContext,
   type OrchestrationMessageContext as MessageContext,
   type OrchestrationV2AppThread,
-  type TaskContextGroupResource,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -21,7 +20,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ProjectStore from "./ProjectStore.ts";
-import * as ProjectionStore from "./ProjectionStore.ts";
 
 const encodeMessageContext = Schema.encodeEffect(OrchestrationMessageContext);
 
@@ -81,7 +79,6 @@ export class TaskContextGroupStore extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const threads = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const decode = Schema.decodeUnknownOption(Schema.fromJsonString(TaskContextGroup));
   const storageError = () =>
@@ -112,41 +109,58 @@ const make = Effect.gen(function* () {
     `.pipe(Effect.mapError(storageError));
     return yield* Effect.forEach(rows, (row) => decodeRow(row.document_json), { concurrency: 1 });
   });
-  const resolveResource = Effect.fn("TaskContextGroupStore.resolveResource")(function* (
-    resource: TaskContextGroupResource,
-  ): Effect.fn.Return<TaskContextGroupResource, TaskContextGroupError> {
-    switch (resource.kind) {
-      case "note":
-      case "url":
-        return resource;
-      case "thread": {
-        const thread = yield* threads
-          .getThreadShell(resource.threadId)
-          .pipe(Effect.mapError(storageError));
-        return thread === null || thread.deletedAt !== null
-          ? { ...resource, title: resource.title ?? null, availability: "missing" }
-          : {
-              ...resource,
-              title: thread.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Thread",
-              availability: "available",
-            };
-      }
-      case "project": {
-        const project = yield* projects.get(resource.projectId).pipe(Effect.mapError(storageError));
-        return Option.isNone(project) || project.value.deletedAt !== null
-          ? { ...resource, name: resource.name ?? null, availability: "missing" }
-          : {
-              ...resource,
-              name: project.value.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Project",
-              availability: "available",
-            };
-      }
-    }
-  });
   const resolve = Effect.fn("TaskContextGroupStore.resolve")(function* (group: TaskContextGroup) {
+    const threadIds = group.resources.flatMap((resource) =>
+      resource.kind === "thread" ? [resource.threadId] : [],
+    );
+    const projectIds = group.resources.flatMap((resource) =>
+      resource.kind === "project" ? [resource.projectId] : [],
+    );
+    const threadRows =
+      threadIds.length === 0
+        ? []
+        : yield* sql<{
+            readonly thread_id: string;
+            readonly title: string;
+          }>`SELECT thread_id, title FROM orchestration_v2_projection_threads
+      WHERE ${sql.in("thread_id", threadIds)} AND deleted_at IS NULL
+        AND json_extract(payload_json, '$.deletedAt') IS NULL
+    `.pipe(Effect.mapError(storageError));
+    const projectRows =
+      projectIds.length === 0
+        ? []
+        : yield* projects.list({ projectIds }).pipe(Effect.mapError(storageError));
+    const threadTitles = new Map(threadRows.map((row) => [row.thread_id, row.title]));
+    const projectTitles = new Map(projectRows.map((row) => [row.projectId, row.title]));
     return {
       ...group,
-      resources: yield* Effect.forEach(group.resources, resolveResource, { concurrency: 1 }),
+      resources: group.resources.map((resource) => {
+        switch (resource.kind) {
+          case "note":
+          case "url":
+            return resource;
+          case "thread": {
+            const title = threadTitles.get(resource.threadId);
+            return title === undefined
+              ? { ...resource, title: resource.title ?? null, availability: "missing" as const }
+              : {
+                  ...resource,
+                  title: title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Thread",
+                  availability: "available" as const,
+                };
+          }
+          case "project": {
+            const title = projectTitles.get(resource.projectId);
+            return title === undefined
+              ? { ...resource, name: resource.name ?? null, availability: "missing" as const }
+              : {
+                  ...resource,
+                  name: title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Project",
+                  availability: "available" as const,
+                };
+          }
+        }
+      }),
     };
   });
   const capture: TaskContextGroupStore["Service"]["capture"] = Effect.fn(

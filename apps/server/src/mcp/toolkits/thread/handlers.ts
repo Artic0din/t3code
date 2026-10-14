@@ -81,7 +81,12 @@ function taskContextFailure(error: TaskContextGroupError): OrchestratorMcpFailur
   return error.code === "orchestration_error"
     ? unavailable()
     : new OrchestratorMcpFailure({
-        code: error.code === "permission_denied" ? "capability_denied" : "invalid_request",
+        code:
+          error.code === "permission_denied"
+            ? "capability_denied"
+            : error.code === "path_refused"
+              ? "path_refused"
+              : "invalid_request",
         message: error.message,
       });
 }

@@ -7,6 +7,13 @@ function completed(input: unknown, output?: unknown): T3ToolSummaryCall {
 }
 
 describe("summarizeT3ToolCalls", () => {
+  it.each([
+    ["task-context-list", "Listed shared context 1 time"],
+    ["task-context-read", "Read shared context 1 time"],
+    ["task-context-mutate", "Updated shared context 1 time"],
+  ] as const)("describes %s calls", (action, label) => {
+    expect(summarizeT3ToolCalls(action, [completed({})])).toEqual({ label, failedCount: 0 });
+  });
   it("counts registered projects, repository destinations, and accepted thread launches", () => {
     expect(
       summarizeT3ToolCalls("project-create", [

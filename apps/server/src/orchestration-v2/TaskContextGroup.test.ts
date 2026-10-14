@@ -10,6 +10,9 @@ import {
   EventId,
   OrchestrationV2Command,
   TaskContextGroupId,
+  TaskContextResourceId,
+  WsTaskContextGroupsMutateRpc,
+  WS_METHODS,
   turnReceivedTaskContext,
   type Project,
   type TaskContextGroupForThreadResult,
@@ -22,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import { RpcGroup, RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ApplicationEventStore from "../persistence/OrchestrationEventStore.ts";
@@ -622,6 +626,194 @@ describe("TaskContextGroup", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each(["WebSocket", "MCP"] as const)(
+    "refuses project paths through %s mutations",
+    (transport) =>
+      Effect.gen(function* () {
+        const service = yield* TaskContextGroupService.TaskContextGroupService;
+        yield* createThread(threadA, projectA, "/wt/frontend");
+        const created = yield* service.mutate({ action: "create", threadId: threadA });
+        const request = {
+          action: "attach-resource",
+          groupId: created.group.id,
+          resource: { kind: "project", projectId: projectA, worktreePath: "/tmp/client-path" },
+        } as const;
+        if (transport === "WebSocket") {
+          const group = RpcGroup.make(WsTaskContextGroupsMutateRpc);
+          const responses = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
+          const receive =
+            yield* Deferred.make<Parameters<RpcServer.Protocol["Service"]["run"]>[0]>();
+          const protocol = yield* RpcServer.Protocol.make((write) =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(receive, write);
+              const serialization = yield* RpcSerialization.RpcSerialization;
+              return {
+                disconnects: yield* Queue.unbounded<number>(),
+                send: (_clientId, response) => Queue.offer(responses, response),
+                end: () => Effect.void,
+                clientIds: Effect.succeed(new Set([0])),
+                initialMessage: Effect.succeedNone,
+                supportsAck: true,
+                supportsTransferables: false,
+                supportsSpanPropagation: false,
+                supportsNotifications: true,
+                codecFor: serialization.codecFor,
+              };
+            }),
+          );
+          yield* RpcServer.make(group).pipe(
+            Effect.provide(
+              group.toLayerHandler(WS_METHODS.taskContextGroupsMutate, (input) =>
+                service.mutate(input),
+              ),
+            ),
+            Effect.provideService(RpcServer.Protocol, protocol),
+            Effect.forkScoped,
+          );
+          const write = yield* Deferred.await(receive);
+          yield* write(0, {
+            _tag: "Request",
+            id: "1",
+            tag: WS_METHODS.taskContextGroupsMutate,
+            payload: request,
+            headers: [],
+          });
+          const response = yield* Queue.take(responses);
+          assert.equal(response._tag, "Exit", JSON.stringify(response));
+          assert.match(JSON.stringify(response), /"code":"path_refused"/);
+        } else {
+          const tools = yield* ThreadToolkit;
+          const response = yield* tools.handle("t3_task_context_mutate", { input: request }).pipe(
+            Effect.flatMap(Stream.runCollect),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, {
+              environmentId: EnvironmentId.make("test-environment"),
+              requestNamespace: "path-refusal",
+              thread: undefined,
+              client: { sessionId: "test-session", label: "Context test", access: "full-access" },
+              capabilities: new Set(["orchestration"] as const),
+              issuedAt: 0,
+            }),
+          );
+          assert.equal(response[0]?.isFailure, true);
+          assert.equal(
+            (response[0]?.result as { code?: string } | undefined)?.code,
+            "path_refused",
+          );
+        }
+        assert.deepEqual((yield* service.get(created.group.id)).group?.resources, []);
+      }).pipe(
+        Effect.provide(RpcSerialization.layerJson),
+        Effect.scoped,
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
+            Layer.provideMerge(layerService),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("captures 100 resources and freezes resolved names and availability", () =>
+    Effect.gen(function* () {
+      const service = yield* TaskContextGroupService.TaskContextGroupService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* createThread(threadA, projectA, "/wt/frontend");
+      const created = yield* service.mutate({
+        action: "create",
+        threadId: threadA,
+        brief: "Maximum group",
+      });
+      const resources = [];
+      for (let index = 0; index < 20; index++) {
+        const threadId = ThreadId.make(`reference-thread:${index}`);
+        const projectId = ProjectId.make(`reference-project:${index}`);
+        if (index < 19) {
+          yield* createThread(threadId, projectId, null);
+        }
+        if (index === 18) {
+          yield* sql`UPDATE orchestration_v2_projection_threads SET deleted_at = '2026-10-13'
+            WHERE thread_id = ${threadId}`;
+          yield* sql`UPDATE projection_projects SET deleted_at = '2026-10-13'
+            WHERE project_id = ${projectId}`;
+        }
+        resources.push(
+          {
+            kind: "thread" as const,
+            resourceId: TaskContextResourceId.make(`resource-thread:${index}`),
+            threadId,
+            title: "Previous thread",
+          },
+          {
+            kind: "project" as const,
+            resourceId: TaskContextResourceId.make(`resource-project:${index}`),
+            projectId,
+            name: "Previous project",
+          },
+        );
+      }
+      for (let index = 0; index < 60; index++) {
+        resources.push({
+          kind: "note" as const,
+          resourceId: TaskContextResourceId.make(`note:${index}`),
+          title: "Note",
+          body: `Decision ${index}`,
+        });
+      }
+      yield* sql`UPDATE task_context_groups
+        SET document_json = ${JSON.stringify({ ...created.group, resources })}
+        WHERE group_id = ${created.group.id}`;
+      const captured = yield* service.enrichTurn({
+        threadId: threadA,
+        text: "Capture references",
+        context: undefined,
+      });
+      const frozen = turnReceivedTaskContext(captured.context);
+      assert.equal(frozen?.resources.length, 100);
+      assert.deepEqual(
+        frozen?.resources,
+        resources.map((resource, index) => {
+          if (resource.kind === "note") return resource;
+          const missing = Math.floor(index / 2) >= 18;
+          return resource.kind === "thread"
+            ? {
+                ...resource,
+                title: missing ? "Previous thread" : resource.threadId,
+                availability: missing ? "missing" : "available",
+              }
+            : {
+                ...resource,
+                name: missing ? "Previous project" : "Backend",
+                availability: missing ? "missing" : "available",
+              };
+        }),
+      );
+      yield* sql`UPDATE orchestration_v2_projection_threads SET title = 'Renamed',
+        payload_json = json_set(payload_json, '$.title', 'Renamed') WHERE thread_id = 'reference-thread:0'`;
+      yield* sql`UPDATE projection_projects SET title = 'Renamed' WHERE project_id = 'reference-project:0'`;
+      assert.deepEqual(turnReceivedTaskContext(captured.context), frozen);
+      const next = yield* service.enrichTurn({
+        threadId: threadA,
+        text: "Capture renamed references",
+        context: undefined,
+      });
+      assert.deepEqual(turnReceivedTaskContext(next.context)?.resources.slice(0, 2), [
+        {
+          kind: "thread",
+          resourceId: TaskContextResourceId.make("resource-thread:0"),
+          threadId: ThreadId.make("reference-thread:0"),
+          title: "Renamed",
+          availability: "available",
+        },
+        {
+          kind: "project",
+          resourceId: TaskContextResourceId.make("resource-project:0"),
+          projectId: ProjectId.make("reference-project:0"),
+          name: "Renamed",
+          availability: "available",
+        },
+      ]);
+    }).pipe(Effect.provide(layerService)),
   );
 
   it.effect("captures shared context for messages generated inside orchestration", () =>

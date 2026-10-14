@@ -3,6 +3,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   TaskContextGroupId,
+  TaskContextResourceId,
   ThreadId,
   WS_METHODS,
   type ServerConfig,
@@ -10,6 +11,7 @@ import {
   type TaskContextGroupMutateInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -34,6 +36,7 @@ const threadId = ThreadId.make("shared-context-thread");
 
 const makeHarness = Effect.fn("TaskContextQueryTest.makeHarness")(function* (
   supportsChanges: boolean,
+  beforeMutate: (input: TaskContextGroupMutateInput) => Effect.Effect<void> = () => Effect.void,
 ) {
   const config = {
     settings: DEFAULT_SERVER_SETTINGS,
@@ -55,16 +58,43 @@ const makeHarness = Effect.fn("TaskContextQueryTest.makeHarness")(function* (
       return Stream.concat(Stream.make(0), Stream.fromQueue(changes));
     },
     [WS_METHODS.taskContextGroupsMutate]: (input: TaskContextGroupMutateInput) =>
-      Effect.sync(() => {
-        group = {
-          id: TaskContextGroupId.make("shared-context-group"),
-          title: "Shared work",
-          brief: input.action === "create" ? (input.brief ?? "") : "",
-          resources: [],
-          memberThreadIds: [threadId],
-          createdAt: "2026-10-13T00:00:00.000Z",
-          updatedAt: "2026-10-13T00:00:00.000Z",
-        };
+      Effect.gen(function* () {
+        yield* beforeMutate(input);
+        if (input.action === "create")
+          group = {
+            id: TaskContextGroupId.make("shared-context-group"),
+            title: "Shared work",
+            brief: input.brief ?? "",
+            resources: [],
+            memberThreadIds: [threadId],
+            createdAt: "2026-10-13T00:00:00.000Z",
+            updatedAt: "2026-10-13T00:00:00.000Z",
+          };
+        if (group === null)
+          return yield* Effect.die(new Error("Create a group before mutating it."));
+        if (input.action === "attach-resource") {
+          const resource = input.resource;
+          if (resource.kind !== "note")
+            return yield* Effect.die(new Error("This fixture attaches notes."));
+          group = {
+            ...group,
+            resources: [
+              ...group.resources,
+              {
+                ...resource,
+                resourceId: TaskContextResourceId.make(`resource:${resource.title}`),
+              },
+            ],
+          };
+        }
+        if (input.action === "detach-resource") {
+          group = {
+            ...group,
+            resources: group.resources.filter(
+              (resource) => resource.resourceId !== input.resourceId,
+            ),
+          };
+        }
         return { group };
       }),
   } as unknown as WsRpcProtocolClient;
@@ -145,9 +175,69 @@ const makeHarness = Effect.fn("TaskContextQueryTest.makeHarness")(function* (
     create,
     externalEdit,
     waitForBrief,
+    mutate: (input: TaskContextGroupMutateInput) =>
+      atoms.mutateTaskContextGroup.run(registry, { environmentId, input }),
+    group: () => group,
     subscriptions: () => subscriptions,
   };
 });
+
+it.effect(
+  "persists both distinct attachments and removals requested while another mutation is pending",
+  () =>
+    Effect.gen(function* () {
+      const attachmentGate = yield* Deferred.make<void>();
+      const removalGate = yield* Deferred.make<void>();
+      const entered = yield* Queue.unbounded<string>();
+      const harness = yield* makeHarness(false, (input) =>
+        input.action === "attach-resource" || input.action === "detach-resource"
+          ? Queue.offer(entered, input.action).pipe(
+              Effect.andThen(
+                Deferred.await(input.action === "attach-resource" ? attachmentGate : removalGate),
+              ),
+            )
+          : Effect.void,
+      );
+      yield* harness.create();
+      const groupId = TaskContextGroupId.make("shared-context-group");
+      const firstAttachment = harness.mutate({
+        action: "attach-resource",
+        groupId,
+        resource: { kind: "note", title: "First", body: "First decision" },
+      });
+      expect(yield* Queue.take(entered)).toBe("attach-resource");
+      const secondAttachment = harness.mutate({
+        action: "attach-resource",
+        groupId,
+        resource: { kind: "note", title: "Second", body: "Second decision" },
+      });
+      yield* Deferred.succeed(attachmentGate, undefined);
+      const attachments = yield* Effect.promise(() =>
+        Promise.all([firstAttachment, secondAttachment]),
+      );
+      expect(attachments.map((result) => result._tag)).toEqual(["Success", "Success"]);
+      expect(harness.group()?.resources).toEqual([
+        { kind: "note", title: "First", body: "First decision", resourceId: "resource:First" },
+        { kind: "note", title: "Second", body: "Second decision", resourceId: "resource:Second" },
+      ]);
+      expect(yield* Queue.take(entered)).toBe("attach-resource");
+      const firstRemoval = harness.mutate({
+        action: "detach-resource",
+        groupId,
+        resourceId: TaskContextResourceId.make("resource:First"),
+      });
+      expect(yield* Queue.take(entered)).toBe("detach-resource");
+      const secondRemoval = harness.mutate({
+        action: "detach-resource",
+        groupId,
+        resourceId: TaskContextResourceId.make("resource:Second"),
+      });
+      yield* Deferred.succeed(removalGate, undefined);
+      const removals = yield* Effect.promise(() => Promise.all([firstRemoval, secondRemoval]));
+      expect(removals.map((result) => result._tag)).toEqual(["Success", "Success"]);
+      expect(harness.group()?.resources).toEqual([]);
+    }).pipe(Effect.scoped),
+);
 
 it.effect("refreshes a mounted empty query after creating a group on an older server", () =>
   Effect.scoped(

@@ -330,7 +330,7 @@ import {
   TaskContextGroupGetResult,
   TaskContextGroupListInput,
   TaskContextGroupListResult,
-  TaskContextGroupMutateInput,
+  TaskContextGroupMutateRequest,
   TaskContextGroupMutateResult,
 } from "./taskContextGroup.ts";
 import {
@@ -1760,8 +1760,8 @@ const WsTaskContextGroupsForThreadRpc = Rpc.make(WS_METHODS.taskContextGroupsFor
   error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
 });
 
-const WsTaskContextGroupsMutateRpc = Rpc.make(WS_METHODS.taskContextGroupsMutate, {
-  payload: TaskContextGroupMutateInput,
+export const WsTaskContextGroupsMutateRpc = Rpc.make(WS_METHODS.taskContextGroupsMutate, {
+  payload: TaskContextGroupMutateRequest,
   success: TaskContextGroupMutateResult,
   error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
 });

@@ -1352,7 +1352,7 @@ export function createServerEnvironmentAtoms<R, E>(
           registry.set(signal, registry.get(signal) + 1);
         }),
       concurrency: {
-        mode: "singleFlight",
+        mode: "serial",
         key: ({ environmentId, input }) =>
           JSON.stringify([
             environmentId,

@@ -190,29 +190,33 @@ const DetachThreadAction = Schema.Struct({
   threadId: ThreadId,
 });
 
+const resourceInputs = [
+  Schema.Struct({
+    kind: Schema.Literal("note"),
+    title: TaskContextGroupTitle,
+    body: Schema.String.check(Schema.isMaxLength(TASK_CONTEXT_NOTE_MAX_CHARS)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("url"),
+    title: TaskContextGroupTitle,
+    url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_048)),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("thread"),
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("project"),
+    projectId: ProjectId,
+  }),
+] as const;
+
+export const TaskContextGroupResourceInput = Schema.Union(resourceInputs);
+
 const AttachResourceAction = Schema.Struct({
   action: Schema.Literal("attach-resource"),
   groupId: TaskContextGroupId,
-  resource: Schema.Union([
-    Schema.Struct({
-      kind: Schema.Literal("note"),
-      title: TaskContextGroupTitle,
-      body: Schema.String.check(Schema.isMaxLength(TASK_CONTEXT_NOTE_MAX_CHARS)),
-    }),
-    Schema.Struct({
-      kind: Schema.Literal("url"),
-      title: TaskContextGroupTitle,
-      url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_048)),
-    }),
-    Schema.Struct({
-      kind: Schema.Literal("thread"),
-      threadId: ThreadId,
-    }),
-    Schema.Struct({
-      kind: Schema.Literal("project"),
-      projectId: ProjectId,
-    }),
-  ]),
+  resource: TaskContextGroupResourceInput,
 });
 
 const DetachResourceAction = Schema.Struct({
@@ -230,6 +234,24 @@ export const TaskContextGroupMutateInput = Schema.Union([
   DetachResourceAction,
 ]);
 export type TaskContextGroupMutateInput = typeof TaskContextGroupMutateInput.Type;
+
+// Retain unknown resource fields until service decoding can return a domain
+// failure. Transport schema failures become RPC defects or MCP validation errors.
+export const TaskContextGroupMutateRequest = Schema.Union([
+  CreateAction,
+  UpdateBriefAction,
+  AttachThreadAction,
+  DetachThreadAction,
+  Schema.Struct({
+    ...AttachResourceAction.fields,
+    resource: Schema.Union(
+      resourceInputs.map((resource) =>
+        Schema.StructWithRest(resource, [Schema.Record(Schema.String, Schema.Unknown)]),
+      ),
+    ),
+  }),
+  DetachResourceAction,
+]);
 
 export const TaskContextGroupMutateResult = Schema.Struct({
   group: TaskContextGroup,

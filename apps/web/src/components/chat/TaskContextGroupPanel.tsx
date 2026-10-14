@@ -80,7 +80,7 @@ function TaskContextControls(props: Props) {
   );
   const group = query.data?.group ?? null;
   const groups = useEnvironmentQuery(
-    access.readable && group === null
+    access.readable && query.isSuccess && !query.isPending && query.data?.group === null
       ? serverEnvironment.taskContextGroupsList({
           environmentId: props.environmentId,
           input: {},

@@ -230,6 +230,15 @@ export function summarizeT3ToolCalls(
     case "thread-update":
       label = phrase("Updated", "update", quantity(countEntities(threadIds), "thread"));
       break;
+    case "task-context-list":
+      label = phrase("Listed", "list", `shared context ${times}`);
+      break;
+    case "task-context-read":
+      label = phrase("Read", "read", `shared context ${times}`);
+      break;
+    case "task-context-mutate":
+      label = phrase("Updated", "update", `shared context ${times}`);
+      break;
     case "queue-list":
       label = phrase("Listed", "list", `queued messages ${times}`);
       break;

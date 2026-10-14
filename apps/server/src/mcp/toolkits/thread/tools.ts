@@ -20,7 +20,7 @@ import {
   ProjectId,
   TaskContextGroupForThreadResult,
   TaskContextGroupListResult,
-  TaskContextGroupMutateInput,
+  TaskContextGroupMutateRequest,
   TaskContextGroupMutateResult,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
@@ -285,7 +285,6 @@ const TaskContextListTool = Tool.make("t3_task_context_list", {
   ...taskContextTool,
   description:
     "List shared context groups in this environment. Groups contain explicit references and notes; linking them never grants repository write access.",
-  parameters: Schema.Struct({}),
   success: TaskContextGroupListResult,
 })
   .annotate(Tool.Readonly, true)
@@ -303,7 +302,7 @@ const TaskContextMutateTool = Tool.make("t3_task_context_mutate", {
   ...taskContextTool,
   description:
     "Create shared context, edit its brief, attach or detach existing threads, and attach or remove note, URL, thread, or project references. Requires full-access/default authorization. Groups and resources stay in this environment; repository permissions and Git operations remain owned by each thread.",
-  parameters: Schema.Struct({ input: TaskContextGroupMutateInput }),
+  parameters: Schema.Struct({ input: TaskContextGroupMutateRequest }),
   success: TaskContextGroupMutateResult,
 }).annotate(Tool.Destructive, true);
 

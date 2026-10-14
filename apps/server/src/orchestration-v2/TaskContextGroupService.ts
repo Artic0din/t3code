@@ -6,6 +6,7 @@ import {
   TaskContextGroupError,
   TaskContextGroupId,
   TaskContextResourceId,
+  TaskContextGroupResourceInput,
   TASK_CONTEXT_TITLE_MAX_CHARS,
   ThreadId,
   isHttpUrl,
@@ -41,6 +42,9 @@ import * as TaskContextGroupStore from "./TaskContextGroupStore.ts";
 
 const encodeGroup = Schema.encodeEffect(Schema.fromJsonString(TaskContextGroup));
 const validateGroupDocument = Schema.encodeEffect(TaskContextGroup);
+const decodeResource = Schema.decodeUnknownEffect(TaskContextGroupResourceInput, {
+  onExcessProperty: "error",
+});
 export class TaskContextGroupService extends Context.Service<
   TaskContextGroupService,
   {
@@ -310,10 +314,15 @@ const make = Effect.gen(function* () {
     function* (
       resource: Extract<TaskContextGroupMutateInput, { action: "attach-resource" }>["resource"],
     ) {
-      const pathRefusal = refuseClientPathResource(resource);
-      if (pathRefusal !== null) {
-        return yield* failure("path_refused", pathRefusal);
-      }
+      resource = yield* decodeResource(resource).pipe(
+        Effect.mapError(() => {
+          const pathRefusal = refuseClientPathResource(resource);
+          return failure(
+            pathRefusal === null ? "invalid_resource" : "path_refused",
+            pathRefusal ?? "The resource contains unsupported fields.",
+          );
+        }),
+      );
       const resourceId = yield* mintResourceId();
       switch (resource.kind) {
         case "note":

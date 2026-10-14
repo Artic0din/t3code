@@ -94,6 +94,77 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
 });
 
 it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
+  it.effect("prunes shared context to retained members and resources", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-context-src-",
+      });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-context-dest-" });
+      const source = yield* createFixtureSource(sourceDir);
+      const retainedResources = [
+        { kind: "note", resourceId: "note", title: "Decision", body: "Kept note" },
+        { kind: "url", resourceId: "url", title: "Docs", url: "https://example.com" },
+        { kind: "thread", resourceId: "thread", threadId: "fork-thread" },
+        { kind: "project", resourceId: "project", projectId: "project-kept" },
+      ];
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          for (const [id, members, resources] of [
+            [
+              "kept",
+              ["stopped-thread", "running-thread"],
+              [
+                ...retainedResources,
+                { kind: "thread", resourceId: "live-thread", threadId: "running-thread" },
+                { kind: "project", resourceId: "deleted-project", projectId: "project-deleted" },
+              ],
+            ],
+            ["live", ["running-thread"], [{ kind: "note", body: "Live private note" }]],
+            ["empty", [], [{ kind: "note", body: "Unattached private note" }]],
+          ] as const) {
+            yield* sql`INSERT INTO task_context_groups (group_id, document_json, updated_at)
+            VALUES (${id}, ${JSON.stringify({ id, brief: `${id} brief`, memberThreadIds: members, resources })}, '2026-08-01')`;
+          }
+        }),
+      );
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 1 },
+        { sharedHome: sourceDir },
+      );
+      const documents = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{
+            document_json: string;
+          }>`SELECT document_json FROM task_context_groups`;
+        }),
+      );
+      assert.deepEqual(
+        documents.map((row) => JSON.parse(row.document_json)),
+        [
+          {
+            id: "kept",
+            brief: "kept brief",
+            memberThreadIds: ["stopped-thread"],
+            resources: retainedResources,
+          },
+        ],
+      );
+      const sourceGroups = yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM task_context_groups`;
+        }),
+      );
+      assert.equal(sourceGroups[0]?.count, 3);
+    }),
+  );
+
   it.effect("keeps stopped thread families from live projects and clears pending work", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

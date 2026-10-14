@@ -324,9 +324,34 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
     WHERE m.type = 'table' AND c.name = 'thread_id'
       AND m.name <> 'orchestration_v2_projection_provider_sessions'`;
+  const taskContextTables = yield* sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_context_groups'`;
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      if (taskContextTables.length > 0) {
+        yield* sql`DELETE FROM task_context_groups WHERE NOT EXISTS (
+          SELECT 1 FROM json_each(document_json, '$.memberThreadIds') member
+          JOIN kept_threads kept ON kept.thread_id = member.value
+        )`;
+        yield* sql`UPDATE task_context_groups SET document_json = json_set(
+          document_json,
+          '$.memberThreadIds', json((
+            SELECT json_group_array(member.value)
+            FROM json_each(document_json, '$.memberThreadIds') member
+            WHERE member.value IN (SELECT thread_id FROM kept_threads)
+          )),
+          '$.resources', json((
+            SELECT json_group_array(json(resource.value))
+            FROM json_each(document_json, '$.resources') resource
+            WHERE json_extract(resource.value, '$.kind') IN ('note', 'url')
+              OR (json_extract(resource.value, '$.kind') = 'thread'
+                AND json_extract(resource.value, '$.threadId') IN (SELECT thread_id FROM kept_threads))
+              OR (json_extract(resource.value, '$.kind') = 'project'
+                AND json_extract(resource.value, '$.projectId') IN (SELECT project_id FROM kept_projects))
+          ))
+        )`;
+      }
       yield* sql`DELETE FROM projection_projects
         WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
       yield* sql`DELETE FROM orchestration_v2_projection_provider_sessions
