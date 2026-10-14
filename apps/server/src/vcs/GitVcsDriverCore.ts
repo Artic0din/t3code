@@ -1511,20 +1511,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.map(parseRemoteNamesInGitOrder),
     );
 
-  const configuredPublishBranchName = (cwd: string, branchName: string) =>
-    runGitStdout(
-      "GitVcsDriver.resolvePublishBranchName.config",
-      cwd,
-      ["config", "--get", `branch.${branchName}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`],
-      true,
-    ).pipe(Effect.map((stdout) => stdout.trim() || null));
-
   const resolvePublishBranchName = Effect.fn("resolvePublishBranchName")(function* (
     cwd: string,
     branchName: string,
   ) {
-    const configuredBranch = yield* configuredPublishBranchName(cwd, branchName);
-    if (configuredBranch !== null) return configuredBranch;
     const remoteNames = yield* listRemoteNames(cwd).pipe(Effect.orElseSucceed(() => []));
     const parsedRemoteRef = parseRemoteRefWithRemoteNames(branchName, remoteNames);
     return parsedRemoteRef?.branchName ?? branchName;
@@ -1549,7 +1539,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     });
   });
 
-  const resolveConfiguredPushRemoteName = Effect.fn("resolveConfiguredPushRemoteName")(function* (
+  const resolvePushRemoteName = Effect.fn("resolvePushRemoteName")(function* (
     cwd: string,
     refName: string,
   ) {
@@ -1573,17 +1563,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return pushDefaultRemote;
     }
 
-    return null;
-  });
-
-  const resolvePushRemoteName = Effect.fn("resolvePushRemoteName")(function* (
-    cwd: string,
-    refName: string,
-  ) {
-    return (
-      (yield* resolveConfiguredPushRemoteName(cwd, refName)) ??
-      (yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null)))
-    );
+    return yield* resolvePrimaryRemoteName(cwd).pipe(Effect.orElseSucceed(() => null));
   });
 
   const ensureRemote: GitVcsDriver.GitVcsDriver["Service"]["ensureRemote"] = Effect.fn(
@@ -2315,27 +2295,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       };
     }
 
-    const currentUpstream = yield* resolveCurrentUpstream(cwd).pipe(
-      Effect.orElseSucceed(() => null),
-    );
-    const configuredPublishBranch = yield* configuredPublishBranchName(cwd, branch);
-    const isAliasOfUpstreamHead =
-      currentUpstream !== null &&
-      (configuredPublishBranch === null
-        ? branch === currentUpstream.branchName ||
-          (branch.endsWith(`/${currentUpstream.branchName}`) &&
-            currentUpstream.upstreamRef.endsWith(`/${branch}`))
-        : configuredPublishBranch === currentUpstream.branchName);
-    const configuredPushRemote = yield* resolveConfiguredPushRemoteName(cwd, branch);
     const hasNoLocalDelta = details.aheadCount === 0 && details.behindCount === 0;
     if (hasNoLocalDelta) {
-      if (
-        details.hasUpstream &&
-        ((configuredPublishBranch === null && configuredPushRemote === null) ||
-          (isAliasOfUpstreamHead &&
-            (configuredPushRemote === null ||
-              configuredPushRemote === currentUpstream?.remoteName)))
-      ) {
+      if (details.hasUpstream) {
         return {
           status: "skipped_up_to_date" as const,
           branch,
@@ -2343,9 +2305,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         };
       }
 
-      const comparableBaseBranch =
-        !details.hasUpstream &&
-        (yield* resolveBaseBranchForNoUpstream(cwd, branch).pipe(Effect.orElseSucceed(() => null)));
+      const comparableBaseBranch = yield* resolveBaseBranchForNoUpstream(cwd, branch).pipe(
+        Effect.orElseSucceed(() => null),
+      );
       if (comparableBaseBranch) {
         const publishRemoteName = yield* resolvePushRemoteName(cwd, branch).pipe(
           Effect.orElseSucceed(() => null),
@@ -2360,7 +2322,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         const hasRemoteBranch = yield* remoteBranchExists({
           cwd,
           remoteName: publishRemoteName,
-          refName: yield* resolvePublishBranchName(cwd, branch),
+          refName: branch,
         }).pipe(Effect.orElseSucceed(() => false));
         if (hasRemoteBranch) {
           return {
@@ -2398,6 +2360,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       };
     }
 
+    const currentUpstream = yield* resolveCurrentUpstream(cwd).pipe(
+      Effect.orElseSucceed(() => null),
+    );
     if (currentUpstream) {
       // A branch tracking a differently named ref was cut from it, the way
       // `git checkout -b feature origin/dev` and our own worktree flow leave
@@ -2408,6 +2373,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // alias such as local `upstream/effect-atom` for my-org/upstream's
       // `effect-atom`: the branch name ends in the upstream head while the
       // upstream ref ends in the branch name.
+      const isAliasOfUpstreamHead =
+        branch === currentUpstream.branchName ||
+        (branch.endsWith(`/${currentUpstream.branchName}`) &&
+          currentUpstream.upstreamRef.endsWith(`/${branch}`));
       if (!isAliasOfUpstreamHead) {
         const publishRemoteName = yield* resolvePushRemoteName(cwd, branch).pipe(
           Effect.orElseSucceed(() => null),
@@ -2444,36 +2413,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         };
       }
 
-      const publishRemoteName = configuredPushRemote ?? currentUpstream.remoteName;
-      const setUpstream = publishRemoteName !== currentUpstream.remoteName;
-      if (
-        setUpstream &&
-        configuredPublishBranch === null &&
-        currentUpstream.branchName !== branch
-      ) {
-        yield* runGit("GitVcsDriver.pushCurrentBranch.publishBranch", cwd, [
-          "config",
-          "--local",
-          `branch.${branch}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
-          currentUpstream.branchName,
-        ]);
-      }
       yield* runGit(
         "GitVcsDriver.pushCurrentBranch.pushUpstream",
         cwd,
-        [
-          "push",
-          ...(setUpstream ? ["-u"] : []),
-          publishRemoteName,
-          `HEAD:refs/heads/${currentUpstream.branchName}`,
-        ],
+        ["push", currentUpstream.remoteName, `HEAD:refs/heads/${currentUpstream.branchName}`],
         { timeoutMs: null },
       );
       return {
         status: "pushed" as const,
         branch,
-        upstreamBranch: `${publishRemoteName}/${currentUpstream.branchName}`,
-        setUpstream,
+        upstreamBranch: currentUpstream.upstreamRef,
+        setUpstream: false,
       };
     }
 

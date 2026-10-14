@@ -40,8 +40,6 @@ import {
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
-export const PUBLISH_BRANCH_CONFIG = "t3code-publish-branch";
-
 export interface ExecuteGitInput {
   readonly operation: string;
   readonly cwd: string;

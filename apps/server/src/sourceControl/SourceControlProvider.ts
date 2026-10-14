@@ -10,7 +10,6 @@ import type {
   SourceControlRepositoryCloneUrls,
   SourceControlRepositoryVisibility,
 } from "@t3tools/contracts";
-import type { GitHubRepositoryLocator } from "./GitHubCli.ts";
 
 export interface SourceControlLinkSubject {
   readonly title: string;
@@ -98,11 +97,6 @@ export class SourceControlProvider extends Context.Service<
   SourceControlProvider,
   {
     readonly kind: SourceControlProviderKind;
-    readonly resolveRepository?: (input: {
-      readonly cwd: string;
-      readonly context?: SourceControlProviderContext;
-      readonly repository?: string;
-    }) => Effect.Effect<GitHubRepositoryLocator, SourceControlProviderError>;
     /** Optional capability for issue and change-request subjects. */
     readonly resolveLink?: ResolveSourceControlLink;
     /** Optional: read one issue for the "start from issue" flow. Hosts without it are unsupported. */
@@ -111,14 +105,8 @@ export class SourceControlProvider extends Context.Service<
       readonly context?: SourceControlProviderContext;
       readonly reference: string;
     }) => Effect.Effect<GitResolvedIssue, SourceControlProviderError>;
-    readonly isForkOfRepository?: (input: {
-      readonly cwd: string;
-      readonly repository: string;
-      readonly targetRepository: string;
-    }) => Effect.Effect<boolean, SourceControlProviderError>;
     readonly listChangeRequests: (input: {
       readonly cwd: string;
-      readonly repository?: string;
       readonly context?: SourceControlProviderContext;
       readonly source?: SourceControlRefSelector;
       readonly headSelector: string;
@@ -132,7 +120,6 @@ export class SourceControlProvider extends Context.Service<
     }) => Effect.Effect<ChangeRequest, SourceControlProviderError>;
     readonly createChangeRequest: (input: {
       readonly cwd: string;
-      readonly repository?: string;
       readonly context?: SourceControlProviderContext;
       readonly source?: SourceControlRefSelector;
       readonly target?: SourceControlRefSelector;
@@ -154,7 +141,6 @@ export class SourceControlProvider extends Context.Service<
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
-      readonly repository?: string;
     }) => Effect.Effect<string | null, SourceControlProviderError>;
     readonly checkoutChangeRequest: (input: {
       readonly cwd: string;

@@ -331,7 +331,6 @@ export const make = Effect.gen(function* () {
         return github
           .listOpenPullRequests({
             cwd: input.cwd,
-            ...(input.repository === undefined ? {} : { repository: input.repository }),
             headSelector: input.headSelector,
             ...(input.context === undefined
               ? {}
@@ -360,7 +359,6 @@ export const make = Effect.gen(function* () {
       return github
         .listPullRequestsByHead({
           cwd: input.cwd,
-          ...(input.repository === undefined ? {} : { repository: input.repository }),
           headSelector: input.headSelector,
           state: input.state,
           limit: input.limit ?? 20,
@@ -485,43 +483,7 @@ export const make = Effect.gen(function* () {
 
   return SourceControlProvider.SourceControlProvider.of({
     kind: "github",
-    resolveRepository: (input) =>
-      github
-        .resolveRepository({
-          cwd: input.cwd,
-          ...(input.repository === undefined ? {} : { repository: input.repository }),
-          ...(input.context === undefined
-            ? {}
-            : { host: new URL(input.context.provider.baseUrl).host }),
-        })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new SourceControlProviderError({
-                provider: "github",
-                operation: "resolveRepository",
-                command: error.command,
-                cwd: input.cwd,
-                detail: error.message,
-                cause: error,
-              }),
-          ),
-        ),
     getIssue,
-    isForkOfRepository: (input) =>
-      github.isForkOfRepository(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "github",
-              operation: "isForkOfRepository",
-              command: error.command,
-              cwd: input.cwd,
-              detail: error.message,
-              cause: error,
-            }),
-        ),
-      ),
     resolveLink: (input) => {
       // Automatic enrichment must not send ambient CLI credentials to a host from message text.
       if (input.url.host !== "github.com") return undefined;
@@ -561,7 +523,6 @@ export const make = Effect.gen(function* () {
       github
         .createPullRequest({
           cwd: input.cwd,
-          ...(input.repository === undefined ? {} : { repository: input.repository }),
           baseBranch: input.baseRefName,
           headSelector: input.headSelector,
           title: input.title,
