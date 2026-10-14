@@ -386,6 +386,9 @@ async function measureClaude(
       env: {
         ...process.env,
         CLAUDE_CONFIG_DIR: configDir,
+        // Both switch Claude to a reduced prompt and toolset, which would change what is measured.
+        CLAUDE_CODE_SIMPLE: undefined,
+        CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT: undefined,
       },
     });
     if (result.status !== 0) {
@@ -529,32 +532,35 @@ function recordMeasurement(measurement: LiveTokenMeasurement, toolNames: Readonl
   rows.push(measurement);
   console.log(JSON.stringify(formatLiveTokenRow(measurement, toolNames)));
 }
-const claudeVersion = wantClaude ? await readCliVersion("claude") : undefined;
-const codexVersion = wantCodex ? await readCliVersion("codex") : undefined;
+async function readAvailableCliVersion(command: string): Promise<string | undefined> {
+  try {
+    return await readCliVersion(command);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${command} live measurement skipped: ${redactSecrets(message)}`);
+    return undefined;
+  }
+}
+const claudeVersion = wantClaude ? await readAvailableCliVersion("claude") : undefined;
+const codexVersion = wantCodex ? await readAvailableCliVersion("codex") : undefined;
 
 try {
-  if (wantClaude) {
-    if (claudeVersion === undefined) {
-      throw new Error("Claude version missing after readCliVersion");
-    }
+  if (claudeVersion !== undefined) {
     await withEphemeralMcpServer("claude", async (mcp) => {
       const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
       recordMeasurement(await measureClaude(false, claudeVersion), toolNames);
       recordMeasurement(await measureClaude(true, claudeVersion, mcp), toolNames);
     });
-  } else {
+  } else if (!wantClaude) {
     console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
   }
-  if (wantCodex) {
-    if (codexVersion === undefined) {
-      throw new Error("Codex version missing after readCliVersion");
-    }
+  if (codexVersion !== undefined) {
     await withEphemeralMcpServer("codex", async (mcp) => {
       const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
       recordMeasurement(await measureCodex(false, codexVersion), toolNames);
       recordMeasurement(await measureCodex(true, codexVersion, mcp), toolNames);
     });
-  } else {
+  } else if (!wantCodex) {
     console.error(
       "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
     );
