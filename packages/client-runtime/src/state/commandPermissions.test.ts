@@ -258,6 +258,19 @@ it.effect(
         expect(registry.get(prepareIssue.permissionAtom(env, input))).toBe(true);
         yield* prepareIssue.authorize(registry, env, input);
         yield* prepare.authorize(registry, env, input);
+
+        registry.set(sessions(other), AsyncResult.success(grant(true)));
+        expect(registry.get(prepareIssue.permissionAtom(other, input))).toBe(false);
+        expect(
+          (yield* prepareIssue.authorize(registry, other, input).pipe(Effect.flip))
+            .requiredPermission,
+        ).toBe(AuthSourceControlWriteScope);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(prepareIssue.permissionAtom(env, input))).toBe(false);
+        expect(
+          (yield* prepareIssue.authorize(registry, env, input).pipe(Effect.flip))
+            .requiredPermission,
+        ).toBe(AuthSourceControlWriteScope);
       }),
     ),
 );

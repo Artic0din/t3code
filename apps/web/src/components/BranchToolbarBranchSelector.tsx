@@ -2,6 +2,7 @@ import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { parseExplicitIssueReference } from "@t3tools/shared/git";
+import { useAtomValue } from "@effect/atom-react";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useRightPanelStore } from "../rightPanelStore";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -42,6 +43,7 @@ import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { vcsEnvironment } from "../state/vcs";
+import { gitEnvironment } from "../state/git";
 import { cn } from "../lib/utils";
 import { THREAD_DETAILS_PANEL_ICON_CLASS } from "./chat/threadDetailsPanelStyles";
 import { ThreadDetailsPrRows } from "./chat/ThreadDetailsPrRows";
@@ -300,11 +302,20 @@ export function BranchToolbarBranchSelector({
       ? `__checkout_pull_request__:${prReference}`
       : null;
   const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
+  const canPrepareIssueThread = useAtomValue(
+    gitEnvironment.prepareIssueThread.permissionAtom(
+      environmentId,
+      activeProjectCwd !== null && issueReference !== null
+        ? { cwd: activeProjectCwd, reference: issueReference, threadId }
+        : undefined,
+    ),
+  );
   // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
   const supportsIssueThreads =
     useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
   const startFromIssueItemValue =
     canChangeThreadBranch &&
+    canPrepareIssueThread &&
     issueReference &&
     onCheckoutPullRequestRequest &&
     supportsIssueThreads &&

@@ -43,6 +43,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   AuthFilesystemReadScope,
+  ThreadId,
   type DesktopWslState,
   type EnvironmentId,
   type EnvironmentMachineKind,
@@ -120,6 +121,7 @@ import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
+import { gitEnvironment } from "../state/git";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
@@ -1976,9 +1978,23 @@ function OpenCommandPaletteDialog(props: {
             project.environmentId === contextualProjectRef.environmentId &&
             project.id === contextualProjectRef.projectId,
         );
+  const canPrepareIssueThread = useAtomValue(
+    gitEnvironment.prepareIssueThread.permissionAtom(
+      contextualProjectRef?.environmentId ?? null,
+      issueProject === undefined
+        ? undefined
+        : {
+            cwd: issueProject.workspaceRoot,
+            reference: "1",
+            // Availability includes attachment even before the issue or draft is chosen.
+            threadId: activeDraftThread?.threadId ?? ThreadId.make("new-issue-thread"),
+          },
+    ),
+  );
   if (
     contextualProjectRef !== null &&
     issueProject !== undefined &&
+    canPrepareIssueThread &&
     !isScratchProject(issueProject, scratchWorkspaceRootFor(issueProject.environmentId)) &&
     issueProject.repositoryIdentity?.provider === "github" &&
     serverConfigs.get(contextualProjectRef.environmentId)?.environment.capabilities.issueThreads ===
