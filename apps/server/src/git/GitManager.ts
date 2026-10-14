@@ -11,6 +11,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Order from "effect/Order";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
@@ -285,6 +286,37 @@ function issueRepositoryKey(value: string): string | null {
     return null;
   }
 }
+
+function issueFetchFailureDetail(stderr: string): string | null {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim());
+  if (
+    lines.some((line) =>
+      /^(?:fatal: (?:Authentication failed|could not read (?:Username|Password))\b|\S+: Permission denied \(publickey)/i.test(
+        line,
+      ),
+    )
+  ) {
+    return "Git could not authenticate with the remote. Check Git credentials or SSH access on the server, then retry.";
+  }
+  if (
+    lines.some((line) =>
+      /^(?:(?:fatal: |ssh: )?Could not resolve host(?:name)?\b|fatal: unable to access .+: (?:Could not resolve host|Failed to connect)\b|ssh: connect to host \S+ port \d+: (?:Connection timed out|Connection refused|Network is unreachable)\b)/i.test(
+        line,
+      ),
+    )
+  ) {
+    return "Git could not reach the remote. Check the server's network connection and remote host, then retry.";
+  }
+  return null;
+}
+
+const ISSUE_BRANCH_FETCH_ENV = Object.freeze({
+  GCM_INTERACTIVE: "never",
+  GIT_ASKPASS: "",
+  GIT_TERMINAL_PROMPT: "0",
+  SSH_ASKPASS: "",
+  SSH_ASKPASS_REQUIRE: "never",
+} satisfies NodeJS.ProcessEnv);
 
 function hostedIssueRepositoryKey(remoteUrl: string, expected: string): string | null {
   const raw = remoteUrl.trim();
@@ -2535,18 +2567,8 @@ export const make = Effect.gen(function* () {
           return recorded.length === 0 || recorded === repositoryKey;
         });
 
-      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
-      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
       const issueBranchPrefix = `issue/${issue.number}-`;
-      // Filtered by the prefix, so the default page size can never hide the issue's branch.
-      const { refs } = yield* gitCore.listRefs({
-        cwd: input.cwd,
-        query: issueBranchPrefix,
-        refKind: "all",
-        refresh: true,
-        includeMatchingRemoteRefs: true,
-      });
-      const localRefs = refs.filter((ref) => !ref.isRemote);
+      const fetchedRemotes = new Set<string>();
       const firstForThisIssue = (
         candidates: ReadonlyArray<VcsRef>,
         nameOf: (ref: VcsRef) => string,
@@ -2559,11 +2581,78 @@ export const make = Effect.gen(function* () {
             ),
           ];
           for (const ref of ordered) {
-            if (ref.isRemote === true && ref.remoteName === undefined) continue;
+            if (
+              ref.isRemote === true &&
+              (ref.remoteName === undefined || !fetchedRemotes.has(ref.remoteName))
+            )
+              continue;
             if (yield* matchesIssueRepository(nameOf(ref), ref.remoteName)) return ref;
           }
           return undefined;
         });
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
+      const { refs: localCandidates } = yield* gitCore.listRefs({
+        cwd: input.cwd,
+        query: issueBranchPrefix,
+        refKind: "local",
+        refresh: true,
+      });
+      const reusableLocal = yield* firstForThisIssue(localCandidates, (ref) => ref.name);
+      let fetchFailureDetail: string | undefined;
+      if (reusableLocal === undefined) {
+        const listedRemotes = yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.remotes",
+          cwd: input.cwd,
+          args: ["remote"],
+        });
+        for (const remote of listedRemotes.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((name) => name.length > 0)) {
+          if (!(yield* matchesIssueRepository(branch, remote))) continue;
+          const fetched = yield* gitCore
+            .execute({
+              operation: "GitManager.prepareIssueThread.fetchIssueBranches",
+              cwd: input.cwd,
+              args: [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-auto-gc",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--prune",
+                remote,
+                `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
+              ],
+              env: ISSUE_BRANCH_FETCH_ENV,
+              allowNonZeroExit: true,
+            })
+            .pipe(Effect.result);
+          if (Result.isFailure(fetched)) {
+            fetchFailureDetail ??= fetched.failure.detail;
+            continue;
+          }
+          if (fetched.success.exitCode === 0) {
+            fetchedRemotes.add(remote);
+            continue;
+          }
+          fetchFailureDetail ??=
+            issueFetchFailureDetail(fetched.success.stderr) ??
+            `Could not fetch issue branches from ${remote}.`;
+        }
+      }
+      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
+      // Filtered by the prefix, so the default page size can never hide the issue's branch.
+      const { refs } = yield* gitCore.listRefs({
+        cwd: input.cwd,
+        query: issueBranchPrefix,
+        refKind: "all",
+        refresh: true,
+        includeMatchingRemoteRefs: true,
+      });
+      const localRefs = refs.filter((ref) => !ref.isRemote);
       const availableBranchName = (name: string) =>
         Effect.gen(function* () {
           if (
@@ -2579,6 +2668,13 @@ export const make = Effect.gen(function* () {
         });
       // The slug follows the title, so a renamed issue still finds its branch by number.
       const existing = yield* firstForThisIssue(localRefs, (ref) => ref.name);
+      if (existing === undefined && fetchFailureDetail !== undefined && fetchedRemotes.size === 0) {
+        return yield* new GitManagerError({
+          operation: "prepareIssueThread",
+          cwd: input.cwd,
+          detail: fetchFailureDetail,
+        });
+      }
       if (existing?.worktreePath) {
         const existingPath = yield* canonicalizeExistingPath(existing.worktreePath);
         const cwdPath = yield* canonicalizeExistingPath(input.cwd);
