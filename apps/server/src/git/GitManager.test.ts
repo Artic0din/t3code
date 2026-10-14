@@ -6047,7 +6047,20 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["commit", "-m", "Local issue work"]);
       const localSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
+      let fetchAttempts = 0;
       const { manager } = yield* makeManager({
+        gitExecute: (command, driver) => {
+          if (command.operation === "GitManager.prepareIssueThread.fetchIssueBranches") {
+            fetchAttempts += 1;
+            return new GitCommandError({
+              operation: command.operation,
+              cwd: command.cwd,
+              command: "git fetch",
+              detail: "Git command timed out.",
+            });
+          }
+          return driver.execute(command);
+        },
         ghScenario: {
           defaultBranch: "main",
           issue: {
@@ -6066,6 +6079,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
         localSha,
       );
+      expect(fetchAttempts).toBe(0);
     }),
   );
 
@@ -6132,9 +6146,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect.each([false, true])(
-    "continues remote issue work with a concurrent ref read %s",
-    (listDuringFetch) =>
+  it.effect.each(["none", "during-fetch", "deleted-local"] as const)(
+    "continues remote issue work with ref cache scenario %s",
+    (cacheScenario) =>
       Effect.gen(function* () {
         const remoteDir = yield* createBareRemote();
         const repoDir = yield* makeTempDir("t3code-git-manager-");
@@ -6157,11 +6171,33 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           "https://github.com/o/r.git",
           remoteDir,
         );
+        if (cacheScenario === "deleted-local") {
+          yield* runGit(repoDir, ["branch", "issue/31-add-dark-mode"]);
+        }
         const { manager } = yield* makeManager({
           gitExecute: (command, driver) =>
             Effect.gen(function* () {
               if (
-                listDuringFetch &&
+                cacheScenario === "deleted-local" &&
+                command.operation === "GitManager.prepareIssueThread.lockKey"
+              ) {
+                const beforeDelete = yield* driver.listRefs({
+                  cwd: repoDir,
+                  query: "issue/31-",
+                  refKind: "local",
+                  refresh: true,
+                });
+                expect(beforeDelete.refs.map((ref) => ref.name)).toEqual([
+                  "issue/31-add-dark-mode",
+                ]);
+                yield* driver.execute({
+                  operation: "GitManager.test.deleteCachedIssueBranch",
+                  cwd: repoDir,
+                  args: ["branch", "-D", "issue/31-add-dark-mode"],
+                });
+              }
+              if (
+                cacheScenario === "during-fetch" &&
                 command.operation === "GitManager.prepareIssueThread.fetchIssueBranches"
               ) {
                 const beforeFetch = yield* driver.listRefs({

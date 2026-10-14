@@ -2568,59 +2568,7 @@ export const make = Effect.gen(function* () {
         });
 
       const issueBranchPrefix = `issue/${issue.number}-`;
-      const listedRemotes = yield* gitCore.execute({
-        operation: "GitManager.prepareIssueThread.remotes",
-        cwd: input.cwd,
-        args: ["remote"],
-      });
       const fetchedRemotes = new Set<string>();
-      let fetchFailureDetail: string | undefined;
-      for (const remote of listedRemotes.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((name) => name.length > 0)) {
-        if (!(yield* matchesIssueRepository(branch, remote))) continue;
-        const fetched = yield* gitCore
-          .execute({
-            operation: "GitManager.prepareIssueThread.fetchIssueBranches",
-            cwd: input.cwd,
-            args: [
-              "fetch",
-              "--quiet",
-              "--no-tags",
-              "--no-recurse-submodules",
-              "--refmap=",
-              "--prune",
-              remote,
-              `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
-            ],
-            env: ISSUE_BRANCH_FETCH_ENV,
-            allowNonZeroExit: true,
-          })
-          .pipe(Effect.result);
-        if (Result.isFailure(fetched)) {
-          fetchFailureDetail ??= fetched.failure.detail;
-          continue;
-        }
-        if (fetched.success.exitCode === 0) {
-          fetchedRemotes.add(remote);
-          continue;
-        }
-        fetchFailureDetail ??=
-          issueFetchFailureDetail(fetched.success.stderr) ??
-          `Could not fetch issue branches from ${remote}.`;
-      }
-      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
-      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
-      // Filtered by the prefix, so the default page size can never hide the issue's branch.
-      const { refs } = yield* gitCore.listRefs({
-        cwd: input.cwd,
-        query: issueBranchPrefix,
-        refKind: "all",
-        refresh: true,
-        includeMatchingRemoteRefs: true,
-      });
-      const localRefs = refs.filter((ref) => !ref.isRemote);
       const firstForThisIssue = (
         candidates: ReadonlyArray<VcsRef>,
         nameOf: (ref: VcsRef) => string,
@@ -2642,6 +2590,69 @@ export const make = Effect.gen(function* () {
           }
           return undefined;
         });
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
+      const { refs: localCandidates } = yield* gitCore.listRefs({
+        cwd: input.cwd,
+        query: issueBranchPrefix,
+        refKind: "local",
+        refresh: true,
+      });
+      const reusableLocal = yield* firstForThisIssue(localCandidates, (ref) => ref.name);
+      let fetchFailureDetail: string | undefined;
+      if (reusableLocal === undefined) {
+        const listedRemotes = yield* gitCore.execute({
+          operation: "GitManager.prepareIssueThread.remotes",
+          cwd: input.cwd,
+          args: ["remote"],
+        });
+        for (const remote of listedRemotes.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((name) => name.length > 0)) {
+          if (!(yield* matchesIssueRepository(branch, remote))) continue;
+          const fetched = yield* gitCore
+            .execute({
+              operation: "GitManager.prepareIssueThread.fetchIssueBranches",
+              cwd: input.cwd,
+              args: [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-auto-gc",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "--prune",
+                remote,
+                `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
+              ],
+              env: ISSUE_BRANCH_FETCH_ENV,
+              allowNonZeroExit: true,
+            })
+            .pipe(Effect.result);
+          if (Result.isFailure(fetched)) {
+            fetchFailureDetail ??= fetched.failure.detail;
+            continue;
+          }
+          if (fetched.success.exitCode === 0) {
+            fetchedRemotes.add(remote);
+            continue;
+          }
+          fetchFailureDetail ??=
+            issueFetchFailureDetail(fetched.success.stderr) ??
+            `Could not fetch issue branches from ${remote}.`;
+        }
+      }
+      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
+      // Filtered by the prefix, so the default page size can never hide the issue's branch.
+      const { refs } = yield* gitCore.listRefs({
+        cwd: input.cwd,
+        query: issueBranchPrefix,
+        refKind: "all",
+        refresh: true,
+        includeMatchingRemoteRefs: true,
+      });
+      const localRefs = refs.filter((ref) => !ref.isRemote);
       const availableBranchName = (name: string) =>
         Effect.gen(function* () {
           if (
