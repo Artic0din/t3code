@@ -1079,11 +1079,21 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
 
   return (
     <View className="flex-1">
-      <ThreadIssueBanner
-        environmentId={props.environmentId}
-        threadId={props.selectedThread.id}
-        linkedIssue={props.selectedThread.linkedIssue ?? null}
-      />
+      {props.selectedThread.linkedIssue == null ? null : (
+        <View
+          style={
+            props.usesAutomaticContentInsets === true && Platform.OS === "ios"
+              ? { paddingTop: navigationHeaderHeight }
+              : undefined
+          }
+        >
+          <ThreadIssueBanner
+            environmentId={props.environmentId}
+            threadId={props.selectedThread.id}
+            linkedIssue={props.selectedThread.linkedIssue}
+          />
+        </View>
+      )}
       {showContent ? (
         <View
           style={{ flex: 1 }}

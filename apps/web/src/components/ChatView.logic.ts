@@ -562,6 +562,7 @@ export function buildLocalDraftThread(
     interactionMode: draftThread.interactionMode,
     branch: draftThread.branch,
     worktreePath: draftThread.worktreePath,
+    ...(draftThread.linkedIssue === undefined ? {} : { linkedIssue: draftThread.linkedIssue }),
     activeProviderThreadId: null,
     lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
     forkedFrom: null,

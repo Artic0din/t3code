@@ -106,6 +106,49 @@ function shellFixture(overrides: Partial<OrchestrationV2ThreadShell>): Orchestra
 }
 
 describe("coalesceStoredThreadEvents", () => {
+  it("keeps archived deletion when run cleanup follows in the same batch", () => {
+    const items = coalesceStoredThreadEvents([
+      storedThreadEvent(4, "thread-a", {
+        type: "thread.deleted",
+        payload: { archivedAt: "2026-07-30T00:00:00.000Z" },
+      }),
+      storedThreadEvent(5, "thread-a", { type: "run.updated" }),
+    ]).flatMap((stored) => {
+      const item = archivedShellStreamItemFromThreadShell({ stored, shell: null });
+      return item === null ? [] : [item];
+    });
+    expect(items).toEqual([{ kind: "thread.removed", sequence: 4, threadId: "thread-a" }]);
+  });
+
+  it("keeps unarchive when an active deletion and run cleanup follow", () => {
+    const items = coalesceStoredThreadEvents([
+      storedThreadEvent(4, "thread-a", { type: "thread.unarchived" }),
+      storedThreadEvent(5, "thread-a", { type: "thread.deleted", payload: { archivedAt: null } }),
+      storedThreadEvent(6, "thread-a", { type: "run.updated" }),
+    ]).flatMap((stored) => {
+      const item = archivedShellStreamItemFromThreadShell({ stored, shell: null });
+      return item === null ? [] : [item];
+    });
+    expect(items).toEqual([{ kind: "thread.removed", sequence: 4, threadId: "thread-a" }]);
+  });
+
+  it.each(["thread.visited", "thread.metadata-updated"] as const)(
+    "keeps archive removals when %s follows unarchive in one batch",
+    (type) => {
+      const items = coalesceStoredThreadEvents([
+        storedThreadEvent(4, "thread-a", { type: "thread.unarchived" }),
+        storedThreadEvent(5, "thread-a", { type }),
+      ]).flatMap((stored) => {
+        const item = archivedShellStreamItemFromThreadShell({
+          stored,
+          shell: shellFixture({ archivedAt: null }),
+        });
+        return item === null ? [] : [item];
+      });
+      expect(items).toEqual([{ kind: "thread.removed", sequence: 4, threadId: "thread-a" }]);
+    },
+  );
+
   it("keeps the newest stored event per thread and preserves sequence order", () => {
     expect(
       coalesceStoredThreadEvents([

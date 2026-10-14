@@ -1,13 +1,34 @@
-import { EnvironmentId, type OrchestrationV2ArchivedShellSnapshot } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type OrchestrationV2ArchivedShellSnapshot,
+  type OrchestrationV2ArchivedShellStreamItem,
+} from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import { AsyncResult, Atom } from "effect/reactivity";
+import type { SupervisorConnectionState } from "../connection/model.ts";
 
 export interface ArchivedSnapshotEntry {
   readonly environmentId: EnvironmentId;
   readonly snapshot: OrchestrationV2ArchivedShellSnapshot;
+}
+
+export function applyArchivedShellStreamItem(
+  snapshot: OrchestrationV2ArchivedShellSnapshot | null,
+  item: OrchestrationV2ArchivedShellStreamItem,
+): OrchestrationV2ArchivedShellSnapshot | null {
+  if (item.kind === "snapshot") return item.snapshot;
+  if (snapshot === null || item.sequence <= snapshot.snapshotSequence) return snapshot;
+  const threads = snapshot.threads.filter(
+    (thread) => thread.id !== (item.kind === "thread.updated" ? item.thread.id : item.threadId),
+  );
+  return {
+    ...snapshot,
+    snapshotSequence: item.sequence,
+    threads: item.kind === "thread.updated" ? [...threads, item.thread] : threads,
+  };
 }
 
 export interface ArchivedThreadSnapshotsState {
@@ -38,6 +59,9 @@ export function parseArchivedThreadsEnvironmentKey(key: string): ReadonlyArray<E
 }
 
 export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
+  readonly getConnectionStateAtom: (
+    environmentId: EnvironmentId,
+  ) => Atom.Atom<AsyncResult.AsyncResult<Pick<SupervisorConnectionState, "phase">, unknown>>;
   readonly getSnapshotAtom: (
     environmentId: EnvironmentId,
   ) => Atom.Atom<AsyncResult.AsyncResult<OrchestrationV2ArchivedShellSnapshot, E>>;
@@ -50,15 +74,21 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
       let isLoading = false;
 
       for (const environmentId of parseArchivedThreadsEnvironmentKey(environmentKey)) {
+        const connection = get(options.getConnectionStateAtom(environmentId));
+        const phase = Option.getOrNull(AsyncResult.value(connection))?.phase;
+        const unavailable =
+          connection._tag === "Failure" ||
+          phase === "available" ||
+          phase === "offline" ||
+          phase === "blocked";
         const result = get(options.getSnapshotAtom(environmentId));
-        isLoading ||= result.waiting;
-
         const snapshot = Option.getOrNull(AsyncResult.value(result));
+        isLoading ||= !unavailable && result.waiting && snapshot === null;
         if (snapshot !== null) {
           snapshots.push({ environmentId, snapshot });
         }
 
-        if (error === null && result._tag === "Failure") {
+        if (error === null && (result._tag === "Failure" || unavailable)) {
           error = "Failed to load archived threads.";
         }
       }

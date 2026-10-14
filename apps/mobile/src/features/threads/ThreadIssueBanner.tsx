@@ -7,7 +7,7 @@ import {
   type ThreadLinkedIssue,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
-import { Linking, Pressable, Text, View } from "react-native";
+import { Linking, Pressable, ScrollView, Text, View } from "react-native";
 
 import { useArchivedThreadSnapshots } from "../archive/useArchivedThreadSnapshots";
 import { threadEnvironment } from "../../state/threads";
@@ -37,7 +37,9 @@ export function ThreadIssueBanner(props: {
 }) {
   const navigation = useNavigation();
   const snapshot = useAtomValue(threadEnvironment.snapshotAtom(props.environmentId));
-  const archived = useArchivedThreadSnapshots([props.environmentId]);
+  const archived = useArchivedThreadSnapshots(
+    props.linkedIssue === null ? [] : [props.environmentId],
+  );
   const archivedShells =
     archived.snapshots.find((entry) => entry.environmentId === props.environmentId)?.snapshot
       .threads ?? [];
@@ -59,23 +61,37 @@ export function ThreadIssueBanner(props: {
       >
         <Text className="text-sm text-primary">{issueLabel(issue)}</Text>
       </Pressable>
-      {related.map((thread) => (
-        <Pressable
-          key={thread.id}
-          accessibilityRole="button"
-          onPress={() => {
-            void Haptics.selectionAsync();
-            navigation.dispatch(
-              StackActions.push("Thread", {
-                environmentId: props.environmentId,
-                threadId: thread.id,
-              }),
-            );
-          }}
+      {archived.isLoading ? (
+        <Text className="text-sm text-muted-foreground">Loading related threads.</Text>
+      ) : null}
+      {archived.error === null ? null : (
+        <Text className="text-sm text-muted-foreground">{archived.error}</Text>
+      )}
+      {related.length > 0 ? (
+        <ScrollView
+          className="max-h-32"
+          contentContainerClassName="gap-1"
+          keyboardShouldPersistTaps="handled"
         >
-          <Text className="text-sm text-foreground">{thread.title}</Text>
-        </Pressable>
-      ))}
+          {related.map((thread) => (
+            <Pressable
+              key={thread.id}
+              accessibilityRole="button"
+              onPress={() => {
+                void Haptics.selectionAsync();
+                navigation.dispatch(
+                  StackActions.push("Thread", {
+                    environmentId: props.environmentId,
+                    threadId: thread.id,
+                  }),
+                );
+              }}
+            >
+              <Text className="text-sm text-foreground">{thread.title}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
       <Pressable
         accessibilityRole="button"
         onPress={() => {

@@ -2786,6 +2786,12 @@ export const OrchestrationV2Command = Schema.Union([
     ...ThreadIssueKey.fields,
   }),
   Schema.Struct({
+    type: Schema.Literal("thread.issue.unlink"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expectedIssue: Schema.Null,
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.pull-request-link.sync"),
     commandId: CommandId,
     threadId: ThreadId,

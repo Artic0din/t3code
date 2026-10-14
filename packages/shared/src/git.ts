@@ -146,7 +146,7 @@ export function isTemporaryWorktreeBranch(refName: string): boolean {
 
 const ISSUE_NUMBER_PATTERN = /^(?:issue\s+)?#?([1-9]\d*)$/i;
 const GITHUB_ISSUE_URL_PATTERN =
-  /^https:\/\/(?:www\.)?[^/\s]+\/[^/\s]+\/[^/\s]+\/issues\/([1-9]\d*)(?:[/?#].*)?$/i;
+  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/([1-9]\d*)(?:[/?#].*)?$/i;
 const ISSUE_BRANCH_SLUG_MAX = 40;
 
 /** Normalizes `123`, `#123`, `issue 123`, or a GitHub issue URL; anything else is null. */

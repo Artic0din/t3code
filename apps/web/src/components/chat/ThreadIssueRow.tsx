@@ -1,16 +1,15 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  draftIssueAfterStart,
+  linkedIssueFromResolved,
   issueAvailabilityFromFailure,
-  issueLinkApplies,
   parseGitHubIssueUrl,
   relatedIssueThreads,
   type EnvironmentId,
   type ThreadId,
   type ThreadLinkedIssue,
 } from "@t3tools/contracts";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams } from "~/threadRoutes";
@@ -19,11 +18,6 @@ import { useIssueResolution } from "~/state/sourceControlActions";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-
-function messageFromUnknown(error: unknown): string | null {
-  if (typeof error !== "object" || error === null || !("message" in error)) return null;
-  return typeof error.message === "string" ? error.message : null;
-}
 
 function availabilityLabel(issue: ThreadLinkedIssue): string | null {
   switch (issue.availability) {
@@ -41,15 +35,28 @@ function availabilityLabel(issue: ThreadLinkedIssue): string | null {
   }
 }
 
-export function ThreadIssueRow(props: {
+interface ThreadIssueRowProps {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly cwd: string | null;
   readonly linkedIssue: ThreadLinkedIssue | null;
-}) {
+}
+
+export function ThreadIssueRow(props: ThreadIssueRowProps) {
+  return (
+    <ThreadIssueRowForTarget
+      key={JSON.stringify([props.environmentId, props.threadId])}
+      {...props}
+    />
+  );
+}
+
+function ThreadIssueRowForTarget(props: ThreadIssueRowProps) {
   const navigate = useNavigate();
   const snapshot = useAtomValue(threadEnvironment.snapshotAtom(props.environmentId));
-  const archived = useArchivedThreadSnapshots([props.environmentId]);
+  const archived = useArchivedThreadSnapshots(
+    props.linkedIssue === null ? [] : [props.environmentId],
+  );
   const archivedShells =
     archived.snapshots.find((entry) => entry.environmentId === props.environmentId)?.snapshot
       .threads ?? [];
@@ -57,11 +64,8 @@ export function ThreadIssueRow(props: {
   const linkIssue = useAtomCommand(threadEnvironment.linkIssue, { reportFailure: false });
   const unlinkIssue = useAtomCommand(threadEnvironment.unlinkIssue, { reportFailure: false });
   const [reference, setReference] = useState("");
+  const referenceRevision = useRef(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const activeEnvironmentId = useRef(props.environmentId);
-  useEffect(() => {
-    activeEnvironmentId.current = props.environmentId;
-  }, [props.environmentId]);
   const resolution = useIssueResolution({
     environmentId: props.environmentId,
     cwd: props.cwd,
@@ -73,7 +77,7 @@ export function ThreadIssueRow(props: {
       : relatedIssueThreads(threads, props.linkedIssue, props.threadId);
   const availability = props.linkedIssue === null ? null : availabilityLabel(props.linkedIssue);
   const resolved = resolution.data?.issue ?? null;
-  const resolutionDetail = messageFromUnknown(resolution.error);
+  const resolutionDetail = resolution.error;
   const unavailable =
     resolved === null && resolutionDetail !== null
       ? issueAvailabilityFromFailure(resolutionDetail)
@@ -85,23 +89,21 @@ export function ThreadIssueRow(props: {
     !resolution.isPending &&
     (resolved !== null || parsedFailure !== null);
 
-  const linkResolved = async (requestedEnvironmentId: EnvironmentId) => {
-    if (props.cwd === null || resolved === null) return;
-    if (
-      !issueLinkApplies({
-        requestedEnvironmentId,
-        activeEnvironmentId: activeEnvironmentId.current,
-      })
-    ) {
-      return;
-    }
-    const linkedIssue = draftIssueAfterStart(props.linkedIssue, resolved);
+  const linkReference = async () => {
+    if (props.cwd === null) return;
+    const linkedIssue =
+      resolved !== null
+        ? linkedIssueFromResolved(resolved)
+        : parsedFailure !== null && unavailable !== null
+          ? { ...parsedFailure, title: null, availability: unavailable }
+          : null;
     if (linkedIssue == null) {
       setSubmitError("That issue URL does not identify a GitHub issue.");
       return;
     }
+    const requestedRevision = referenceRevision.current;
     const result = await linkIssue({
-      environmentId: requestedEnvironmentId,
+      environmentId: props.environmentId,
       input: {
         threadId: props.threadId,
         host: linkedIssue.host,
@@ -112,40 +114,12 @@ export function ThreadIssueRow(props: {
         availability: linkedIssue.availability,
       },
     });
+    if (referenceRevision.current !== requestedRevision) return;
     if (result._tag === "Failure") {
       setSubmitError("Could not link the issue.");
       return;
     }
-    setReference("");
-    setSubmitError(null);
-  };
-
-  const linkUnavailable = async (requestedEnvironmentId: EnvironmentId) => {
-    if (parsedFailure === null || unavailable === null) return;
-    if (
-      !issueLinkApplies({
-        requestedEnvironmentId,
-        activeEnvironmentId: activeEnvironmentId.current,
-      })
-    ) {
-      return;
-    }
-    const result = await linkIssue({
-      environmentId: requestedEnvironmentId,
-      input: {
-        threadId: props.threadId,
-        host: parsedFailure.host,
-        repository: parsedFailure.repository,
-        number: parsedFailure.number,
-        url: parsedFailure.url,
-        title: null,
-        availability: unavailable,
-      },
-    });
-    if (result._tag === "Failure") {
-      setSubmitError("Could not link the issue.");
-      return;
-    }
+    referenceRevision.current += 1;
     setReference("");
     setSubmitError(null);
   };
@@ -184,8 +158,12 @@ export function ThreadIssueRow(props: {
             Unlink
           </Button>
           {availability === null ? null : <p>{availability}</p>}
+          {archived.isLoading ? <p>Loading related threads.</p> : null}
+          {archived.error === null ? null : <p>{archived.error}</p>}
           {related.length === 0 ? (
-            <p>No other threads are linked to this issue.</p>
+            archived.isLoading || archived.error !== null ? null : (
+              <p>No other threads are linked to this issue.</p>
+            )
           ) : (
             <ul>
               {related.map((thread) => (
@@ -215,12 +193,8 @@ export function ThreadIssueRow(props: {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          const requestedEnvironmentId = props.environmentId;
-          if (resolved !== null) {
-            void linkResolved(requestedEnvironmentId);
-            return;
-          }
-          if (parsedFailure !== null) void linkUnavailable(requestedEnvironmentId);
+          if (!canSubmit) return;
+          void linkReference();
         }}
       >
         <Input
@@ -231,6 +205,7 @@ export function ThreadIssueRow(props: {
           }
           aria-label={props.linkedIssue === null ? "Link a GitHub issue" : "Link a different issue"}
           onChange={(event) => {
+            referenceRevision.current += 1;
             setReference(event.target.value);
             setSubmitError(null);
           }}
@@ -239,9 +214,7 @@ export function ThreadIssueRow(props: {
           {props.linkedIssue === null ? "Link" : "Relink"}
         </Button>
       </form>
-      {submitError === null && resolutionDetail !== null && parsedFailure === null ? (
-        <p>{resolutionDetail}</p>
-      ) : null}
+      {submitError === null && resolutionDetail !== null ? <p>{resolutionDetail}</p> : null}
       {submitError === null ? null : <p>{submitError}</p>}
     </div>
   );

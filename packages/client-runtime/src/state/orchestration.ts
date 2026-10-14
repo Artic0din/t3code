@@ -1,5 +1,7 @@
 import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
+import * as Stream from "effect/Stream";
+import { applyArchivedShellStreamItem } from "./archivedThreads.ts";
 
 import {
   createEnvironmentRpcCommand,
@@ -64,6 +66,16 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
+    }),
+    archivedShell: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:orchestration:archived-shell",
+      tag: ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell,
+      idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(
+          Stream.scan(() => null, applyArchivedShellStreamItem),
+          Stream.filter((snapshot) => snapshot !== null),
+        ),
     }),
   };
 }

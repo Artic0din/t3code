@@ -188,28 +188,26 @@ const make = Effect.gen(function* () {
         type: "thread.issue.link",
         ...resolved,
       }) === undefined;
-    if (!alreadyLinked) {
-      yield* threads
-        .dispatch({
-          type: "thread.issue.link",
-          commandId: updateCommandId,
-          threadId: shell.id,
-          host: resolved.host,
-          repository: resolved.repository,
-          number: resolved.number,
-          url: resolved.url,
-          title: resolved.title,
-          availability: resolved.availability,
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            failure(
-              "orchestration_error",
-              `Unable to link issue on thread ${shell.id}: ${errorMessage(error)}`,
-            ),
+    yield* threads
+      .dispatch({
+        type: "thread.issue.link",
+        commandId: updateCommandId,
+        threadId: shell.id,
+        host: resolved.host,
+        repository: resolved.repository,
+        number: resolved.number,
+        url: resolved.url,
+        title: resolved.title,
+        availability: resolved.availability,
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure(
+            "orchestration_error",
+            `Unable to link issue on thread ${shell.id}: ${errorMessage(error)}`,
           ),
-        );
-    }
+        ),
+      );
     return { threadId: shell.id, linkedIssue: resolved, alreadyLinked };
   });
 
@@ -221,22 +219,17 @@ const make = Effect.gen(function* () {
     },
   ) {
     const shell = yield* requireThread(scope, input.threadId);
-    const current = shell.linkedIssue ?? null;
-    if (current === null) return { threadId: shell.id, unlinked: false };
     const requestKey = input.clientRequestId ?? (yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+    const updateCommandId = commandId({ scope, threadId: shell.id, action: "unlink", requestKey });
+    const current = shell.linkedIssue ?? null;
     yield* threads
       .dispatch({
         type: "thread.issue.unlink",
-        commandId: commandId({
-          scope,
-          threadId: shell.id,
-          action: "unlink",
-          requestKey,
-        }),
+        commandId: updateCommandId,
         threadId: shell.id,
-        host: current.host,
-        repository: current.repository,
-        number: current.number,
+        ...(current === null
+          ? { expectedIssue: null }
+          : { host: current.host, repository: current.repository, number: current.number }),
       })
       .pipe(
         Effect.mapError((error) =>
@@ -246,7 +239,8 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-    return { threadId: shell.id, unlinked: true };
+    const updated = yield* requireThread(scope, shell.id);
+    return { threadId: shell.id, unlinked: current !== null && updated.linkedIssue == null };
   });
 
   const related = Effect.fn("ThreadIssueService.related")(function* (

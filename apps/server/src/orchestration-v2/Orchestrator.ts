@@ -3206,6 +3206,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.pull-request-link.sync":
         case "thread.pull-request.watch":
         case "thread.pull-request-watch.sync":
+          return "thread.pull-request-synced" as const;
         case "thread.issue.link":
         case "thread.issue.unlink":
           return "thread.metadata-updated" as const;

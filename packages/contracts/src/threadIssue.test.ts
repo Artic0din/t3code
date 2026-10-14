@@ -32,17 +32,46 @@ describe("thread issue identity", () => {
     expect(threadIssueKeysEqual(issue(), issue({ repository: "pingdotgg/t3code" }))).toBe(false);
     expect(threadIssueKeysEqual(issue(), issue({ host: "github.example.com" }))).toBe(false);
     expect(threadIssueKeysEqual(issue(), issue({ number: 15 }))).toBe(false);
+    expect(threadIssueKeysEqual(issue(), issue({ host: "www.GitHub.com" }))).toBe(false);
+  });
+
+  it("preserves an Enterprise hostname with a www prefix", () => {
+    expect(parseGitHubIssueUrl("https://www.github.example.com/acme/web/issues/12")).toEqual({
+      host: "www.github.example.com",
+      repository: "acme/web",
+      number: 12,
+      url: "https://www.github.example.com/acme/web/issues/12",
+    });
+  });
+
+  it("keeps Enterprise aliases separate for related work and stale unlinks", () => {
+    const first = issue({ host: "www.github.example.com" });
+    const replacement = issue({ host: "github.example.com" });
+    expect(threadIssueKeysEqual(first, replacement)).toBe(false);
+    expect(
+      relatedIssueThreads(
+        [
+          { id: ThreadId.make("first-host"), linkedIssue: first },
+          { id: ThreadId.make("second-host"), linkedIssue: replacement },
+        ],
+        first,
+      ).map((thread) => thread.id),
+    ).toEqual([ThreadId.make("first-host")]);
+    expect(nextLinkedIssue(replacement, { type: "thread.issue.unlink", ...first })).toBeUndefined();
+    expect(
+      nextLinkedIssue(replacement, { type: "thread.issue.unlink", ...replacement }),
+    ).toBeNull();
   });
 
   it("parses GitHub issue URLs and ignores pull requests", () => {
-    expect(
-      parseGitHubIssueUrl("https://www.github.com/Artic0din/t3code/issues/14#note"),
-    ).toMatchObject({
-      host: "github.com",
-      repository: "artic0din/t3code",
-      number: 14,
-      url: "https://www.github.com/artic0din/t3code/issues/14",
-    });
+    expect(parseGitHubIssueUrl("https://github.com/Artic0din/t3code/issues/14#note")).toMatchObject(
+      {
+        host: "github.com",
+        repository: "artic0din/t3code",
+        number: 14,
+        url: "https://github.com/artic0din/t3code/issues/14",
+      },
+    );
     expect(parseGitHubIssueUrl("https://github.example.com/Acme/Web/issues/12")).toMatchObject({
       host: "github.example.com",
       repository: "acme/web",
@@ -51,6 +80,37 @@ describe("thread issue identity", () => {
     });
     expect(parseGitHubIssueUrl("https://github.com/Artic0din/t3code/pull/14")).toBeNull();
   });
+
+  it("parses an issue in a repository named issues", () => {
+    expect(parseGitHubIssueUrl("https://github.com/acme/issues/issues/14")).toEqual({
+      host: "github.com",
+      repository: "acme/issues",
+      number: 14,
+      url: "https://github.com/acme/issues/issues/14",
+    });
+    expect(parseGitHubIssueUrl("https://github.com/acme/issues/pull/14")).toBeNull();
+  });
+
+  it.each(["https://github.com", "https://github.example.com"])(
+    "persists resolved issues when the owner and repository are named issues on %s",
+    (origin) => {
+      const resolved = {
+        number: 14,
+        title: "Persist issue links",
+        body: null,
+        url: `${origin}/issues/issues/issues/14#note`,
+        state: "open" as const,
+      };
+      expect(linkedIssueFromResolved(resolved)).toEqual({
+        host: new URL(origin).hostname,
+        repository: "issues/issues",
+        number: 14,
+        url: `${origin}/issues/issues/issues/14`,
+        title: "Persist issue links",
+        availability: "open",
+      });
+    },
+  );
 
   it("keeps one association when the same issue is linked again", () => {
     const current = issue();
@@ -81,6 +141,9 @@ describe("thread issue identity", () => {
         number: 14,
       }),
     ).toBeNull();
+    expect(
+      nextLinkedIssue(current, { type: "thread.issue.unlink", expectedIssue: null }),
+    ).toBeUndefined();
   });
 
   it("finds related threads only for the same host and repository", () => {

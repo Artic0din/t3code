@@ -1097,7 +1097,7 @@ export type LinkThreadIssueInput = Omit<
 > &
   CommandMetadata;
 export type UnlinkThreadIssueInput = Omit<
-  Extract<OrchestrationV2Command, { type: "thread.issue.unlink" }>,
+  Extract<OrchestrationV2Command, { type: "thread.issue.unlink"; host: string }>,
   "type" | "commandId"
 > &
   CommandMetadata;

@@ -1,8 +1,11 @@
 import {
+  buildLocalDraftThread,
   findRecordedWorktreeSetup,
   resolvePreparedWorktreeDraft,
   resolveVisibleWorktreeSetup,
 } from "./ChatView.logic";
+import { durableIssueForSend } from "@t3tools/contracts";
+import type { DraftThreadState } from "../composerDraftStore";
 import {
   recallCheckoutIsRepo,
   rememberCheckoutIsRepo,
@@ -95,6 +98,39 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+it("keeps the stored draft issue through conversion into launch fields", () => {
+  const linkedIssue = {
+    host: "github.com",
+    repository: "acme/issues",
+    number: 14,
+    url: "https://github.com/acme/issues/issues/14",
+    title: "Fix login",
+    availability: "open" as const,
+  };
+  const draft: DraftThreadState = {
+    threadId,
+    environmentId,
+    projectId,
+    logicalProjectKey: "acme/issues",
+    createdAt: now,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    envMode: "local",
+    startFromOrigin: false,
+    linkedIssue,
+  };
+  const thread = buildLocalDraftThread(threadId, draft, NO_PROVIDER_MODEL_SELECTION);
+  expect(
+    durableIssueForSend({
+      linkedIssue: thread.linkedIssue,
+      cancelled: false,
+      belongsToDraft: true,
+    }),
+  ).toEqual(linkedIssue);
+});
 const helloWorldTemplate: CodexArtifactTemplate = {
   artifactKind: "document",
   displayName: "Hello World",

@@ -33,10 +33,7 @@ export type ThreadLinkedIssue = typeof ThreadLinkedIssue.Type;
 
 function canonicalIssueKey(key: ThreadIssueKey): ThreadIssueKey {
   return {
-    host: key.host
-      .trim()
-      .toLowerCase()
-      .replace(/^www\./, ""),
+    host: key.host.trim().toLowerCase(),
     repository: key.repository.trim().toLowerCase(),
     number: key.number,
   };
@@ -68,14 +65,11 @@ export function parseGitHubIssueUrl(
     return null;
   }
   const parts = url.pathname.split("/").filter((part) => part.length > 0);
-  const issuesIndex = parts.indexOf("issues");
-  if (issuesIndex < 2) return null;
+  const issuesIndex = parts.length - 2;
+  if (issuesIndex !== 2 || parts[issuesIndex] !== "issues") return null;
   const number = Number(parts[issuesIndex + 1]);
   if (!Number.isInteger(number) || number <= 0) return null;
-  const host = url.hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^www\./, "");
+  const host = url.hostname.toLowerCase();
   const repository = `${parts[issuesIndex - 2]}/${parts[issuesIndex - 1]}`.toLowerCase();
   return {
     host,
@@ -162,9 +156,14 @@ export function nextLinkedIssue(
         readonly host: string;
         readonly repository: string;
         readonly number: number;
+      }
+    | {
+        readonly type: "thread.issue.unlink";
+        readonly expectedIssue: null;
       },
 ): ThreadLinkedIssue | null | undefined {
   if (command.type === "thread.issue.unlink") {
+    if ("expectedIssue" in command) return undefined;
     if (current == null || !threadIssueKeysEqual(current, command)) return undefined;
     return null;
   }
@@ -212,7 +211,6 @@ export function issueLinkApplies(input: {
   return input.requestedEnvironmentId === input.activeEnvironmentId;
 }
 
-/** Latest explicit issue start wins. An unparseable URL leaves the draft's current issue alone. */
 export const ThreadIssueMcpLinkInput = Schema.Struct({
   threadId: Schema.optional(ThreadId),
   reference: TrimmedNonEmptyString,
