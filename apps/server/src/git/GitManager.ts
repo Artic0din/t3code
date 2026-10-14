@@ -8,8 +8,10 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Order from "effect/Order";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
@@ -35,7 +37,6 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
-  type ProjectId,
   SourceControlProviderError,
   type SourceControlProviderKind,
   type SourceControlWritingStyleSettings,
@@ -81,6 +82,7 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { gitHubApiHostForRemote } from "../sourceControl/GitHubCli.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
@@ -278,7 +280,8 @@ function issueRepositoryKey(value: string): string | null {
     url.pathname = match[1];
     url.search = "";
     url.hash = "";
-    return normalizeGitRemoteUrl(url.toString());
+    const normalized = normalizeGitRemoteUrl(url.toString());
+    return `${url.host.toLowerCase()}/${normalized.split("/").slice(1).join("/")}`;
   } catch {
     return null;
   }
@@ -315,13 +318,23 @@ const ISSUE_BRANCH_FETCH_ENV = Object.freeze({
   SSH_ASKPASS_REQUIRE: "never",
 } satisfies NodeJS.ProcessEnv);
 
-function hostedRepositoryKey(remoteUrl: string): string | null {
-  const segments = normalizeGitRemoteUrl(remoteUrl)
-    .split("/")
-    .filter((segment) => segment.length > 0);
-  const host = segments[0];
-  if (!host || !host.includes(".") || segments.length < 3) return null;
-  return segments.join("/");
+function hostedIssueRepositoryKey(remoteUrl: string, expected: string): string | null {
+  const raw = remoteUrl.trim();
+  if (/^[a-zA-Z]:/u.test(raw)) return null;
+  const protocolUrl = /^(?:ssh|https?|git):\/\//iu.test(raw);
+  const scp = raw.includes("://") ? null : /^(?:[a-zA-Z0-9._-]+@)?([^:/\s]+):(.+)$/u.exec(raw);
+  if (!protocolUrl && scp === null) return null;
+  const url = protocolUrl ? raw : `git@${scp![1]}:${scp![2]!.replace(/^\/+/u, "")}`;
+  const normalized = normalizeGitRemoteUrl(url);
+  if (normalized.includes("://")) return null;
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length < 3) return null;
+  const httpUrl = /^https?:\/\//iu.test(url);
+  if (httpUrl) segments[0] = new URL(url).host.toLowerCase();
+  const repository = segments.join("/");
+  if (httpUrl || repository === expected) return repository;
+  const apiHost = gitHubApiHostForRemote(url);
+  return apiHost === null ? repository : [apiHost, ...segments.slice(1)].join("/");
 }
 
 function parseRepositoryNameFromPullRequestUrl(url: string): string | null {
@@ -797,8 +810,6 @@ export const make = Effect.gen(function* () {
       Effect.map((project) => Option.getOrNull(project)?.projectId ?? null),
       Effect.orElseSucceed(() => null),
     );
-    // A draft dialog can pass a thread id before the thread exists. That id must not hide the
-    // workspace project. A saved thread's project stays authoritative.
     const threadProjectId =
       input.threadId === undefined
         ? null
@@ -2503,22 +2514,19 @@ export const make = Effect.gen(function* () {
           allowNonZeroExit: true,
         })
         .pipe(Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : "")));
-    const rememberIssueRepository = (branchName: string, issueUrl: string) =>
-      Effect.gen(function* () {
-        const repositoryKey = issueRepositoryKey(issueUrl);
-        if (repositoryKey === null) return;
-        if ((yield* readIssueBranchRepository(branchName)).length > 0) return;
-        yield* gitCore.execute({
-          operation: "GitManager.prepareIssueThread.recordIssueRepository",
-          cwd: input.cwd,
-          args: [
-            "config",
-            "--local",
-            `branch.${branchName}.${issueBranchRepositoryConfig}`,
-            repositoryKey,
-          ],
-        });
-      });
+    const rememberIssueRepository = (branchName: string, repository: string | null) =>
+      repository === null
+        ? Effect.void
+        : gitCore.execute({
+            operation: "GitManager.prepareIssueThread.recordIssueRepository",
+            cwd: input.cwd,
+            args: [
+              "config",
+              "--local",
+              `branch.${branchName}.${issueBranchRepositoryConfig}`,
+              repository,
+            ],
+          });
     const runSetupScript = (worktreePath: string) =>
       input.threadId === undefined
         ? Effect.void
@@ -2537,85 +2545,80 @@ export const make = Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
       const repositoryKey = issueRepositoryKey(issue.url);
-      // Fetch uses the first configured URL; `config --get` returns the last. Prefer the first
-      // `config --get-all` value over `remote get-url`, which rewrites through url.*.insteadOf.
-      const hostedRemoteRepository = (remoteName: string) =>
-        gitCore
-          .execute({
-            operation: "GitManager.prepareIssueThread.remoteRepository",
-            cwd: input.cwd,
-            args: ["config", "--get-all", `remote.${remoteName}.url`],
-            allowNonZeroExit: true,
-          })
-          .pipe(
-            Effect.map((result) => {
-              if (result.exitCode !== 0) return null;
-              const firstUrl = result.stdout
-                .split("\n")
-                .map((line) => line.trim())
-                .find((line) => line.length > 0);
-              return firstUrl === undefined ? null : hostedRepositoryKey(firstUrl);
-            }),
-          );
-      // A recorded repository must match. A branch with no record stays reusable, including after
-      // a title change. A hosted remote URL is the record for a branch that exists only there.
       const matchesIssueRepository = (branchName: string, remoteName?: string) =>
         Effect.gen(function* () {
-          if (repositoryKey === null) return true;
+          if (remoteName !== undefined) {
+            if (repositoryKey === null) return false;
+            const urls = yield* gitCore.execute({
+              operation: "GitManager.prepareIssueThread.remoteRepository",
+              cwd: input.cwd,
+              args: ["config", "--get-all", `remote.${remoteName}.url`],
+              allowNonZeroExit: true,
+            });
+            const firstUrl = urls.stdout.split("\n").find((line) => line.trim().length > 0);
+            return (
+              urls.exitCode === 0 &&
+              firstUrl !== undefined &&
+              hostedIssueRepositoryKey(firstUrl, repositoryKey) === repositoryKey
+            );
+          }
           const recorded = yield* readIssueBranchRepository(branchName);
-          if (recorded.length > 0) return recorded === repositoryKey;
-          if (remoteName === undefined) return true;
-          const remoteKey = yield* hostedRemoteRepository(remoteName);
-          if (remoteKey === null) return true;
-          return remoteKey === repositoryKey;
+          // Legacy local branches keep their original reuse behavior and are not relabeled.
+          return recorded.length === 0 || recorded === repositoryKey;
         });
 
-      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
-      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
       const issueBranchPrefix = `issue/${issue.number}-`;
       const listedRemotes = yield* gitCore.execute({
         operation: "GitManager.prepareIssueThread.remotes",
         cwd: input.cwd,
         args: ["remote"],
       });
-      let fetchedAnyRemote = false;
+      const fetchedRemotes = new Set<string>();
       let fetchFailureDetail: string | undefined;
       for (const remote of listedRemotes.stdout
         .split("\n")
         .map((line) => line.trim())
         .filter((name) => name.length > 0)) {
-        if (repositoryKey !== null) {
-          const remoteKey = yield* hostedRemoteRepository(remote);
-          if (remoteKey !== null && remoteKey !== repositoryKey) continue;
+        if (!(yield* matchesIssueRepository(branch, remote))) continue;
+        const fetched = yield* gitCore
+          .execute({
+            operation: "GitManager.prepareIssueThread.fetchIssueBranches",
+            cwd: input.cwd,
+            args: [
+              "fetch",
+              "--quiet",
+              "--no-tags",
+              "--no-recurse-submodules",
+              "--refmap=",
+              "--prune",
+              remote,
+              `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
+            ],
+            env: ISSUE_BRANCH_FETCH_ENV,
+            allowNonZeroExit: true,
+          })
+          .pipe(Effect.result);
+        if (Result.isFailure(fetched)) {
+          fetchFailureDetail ??= fetched.failure.detail;
+          continue;
         }
-        const fetched = yield* gitCore.execute({
-          operation: "GitManager.prepareIssueThread.fetchIssueBranches",
-          cwd: input.cwd,
-          args: [
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--prune",
-            remote,
-            `+refs/heads/${issueBranchPrefix}*:refs/remotes/${remote}/${issueBranchPrefix}*`,
-          ],
-          env: ISSUE_BRANCH_FETCH_ENV,
-          allowNonZeroExit: true,
-        });
-        if (fetched.exitCode === 0) {
-          fetchedAnyRemote = true;
+        if (fetched.success.exitCode === 0) {
+          fetchedRemotes.add(remote);
           continue;
         }
         fetchFailureDetail ??=
-          issueFetchFailureDetail(fetched.stderr) ??
+          issueFetchFailureDetail(fetched.success.stderr) ??
           `Could not fetch issue branches from ${remote}.`;
       }
+      // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
+      yield* gitCore.pruneWorktrees({ cwd: input.cwd });
       // Filtered by the prefix, so the default page size can never hide the issue's branch.
       const { refs } = yield* gitCore.listRefs({
         cwd: input.cwd,
         query: issueBranchPrefix,
         refKind: "all",
         refresh: true,
+        includeMatchingRemoteRefs: true,
       });
       const localRefs = refs.filter((ref) => !ref.isRemote);
       const firstForThisIssue = (
@@ -2630,13 +2633,31 @@ export const make = Effect.gen(function* () {
             ),
           ];
           for (const ref of ordered) {
+            if (
+              ref.isRemote === true &&
+              (ref.remoteName === undefined || !fetchedRemotes.has(ref.remoteName))
+            )
+              continue;
             if (yield* matchesIssueRepository(nameOf(ref), ref.remoteName)) return ref;
           }
           return undefined;
         });
+      const availableBranchName = (name: string) =>
+        Effect.gen(function* () {
+          if (
+            repositoryKey === null ||
+            !localRefs.some((ref) => ref.name === name) ||
+            (yield* matchesIssueRepository(name))
+          )
+            return name;
+          const digest = yield* crypto
+            .digest("SHA-256", new TextEncoder().encode(repositoryKey))
+            .pipe(Effect.orDie);
+          return `${issueBranchPrefix}${Hex.encode(digest).slice(0, 12)}`;
+        });
       // The slug follows the title, so a renamed issue still finds its branch by number.
       const existing = yield* firstForThisIssue(localRefs, (ref) => ref.name);
-      if (existing === undefined && fetchFailureDetail !== undefined && !fetchedAnyRemote) {
+      if (existing === undefined && fetchFailureDetail !== undefined && fetchedRemotes.size === 0) {
         return yield* new GitManagerError({
           operation: "prepareIssueThread",
           cwd: input.cwd,
@@ -2658,6 +2679,7 @@ export const make = Effect.gen(function* () {
           branch: existing.name,
           worktreePath: existing.worktreePath,
           created: false,
+          recordRepository: false,
         };
       }
 
@@ -2665,11 +2687,12 @@ export const make = Effect.gen(function* () {
         Effect.map((settings) => settings.worktreeSubmodules),
         Effect.orElseSucceed(() => null),
       );
-      const finish = (worktree: VcsCreateWorktreeResult) => ({
+      const finish = (worktree: VcsCreateWorktreeResult, recordRepository = false) => ({
         issue,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
         created: true,
+        recordRepository,
       });
       const worktreesDirectory = yield* readWorktreesDirectory;
       if (existing) {
@@ -2697,11 +2720,12 @@ export const make = Effect.gen(function* () {
             {
               cwd: input.cwd,
               refName: remoteRef.name,
-              newRefName: localNameOf(remoteRef),
+              newRefName: yield* availableBranchName(localNameOf(remoteRef)),
               path: null,
             },
             { submodules, worktreesDirectory },
           ),
+          true,
         );
       }
 
@@ -2778,20 +2802,22 @@ export const make = Effect.gen(function* () {
           {
             cwd: input.cwd,
             refName: startRef,
-            newRefName:
-              repositoryKey !== null && !(yield* matchesIssueRepository(branch))
-                ? `${issueBranchPrefix}${sanitizeBranchFragment(repositoryKey).replace(/[/.]/g, "-")}`
-                : branch,
+            newRefName: yield* availableBranchName(branch),
             baseRefName: baseBranch,
             path: null,
           },
           { submodules, worktreesDirectory },
         ),
+        true,
       );
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
-      Effect.tap((result) => rememberIssueRepository(result.branch, result.issue.url)),
+      Effect.tap((result) =>
+        result.recordRepository
+          ? rememberIssueRepository(result.branch, issueRepositoryKey(result.issue.url))
+          : Effect.void,
+      ),
       Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),

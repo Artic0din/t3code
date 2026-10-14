@@ -724,14 +724,17 @@ function resolveIssue(
 
 function allowFileSubmodules<A, E, R>(effect: Effect.Effect<A, E, R>) {
   return Effect.gen(function* () {
+    const count = process.env.GIT_CONFIG_COUNT;
+    const index = Number(count ?? "0");
+    const keyName = `GIT_CONFIG_KEY_${index}`;
+    const valueName = `GIT_CONFIG_VALUE_${index}`;
     const previous = {
-      count: process.env.GIT_CONFIG_COUNT,
-      key: process.env.GIT_CONFIG_KEY_0,
-      value: process.env.GIT_CONFIG_VALUE_0,
+      key: process.env[keyName],
+      value: process.env[valueName],
     };
-    process.env.GIT_CONFIG_COUNT = "1";
-    process.env.GIT_CONFIG_KEY_0 = "protocol.file.allow";
-    process.env.GIT_CONFIG_VALUE_0 = "always";
+    process.env.GIT_CONFIG_COUNT = String(index + 1);
+    process.env[keyName] = "protocol.file.allow";
+    process.env[valueName] = "always";
     return yield* effect.pipe(
       Effect.ensuring(
         Effect.sync(() => {
@@ -742,9 +745,9 @@ function allowFileSubmodules<A, E, R>(effect: Effect.Effect<A, E, R>) {
             }
             process.env[name] = value;
           };
-          restore("GIT_CONFIG_COUNT", previous.count);
-          restore("GIT_CONFIG_KEY_0", previous.key);
-          restore("GIT_CONFIG_VALUE_0", previous.value);
+          restore("GIT_CONFIG_COUNT", count);
+          restore(keyName, previous.key);
+          restore(valueName, previous.value);
         }),
       ),
     );
@@ -772,6 +775,10 @@ function makeManager(input?: {
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
   gitConfigReads?: string[];
+  gitExecute?: (
+    command: Parameters<GitVcsDriver.GitVcsDriver["Service"]["execute"]>[0],
+    driver: GitVcsDriver.GitVcsDriver["Service"],
+  ) => ReturnType<GitVcsDriver.GitVcsDriver["Service"]["execute"]>;
   /** Seeds the V2 stores the per-project settings lookup reads. */
   seed?: Effect.Effect<
     void,
@@ -787,30 +794,36 @@ function makeManager(input?: {
 
   const layerServerSettings = ServerSettings.ServerSettingsService.layerTest(input?.serverSettings);
 
-  const layerVcsDriver = input?.gitConfigReads
-    ? Layer.effect(
-        GitVcsDriver.GitVcsDriver,
-        GitVcsDriver.make.pipe(
-          Effect.map((service) =>
-            GitVcsDriver.GitVcsDriver.of({
-              ...service,
-              readConfigValue: (cwd, key) =>
-                Effect.sync(() => input.gitConfigReads?.push(key)).pipe(
-                  Effect.andThen(service.readConfigValue(cwd, key)),
-                ),
-            }),
+  const gitExecute = input?.gitExecute;
+  const layerVcsDriver =
+    input?.gitConfigReads || gitExecute
+      ? Layer.effect(
+          GitVcsDriver.GitVcsDriver,
+          GitVcsDriver.make.pipe(
+            Effect.map((service) =>
+              GitVcsDriver.GitVcsDriver.of({
+                ...service,
+                execute:
+                  gitExecute === undefined
+                    ? service.execute
+                    : (command) => gitExecute(command, service),
+                readConfigValue: (cwd, key) =>
+                  Effect.sync(() => input.gitConfigReads?.push(key)).pipe(
+                    Effect.andThen(service.readConfigValue(cwd, key)),
+                  ),
+              }),
+            ),
           ),
-        ),
-      ).pipe(
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(layerServerConfig),
-      )
-    : GitVcsDriver.layer.pipe(
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(layerServerConfig),
-      );
+        ).pipe(
+          Layer.provideMerge(VcsProcess.layer),
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(layerServerConfig),
+        )
+      : GitVcsDriver.layer.pipe(
+          Layer.provideMerge(VcsProcess.layer),
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(layerServerConfig),
+        );
   const layerSourceControlRegistry = Layer.effect(
     SourceControlProviderRegistry.SourceControlProviderRegistry,
     (input?.sourceControlProvider === undefined
@@ -4989,18 +5002,17 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
-      const alphaIssue = {
-        number: 31,
-        title: "Alpha work",
-        body: "From alpha",
-        url: "https://github.com/alpha/one/issues/31",
-        state: "OPEN" as const,
-      };
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
           issues: [
-            alphaIssue,
+            {
+              number: 31,
+              title: "Alpha work",
+              body: "From alpha",
+              url: "https://github.com/alpha/one/issues/31",
+              state: "OPEN",
+            },
             {
               number: 31,
               title: "Beta work",
@@ -5016,27 +5028,202 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         cwd: repoDir,
         reference: "https://github.com/alpha/one/issues/31",
       });
-      alphaIssue.title = "Alpha work renamed";
-      const renamed = yield* prepareIssueThread(manager, {
-        cwd: repoDir,
-        reference: "https://github.com/alpha/one/issues/31",
-      });
       const beta = yield* prepareIssueThread(manager, {
         cwd: repoDir,
         reference: "https://github.com/beta/two/issues/31",
       });
 
       expect(alpha.branch).toBe("issue/31-alpha-work");
-      expect(renamed.branch).toBe("issue/31-alpha-work");
-      expect(NodeFS.realpathSync(renamed.worktreePath)).toBe(
-        NodeFS.realpathSync(alpha.worktreePath),
-      );
-      expect(beta.branch).toBe("issue/31-beta-work");
+      expect(alpha.issue.url).toBe("https://github.com/alpha/one/issues/31");
       expect(beta.issue.title).toBe("Beta work");
       expect(beta.issue.url).toBe("https://github.com/beta/two/issues/31");
+      expect(beta.branch).not.toBe(alpha.branch);
       expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
         NodeFS.realpathSync(alpha.worktreePath),
       );
+    }),
+  );
+
+  it.effect.each([
+    { url: "https://github/alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "ssh://git@github/alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "git@github:alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "https://github/alpha/one.git", repository: "github/alpha/one", reuse: true },
+    { url: "ssh://git@github/alpha/one.git", repository: "github/alpha/one", reuse: true },
+    { url: "git@github-work:alpha/one.git", repository: "github.com/alpha/one", reuse: true },
+    { url: "github.com:alpha/one.git", repository: "github.com/beta/two", reuse: false },
+    { url: "github.com:alpha/one.git", repository: "github.com/alpha/one", reuse: true },
+    { url: null, repository: "github.com/alpha/one", reuse: false },
+    { url: "https://github.com/fork/r.git", repository: "github.com/upstream/r", reuse: false },
+    {
+      url: "https://github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:9443/o/r",
+      reuse: false,
+    },
+    {
+      url: "https://github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:8443/o/r",
+      reuse: true,
+    },
+    {
+      url: "ssh://git@github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:8443/o/r",
+      reuse: false,
+    },
+    {
+      url: "ssh://git@github.enterprise.test:2222/o/r.git",
+      repository: "github.enterprise.test/o/r",
+      reuse: true,
+    },
+    {
+      url: "https://github.com/other/r.git",
+      additionalUrl: "https://github.com/alpha/one.git",
+      repository: "github.com/alpha/one",
+      reuse: false,
+    },
+    {
+      url: "https://github.com/alpha/one.git",
+      additionalUrl: "https://github.com/other/r.git",
+      repository: "github.com/alpha/one",
+      reuse: true,
+    },
+  ])(
+    "matches remote-only issue identity for $url against $repository",
+    ({ url, additionalUrl, repository, reuse }) =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir("t3code-narrow-identity-");
+        yield* initRepo(cwd);
+        const remote = yield* createBareRemote();
+        yield* runGit(cwd, ["remote", "add", "origin", remote]);
+        yield* runGit(cwd, ["push", "origin", "main"]);
+        yield* runGit(cwd, ["checkout", "-b", "issue/31-old-title"]);
+        NodeFS.writeFileSync(NodePath.join(cwd, "old-work.txt"), "old issue work\n");
+        yield* runGit(cwd, ["add", "old-work.txt"]);
+        yield* runGit(cwd, ["commit", "-m", "Old issue work"]);
+        yield* runGit(cwd, ["push", "origin", "issue/31-old-title"]);
+        const oldSha = (yield* runGit(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(cwd, ["checkout", "main"]);
+        const mainSha = (yield* runGit(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(cwd, ["branch", "-D", "issue/31-old-title"]);
+        if (url !== null)
+          yield* configureVisibleRemoteUrlWithLocalRewrite(cwd, "origin", url, remote);
+        if (additionalUrl !== undefined)
+          yield* runGit(cwd, ["config", "--add", "remote.origin.url", additionalUrl]);
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Current title",
+              body: null,
+              url: `https://${repository}/issues/31`,
+              state: "OPEN",
+            },
+          },
+        });
+        const prepared = yield* prepareIssueThread(manager, { cwd, reference: "31" });
+        expect(prepared.branch).toBe(reuse ? "issue/31-old-title" : "issue/31-current-title");
+        expect((yield* runGit(prepared.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          reuse ? oldSha : mainSha,
+        );
+        expect(
+          (yield* runGit(remote, ["rev-parse", "refs/heads/issue/31-old-title"])).stdout.trim(),
+        ).toBe(oldSha);
+      }),
+  );
+
+  it.effect(
+    "keeps same-title issue branches separate and resumes a recorded issue after a rename",
+    () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir("t3code-narrow-collision-");
+        yield* initRepo(cwd);
+        const scenarios: FakeIssue[] = [
+          {
+            number: 31,
+            title: "Same title",
+            body: null,
+            url: "https://github.com/alpha/r/issues/31",
+            state: "OPEN",
+          },
+          {
+            number: 31,
+            title: "Same title",
+            body: null,
+            url: "https://github.com/beta/r/issues/31",
+            state: "OPEN",
+          },
+        ];
+        const { manager } = yield* makeManager({
+          ghScenario: { defaultBranch: "main", issues: scenarios },
+        });
+        const alpha = yield* prepareIssueThread(manager, { cwd, reference: scenarios[0]!.url });
+        const beta = yield* prepareIssueThread(manager, { cwd, reference: scenarios[1]!.url });
+        expect(alpha.branch).toBe("issue/31-same-title");
+        expect(beta.branch).not.toBe(alpha.branch);
+        expect(
+          (yield* runGit(cwd, [
+            "config",
+            "--get",
+            `branch.${beta.branch}.t3code-issue-repository`,
+          ])).stdout.trim(),
+        ).toBe("github.com/beta/r");
+        scenarios[1]!.title = "Renamed title";
+        const resumed = yield* prepareIssueThread(manager, { cwd, reference: scenarios[1]!.url });
+        expect(resumed.branch).toBe(beta.branch);
+        expect(NodeFS.realpathSync(resumed.worktreePath)).toBe(
+          NodeFS.realpathSync(beta.worktreePath),
+        );
+        expect(
+          (yield* runGit(cwd, [
+            "config",
+            "--get",
+            `branch.${alpha.branch}.t3code-issue-repository`,
+          ])).stdout.trim(),
+        ).toBe("github.com/alpha/r");
+      }),
+  );
+
+  it.effect("keeps legacy local issue branches reusable without assigning a repository", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir("t3code-narrow-legacy-");
+      yield* initRepo(cwd);
+      yield* runGit(cwd, ["branch", "issue/31-legacy"]);
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          defaultBranch: "main",
+          issues: [
+            {
+              number: 31,
+              title: "Alpha",
+              body: null,
+              url: "https://github.com/alpha/r/issues/31",
+              state: "OPEN",
+            },
+            {
+              number: 31,
+              title: "Beta",
+              body: null,
+              url: "https://github.com/beta/r/issues/31",
+              state: "OPEN",
+            },
+          ],
+        },
+      });
+      for (const repository of ["alpha", "beta"]) {
+        const prepared = yield* prepareIssueThread(manager, {
+          cwd,
+          reference: `https://github.com/${repository}/r/issues/31`,
+        });
+        expect(prepared.branch).toBe("issue/31-legacy");
+      }
+      expect(
+        (yield* runGit(
+          cwd,
+          ["config", "--get", "branch.issue/31-legacy.t3code-issue-repository"],
+          true,
+        )).stdout.trim(),
+      ).toBe("");
     }),
   );
 
@@ -5376,6 +5563,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5447,6 +5640,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "team/origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5485,6 +5684,18 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "stale",
+        "git@github.com:o/r.git",
+        staleRemote,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5505,6 +5716,81 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         pushedSha,
       );
     }),
+  );
+
+  it.effect.each(["exit", "timeout"] as const)(
+    "continues fresh remote work instead of a stale ref after a fetch %s failure",
+    (failure) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const staleRemote = yield* createBareRemote();
+        const freshRemote = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", staleRemote]);
+        yield* runGit(repoDir, ["remote", "add", "upstream", freshRemote]);
+        yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "stale.txt"), "stale\n");
+        yield* runGit(repoDir, ["add", "stale.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Stale issue work"]);
+        yield* runGit(repoDir, ["push", "origin", "issue/31-add-dark-mode"]);
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+        yield* runGit(staleRemote, ["branch", "-D", "issue/31-add-dark-mode"]);
+        yield* runGit(repoDir, ["checkout", "-b", "issue/31-old-title"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "fresh.txt"), "fresh\n");
+        yield* runGit(repoDir, ["add", "fresh.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Fresh issue work"]);
+        yield* runGit(repoDir, ["push", "upstream", "issue/31-old-title"]);
+        const freshSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(repoDir, ["branch", "-D", "issue/31-old-title"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/o/r.git",
+          NodePath.join(repoDir, "missing-remote.git"),
+        );
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "upstream",
+          "git@github.com:o/r.git",
+          freshRemote,
+        );
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
+          },
+          gitExecute: (command, driver) =>
+            failure === "timeout" &&
+            command.operation === "GitManager.prepareIssueThread.fetchIssueBranches" &&
+            command.args.includes("origin")
+              ? new GitCommandError({
+                  operation: command.operation,
+                  cwd: command.cwd,
+                  command: "git fetch",
+                  detail: "Git command timed out.",
+                })
+              : driver.execute(command),
+        });
+
+        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+        expect(result.branch).toBe("issue/31-old-title");
+        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          freshSha,
+        );
+        expect(NodeFS.readFileSync(NodePath.join(result.worktreePath, "fresh.txt"), "utf8")).toBe(
+          "fresh\n",
+        );
+        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "stale.txt"))).toBe(false);
+      }),
   );
 
   it.effect("skips a hosted remote that cannot belong to the issue repository", () =>
@@ -5570,7 +5856,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         "T3_TEST_SSH_ASKPASS_LOG",
       ] as const;
       const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
-      yield* runGit(repoDir, ["remote", "add", "origin", "ssh://example.invalid/repo.git"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", "https://github.com/o/r.git"]);
+      yield* runGit(repoDir, [
+        "config",
+        "url.ssh://example.invalid/repo.git.insteadOf",
+        "https://github.com/o/r.git",
+      ]);
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5621,6 +5912,76 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("discovers issue work without fetching inaccessible submodules", () =>
+    allowFileSubmodules(
+      Effect.gen(function* () {
+        const subRepo = NodePath.join(yield* makeTempDir("t3code-submodule-"), "repo");
+        yield* makeDirectory(subRepo);
+        yield* initRepo(subRepo);
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["submodule", "add", subRepo, "vendor"]);
+        yield* runGit(repoDir, ["commit", "-m", "Add vendor"]);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "origin", "main"]);
+        const otherDir = yield* makeTempDir("t3code-git-manager-");
+        yield* runGit(otherDir, [
+          "clone",
+          "--branch",
+          "main",
+          "--recurse-submodules",
+          remoteDir,
+          ".",
+        ]);
+        yield* runGit(otherDir, ["config", "user.email", "test@example.com"]);
+        yield* runGit(otherDir, ["config", "user.name", "Test User"]);
+        NodeFS.writeFileSync(NodePath.join(subRepo, "marker.txt"), "advanced\n");
+        yield* runGit(subRepo, ["add", "marker.txt"]);
+        yield* runGit(subRepo, ["commit", "-m", "Advance vendor"]);
+        const otherVendor = NodePath.join(otherDir, "vendor");
+        yield* runGit(otherVendor, ["fetch", "origin", "main"]);
+        yield* runGit(otherVendor, ["checkout", "FETCH_HEAD"]);
+        yield* runGit(otherDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+        yield* runGit(otherDir, ["add", "vendor"]);
+        yield* runGit(otherDir, ["commit", "-m", "Update vendor"]);
+        yield* runGit(otherDir, ["push", "origin", "issue/31-add-dark-mode"]);
+        const issueSha = (yield* runGit(otherDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* removePath(subRepo);
+        yield* runGit(repoDir, ["config", "fetch.recurseSubmodules", "true"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/o/r.git",
+          remoteDir,
+        );
+        const { manager } = yield* makeManager({
+          serverSettings: { worktreeSubmodules: "none" },
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
+          },
+        });
+
+        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+
+        expect(result.branch).toBe("issue/31-add-dark-mode");
+        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          issueSha,
+        );
+        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "vendor", "marker.txt"))).toBe(
+          false,
+        );
+      }),
+    ),
+  );
+
   it.effect("prunes deleted remote issue branches before continuing", () =>
     Effect.gen(function* () {
       const remoteDir = yield* createBareRemote();
@@ -5639,6 +6000,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["fetch", "origin", "issue/31-add-dark-mode"]);
       yield* runGit(remoteDir, ["branch", "-D", "issue/31-add-dark-mode"]);
       const mainSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5668,7 +6035,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["remote", "add", "origin", "ssh://example.invalid/repo.git"]);
+      yield* runGit(repoDir, ["remote", "add", "origin", "https://github.com/o/r.git"]);
+      yield* runGit(repoDir, [
+        "config",
+        "url.ssh://example.invalid/repo.git.insteadOf",
+        "https://github.com/o/r.git",
+      ]);
       yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
       NodeFS.writeFileSync(NodePath.join(repoDir, "local.txt"), "local issue work\n");
       yield* runGit(repoDir, ["add", "local.txt"]);
@@ -5760,43 +6132,66 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("continues an issue branch pushed from another clone", () =>
-    Effect.gen(function* () {
-      const remoteDir = yield* createBareRemote();
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      const otherDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
-      yield* runGit(otherDir, ["clone", "--origin", "origin", remoteDir, "."]);
-      yield* runGit(otherDir, ["config", "user.email", "test@example.com"]);
-      yield* runGit(otherDir, ["config", "user.name", "Test User"]);
-      yield* runGit(otherDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
-      NodeFS.writeFileSync(NodePath.join(otherDir, "remote.txt"), "from the other clone\n");
-      yield* runGit(otherDir, ["add", "remote.txt"]);
-      yield* runGit(otherDir, ["commit", "-m", "Remote issue work"]);
-      yield* runGit(otherDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
-      const pushedSha = (yield* runGit(otherDir, ["rev-parse", "HEAD"])).stdout.trim();
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          defaultBranch: "main",
-          issue: {
-            number: 31,
-            title: "Add dark mode",
-            body: "Please",
-            url: "https://github.com/o/r/issues/31",
-            state: "OPEN",
+  it.effect.each([false, true])(
+    "continues remote issue work with a concurrent ref read %s",
+    (listDuringFetch) =>
+      Effect.gen(function* () {
+        const remoteDir = yield* createBareRemote();
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        const otherDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(otherDir, ["clone", "--origin", "origin", remoteDir, "."]);
+        yield* runGit(otherDir, ["config", "user.email", "test@example.com"]);
+        yield* runGit(otherDir, ["config", "user.name", "Test User"]);
+        yield* runGit(otherDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+        NodeFS.writeFileSync(NodePath.join(otherDir, "remote.txt"), "from the other clone\n");
+        yield* runGit(otherDir, ["add", "remote.txt"]);
+        yield* runGit(otherDir, ["commit", "-m", "Remote issue work"]);
+        yield* runGit(otherDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
+        const pushedSha = (yield* runGit(otherDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/o/r.git",
+          remoteDir,
+        );
+        const { manager } = yield* makeManager({
+          gitExecute: (command, driver) =>
+            Effect.gen(function* () {
+              if (
+                listDuringFetch &&
+                command.operation === "GitManager.prepareIssueThread.fetchIssueBranches"
+              ) {
+                const beforeFetch = yield* driver.listRefs({
+                  cwd: repoDir,
+                  query: "issue/31-",
+                  refresh: true,
+                });
+                expect(beforeFetch.refs).toEqual([]);
+              }
+              return yield* driver.execute(command);
+            }),
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
           },
-        },
-      });
+        });
 
-      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
 
-      expect(result.branch).toBe("issue/31-add-dark-mode");
-      expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-        pushedSha,
-      );
-    }),
+        expect(result.branch).toBe("issue/31-add-dark-mode");
+        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          pushedSha,
+        );
+      }),
   );
 
   it.effect("continues an issue branch that advanced on another clone", () =>
@@ -5828,6 +6223,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(otherDir, ["commit", "-m", "Advanced issue work"]);
       yield* runGit(otherDir, ["push", "origin", "issue/31-add-dark-mode"]);
       const advancedSha = (yield* runGit(otherDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -5853,61 +6254,72 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("keeps local issue commits when the remote issue branch moved", () =>
-    Effect.gen(function* () {
-      const remoteDir = yield* createBareRemote();
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      const otherDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
-      yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
-      NodeFS.writeFileSync(NodePath.join(repoDir, "shared.txt"), "shared\n");
-      yield* runGit(repoDir, ["add", "shared.txt"]);
-      yield* runGit(repoDir, ["commit", "-m", "Shared issue work"]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
-      NodeFS.writeFileSync(NodePath.join(repoDir, "local.txt"), "local only\n");
-      yield* runGit(repoDir, ["add", "local.txt"]);
-      yield* runGit(repoDir, ["commit", "-m", "Local issue work"]);
-      const localSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-      yield* runGit(repoDir, ["checkout", "main"]);
-      yield* runGit(otherDir, ["clone", "--origin", "origin", remoteDir, "."]);
-      yield* runGit(otherDir, ["config", "user.email", "test@example.com"]);
-      yield* runGit(otherDir, ["config", "user.name", "Test User"]);
-      yield* runGit(otherDir, [
-        "checkout",
-        "-b",
-        "issue/31-add-dark-mode",
-        "origin/issue/31-add-dark-mode",
-      ]);
-      NodeFS.writeFileSync(NodePath.join(otherDir, "remote.txt"), "remote only\n");
-      yield* runGit(otherDir, ["add", "remote.txt"]);
-      yield* runGit(otherDir, ["commit", "-m", "Remote moved"]);
-      yield* runGit(otherDir, ["push", "origin", "issue/31-add-dark-mode"]);
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          defaultBranch: "main",
-          issue: {
-            number: 31,
-            title: "Add dark mode",
-            body: "Please",
-            url: "https://github.com/o/r/issues/31",
-            state: "OPEN",
+  it.effect.each([false, true])(
+    "keeps local issue commits with local fetch mappings %s",
+    (localRefMapping) =>
+      Effect.gen(function* () {
+        const remoteDir = yield* createBareRemote();
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        const otherDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+        yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "shared.txt"), "shared\n");
+        yield* runGit(repoDir, ["add", "shared.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Shared issue work"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "issue/31-add-dark-mode"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "local.txt"), "local only\n");
+        yield* runGit(repoDir, ["add", "local.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Local issue work"]);
+        const localSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(repoDir, ["checkout", "main"]);
+        yield* runGit(otherDir, ["clone", "--origin", "origin", remoteDir, "."]);
+        yield* runGit(otherDir, ["config", "user.email", "test@example.com"]);
+        yield* runGit(otherDir, ["config", "user.name", "Test User"]);
+        yield* runGit(otherDir, [
+          "checkout",
+          "-b",
+          "issue/31-add-dark-mode",
+          "origin/issue/31-add-dark-mode",
+        ]);
+        NodeFS.writeFileSync(NodePath.join(otherDir, "remote.txt"), "remote only\n");
+        yield* runGit(otherDir, ["add", "remote.txt"]);
+        yield* runGit(otherDir, ["commit", "-m", "Remote moved"]);
+        yield* runGit(otherDir, ["push", "origin", "issue/31-add-dark-mode"]);
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "origin",
+          "https://github.com/o/r.git",
+          remoteDir,
+        );
+        if (localRefMapping) {
+          yield* runGit(repoDir, ["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"]);
+        }
+        const { manager } = yield* makeManager({
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
           },
-        },
-      });
+        });
 
-      const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
+        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
 
-      expect(result.branch).toBe("issue/31-add-dark-mode");
-      expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-        localSha,
-      );
-      expect(NodeFS.readFileSync(NodePath.join(result.worktreePath, "local.txt"), "utf8")).toBe(
-        "local only\n",
-      );
-      expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "remote.txt"))).toBe(false);
-    }),
+        expect(result.branch).toBe("issue/31-add-dark-mode");
+        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          localSha,
+        );
+        expect(NodeFS.readFileSync(NodePath.join(result.worktreePath, "local.txt"), "utf8")).toBe(
+          "local only\n",
+        );
+        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "remote.txt"))).toBe(false);
+      }),
   );
 
   it.effect("reports when fetching issue branches cannot reach the remote", () =>
@@ -5915,6 +6327,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       yield* runGit(repoDir, ["remote", "add", "origin", "https://127.0.0.1:1/nope.git"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        "https://127.0.0.1:1/nope.git",
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
