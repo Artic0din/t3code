@@ -36,7 +36,6 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
-  type ProjectId,
   SourceControlProviderError,
   type SourceControlProviderKind,
   type SourceControlWritingStyleSettings,
@@ -775,15 +774,18 @@ export const make = Effect.gen(function* () {
   }) {
     const settings = yield* serverSettingsService.getSettings;
     if (!hasProjectSettingsOverrides(settings)) return settings;
-    const projectId: ProjectId | null = yield* input.threadId !== undefined
-      ? threads.getThreadShell(input.threadId).pipe(
-          Effect.map((thread) => thread?.projectId ?? null),
-          Effect.orElseSucceed(() => null),
-        )
-      : projects.findActiveByWorkspaceRoot(input.cwd).pipe(
-          Effect.map((project) => Option.getOrNull(project)?.projectId ?? null),
-          Effect.orElseSucceed(() => null),
-        );
+    const projectIdFromWorkspace = projects.findActiveByWorkspaceRoot(input.cwd).pipe(
+      Effect.map((project) => Option.getOrNull(project)?.projectId ?? null),
+      Effect.orElseSucceed(() => null),
+    );
+    const threadProjectId =
+      input.threadId === undefined
+        ? null
+        : yield* threads.getThreadShell(input.threadId).pipe(
+            Effect.map((thread) => thread?.projectId ?? null),
+            Effect.orElseSucceed(() => null),
+          );
+    const projectId = threadProjectId ?? (yield* projectIdFromWorkspace);
     return resolveProjectSettings(settings, projectId).settings;
   });
   // Best effort: a settings read failure falls back to the default location.

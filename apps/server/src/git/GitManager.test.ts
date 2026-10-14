@@ -721,6 +721,38 @@ function resolveIssue(
   return manager.resolveIssue(input);
 }
 
+function allowFileSubmodules<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const count = process.env.GIT_CONFIG_COUNT;
+    const index = Number(count ?? "0");
+    const keyName = `GIT_CONFIG_KEY_${index}`;
+    const valueName = `GIT_CONFIG_VALUE_${index}`;
+    const previous = {
+      key: process.env[keyName],
+      value: process.env[valueName],
+    };
+    process.env.GIT_CONFIG_COUNT = String(index + 1);
+    process.env[keyName] = "protocol.file.allow";
+    process.env[valueName] = "always";
+    return yield* effect.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          const restore = (name: string, value: string | undefined) => {
+            if (value === undefined) {
+              delete process.env[name];
+              return;
+            }
+            process.env[name] = value;
+          };
+          restore("GIT_CONFIG_COUNT", count);
+          restore(keyName, previous.key);
+          restore(valueName, previous.value);
+        }),
+      ),
+    );
+  });
+}
+
 function prepareIssueThread(
   manager: GitManager.GitManager["Service"],
   input: { cwd: string; reference: string; threadId?: ThreadId },
@@ -5182,6 +5214,207 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         )).stdout.trim(),
       ).toBe("");
     }),
+  );
+
+  it.effect("checks out project submodules for an unpersisted issue draft", () =>
+    allowFileSubmodules(
+      Effect.gen(function* () {
+        const subRepo = yield* makeTempDir("t3code-submodule-");
+        yield* initRepo(subRepo);
+        NodeFS.writeFileSync(NodePath.join(subRepo, "marker.txt"), "nested\n");
+        yield* runGit(subRepo, ["add", "marker.txt"]);
+        yield* runGit(subRepo, ["commit", "-m", "Add submodule marker"]);
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["submodule", "add", subRepo, "vendor"]);
+        yield* runGit(repoDir, ["commit", "-m", "Add vendor submodule"]);
+        const projectId = ProjectId.make("project:issue-submodules");
+        const createdAt = DateTime.makeUnsafe("2026-09-27T00:00:00.000Z");
+        const { manager } = yield* makeManager({
+          serverSettings: {
+            worktreeSubmodules: "none",
+            projectSettingsOverrides: {
+              [projectId]: { worktreeSubmodules: "recursive" },
+            },
+          },
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
+          },
+          seed: Effect.gen(function* () {
+            yield* (yield* ProjectStore.ProjectStoreV2).apply({
+              sequence: 1,
+              eventId: EventId.make("event:issue-submodules:project"),
+              aggregateKind: "project",
+              aggregateId: projectId,
+              occurredAt: DateTime.formatIso(createdAt),
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              type: "project.created",
+              payload: {
+                projectId,
+                title: "Issue submodules",
+                workspaceRoot: repoDir,
+                defaultModelSelection: null,
+                scripts: [],
+                createdAt: DateTime.formatIso(createdAt),
+                updatedAt: DateTime.formatIso(createdAt),
+              },
+            });
+          }),
+        });
+
+        const result = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "31",
+          threadId: ThreadId.make("thread:unpersisted-issue-draft"),
+        });
+
+        expect(result.branch).toBe("issue/31-add-dark-mode");
+        expect(
+          NodeFS.readFileSync(NodePath.join(result.worktreePath, "vendor", "marker.txt"), "utf8"),
+        ).toBe("nested\n");
+      }),
+    ),
+  );
+
+  it.effect("keeps a persisted thread's submodule setting over the workspace project", () =>
+    allowFileSubmodules(
+      Effect.gen(function* () {
+        const subRepo = yield* makeTempDir("t3code-submodule-");
+        yield* initRepo(subRepo);
+        NodeFS.writeFileSync(NodePath.join(subRepo, "marker.txt"), "nested\n");
+        yield* runGit(subRepo, ["add", "marker.txt"]);
+        yield* runGit(subRepo, ["commit", "-m", "Add submodule marker"]);
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["submodule", "add", subRepo, "vendor"]);
+        yield* runGit(repoDir, ["commit", "-m", "Add vendor submodule"]);
+        const workspaceProjectId = ProjectId.make("project:workspace-submodules");
+        const threadProjectId = ProjectId.make("project:thread-submodules");
+        const threadId = ThreadId.make("thread:persisted-submodules");
+        const providerInstanceId = ProviderInstanceId.make("codex");
+        const createdAt = DateTime.makeUnsafe("2026-09-27T00:00:00.000Z");
+        const { manager } = yield* makeManager({
+          serverSettings: {
+            worktreeSubmodules: "none",
+            projectSettingsOverrides: {
+              [workspaceProjectId]: { worktreeSubmodules: "recursive" },
+              [threadProjectId]: { worktreeSubmodules: "none" },
+            },
+          },
+          ghScenario: {
+            defaultBranch: "main",
+            issue: {
+              number: 31,
+              title: "Add dark mode",
+              body: "Please",
+              url: "https://github.com/o/r/issues/31",
+              state: "OPEN",
+            },
+          },
+          seed: Effect.gen(function* () {
+            const projects = yield* ProjectStore.ProjectStoreV2;
+            const occurredAt = DateTime.formatIso(createdAt);
+            yield* projects.apply({
+              sequence: 1,
+              eventId: EventId.make("event:workspace-submodules:project"),
+              aggregateKind: "project",
+              aggregateId: workspaceProjectId,
+              occurredAt,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              type: "project.created",
+              payload: {
+                projectId: workspaceProjectId,
+                title: "Workspace",
+                workspaceRoot: repoDir,
+                defaultModelSelection: null,
+                scripts: [],
+                createdAt: occurredAt,
+                updatedAt: occurredAt,
+              },
+            });
+            yield* projects.apply({
+              sequence: 2,
+              eventId: EventId.make("event:thread-submodules:project"),
+              aggregateKind: "project",
+              aggregateId: threadProjectId,
+              occurredAt,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              type: "project.created",
+              payload: {
+                projectId: threadProjectId,
+                title: "Thread project",
+                workspaceRoot: "/elsewhere",
+                defaultModelSelection: null,
+                scripts: [],
+                createdAt: occurredAt,
+                updatedAt: occurredAt,
+              },
+            });
+            yield* (yield* ProjectionStore.ProjectionStoreV2).apply({
+              id: EventId.make("event:thread-submodules:thread"),
+              type: "thread.created",
+              threadId,
+              providerInstanceId,
+              occurredAt: createdAt,
+              payload: {
+                createdBy: "user",
+                creationSource: "web",
+                id: threadId,
+                projectId: threadProjectId,
+                title: "Persisted",
+                providerInstanceId,
+                modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: repoDir,
+                activeProviderThreadId: null,
+                lineage: {
+                  parentThreadId: null,
+                  relationshipToParent: null,
+                  rootThreadId: threadId,
+                },
+                forkedFrom: null,
+                createdAt,
+                updatedAt: createdAt,
+                archivedAt: null,
+                settledOverride: null,
+                settledAt: null,
+                lastVisitedAt: null,
+                deletedAt: null,
+              },
+            });
+          }),
+        });
+
+        const result = yield* prepareIssueThread(manager, {
+          cwd: repoDir,
+          reference: "31",
+          threadId,
+        });
+
+        expect(result.branch).toBe("issue/31-add-dark-mode");
+        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "vendor", "marker.txt"))).toBe(
+          false,
+        );
+      }),
+    ),
   );
 
   it.effect("finds an issue worktree among more than 100 branches", () =>
