@@ -286,6 +286,15 @@ export interface ProjectionRecordFilter {
   readonly turnItemTypes?: ReadonlyArray<OrchestrationV2TurnItem["type"]>;
   readonly turnItemStatuses?: ReadonlyArray<OrchestrationV2TurnItem["status"]>;
 }
+
+export interface ProjectionAgentSessionOwner {
+  readonly threadId: ThreadId;
+  readonly driver: OrchestrationV2ProviderThread["driver"];
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly nativeId: string;
+  readonly imported: boolean;
+  readonly deleted: boolean;
+}
 export type ProjectionRecordField = Exclude<
   keyof OrchestrationV2ThreadProjection,
   "thread" | "updatedAt" | "visibleTurnItems"
@@ -308,6 +317,11 @@ export interface ProjectionTimelinePage {
 }
 
 export interface ProjectionStoreV2Shape {
+  /** Native session bindings in this environment, including archived and deleted owners. */
+  readonly getAgentSessionOwners: (input?: {
+    readonly providerInstanceIds: ReadonlyArray<ProviderInstanceId>;
+    readonly nativeId: string;
+  }) => Effect.Effect<ReadonlyArray<ProjectionAgentSessionOwner>, ProjectionStoreV2Error>;
   readonly getThreadAttachmentIds: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<string>, ProjectionStoreV2Error>;
@@ -5332,6 +5346,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
 
+    const getAgentSessionOwners: ProjectionStoreV2Shape["getAgentSessionOwners"] = (input) =>
+      sql<{
+        readonly threadId: ThreadId;
+        readonly driver: OrchestrationV2ProviderThread["driver"];
+        readonly providerInstanceId: ProviderInstanceId;
+        readonly nativeId: string;
+        readonly imported: number;
+        readonly deleted: number;
+      }>`
+        SELECT t.thread_id AS "threadId", p.driver,
+          p.provider_instance_id AS "providerInstanceId",
+          json_extract(p.payload_json, '$.nativeThreadRef.nativeId') AS "nativeId",
+          (json_extract(t.payload_json, '$.historyOrigin') IS 'v1_import'
+            AND t.thread_id = 'import:' || p.provider_instance_id || ':' || json_extract(p.payload_json, '$.nativeThreadRef.nativeId')) AS imported,
+          t.deleted_at IS NOT NULL AS deleted
+        FROM orchestration_v2_projection_provider_threads p
+        INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
+        WHERE json_extract(p.payload_json, '$.nativeThreadRef.nativeId') IS NOT NULL
+          ${input === undefined ? sql`` : sql`AND ${sql.in("p.provider_instance_id", input.providerInstanceIds)} AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ${input.nativeId}`}
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({ ...row, imported: row.imported === 1, deleted: row.deleted === 1 })),
+        ),
+        Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+      );
+
     const getThreadsWithPullRequests: ProjectionStoreV2Shape["getThreadsWithPullRequests"] = (
       threadId,
     ) =>
@@ -5675,6 +5715,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread,
       getSettlementCandidates,
       getThreadsWithPullRequests,
+      getAgentSessionOwners,
       getThreadProjection,
       getTurnStartContext,
       getTurnStartHistory,
@@ -5713,6 +5754,34 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
     const sequence = yield* Ref.make(0);
 
     const service: ProjectionStoreV2Shape = {
+      getAgentSessionOwners: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()].flatMap((projection) =>
+              projection.providerThreads.flatMap((providerThread) =>
+                providerThread.nativeThreadRef === null ||
+                providerThread.nativeThreadRef.nativeId === null ||
+                (input !== undefined &&
+                  (!input.providerInstanceIds.includes(providerThread.providerInstanceId) ||
+                    providerThread.nativeThreadRef.nativeId !== input.nativeId))
+                  ? []
+                  : [
+                      {
+                        threadId: projection.thread.id,
+                        driver: providerThread.driver,
+                        providerInstanceId: providerThread.providerInstanceId,
+                        nativeId: providerThread.nativeThreadRef.nativeId,
+                        imported:
+                          projection.thread.historyOrigin === "v1_import" &&
+                          projection.thread.id ===
+                            `import:${providerThread.providerInstanceId}:${providerThread.nativeThreadRef.nativeId}`,
+                        deleted: projection.thread.deletedAt !== null,
+                      },
+                    ],
+              ),
+            ),
+          ),
+        ),
       apply: (event) =>
         Effect.gen(function* () {
           const result = yield* Ref.modify(replayState, (existing) => {

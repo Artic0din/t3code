@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -72,6 +73,9 @@ const layerScannerTest = (input: ScannerTestInput) =>
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
         layerProjectStore(input.importedWorkspaceRoots ?? []),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getAgentSessionOwners: () => Effect.succeed([]),
+        }),
       ),
     ),
   );
@@ -2215,16 +2219,13 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           });
         }
 
-        const opens = new Map<string, number>();
-        let fullReadBytes = 0;
+        let importReadBytes = 0;
         const trackedFileSystem = FileSystem.FileSystem.of({
           ...fileSystem,
-          open: (filePath, options) => {
-            const count = (opens.get(filePath) ?? 0) + 1;
-            opens.set(filePath, count);
-            return fileSystem.open(filePath, options).pipe(
+          open: (filePath, options) =>
+            fileSystem.open(filePath, options).pipe(
               Effect.map((file) =>
-                !transcriptPaths.has(filePath) || count === 1
+                !transcriptPaths.has(filePath)
                   ? file
                   : {
                       ...file,
@@ -2233,19 +2234,19 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                         file.readAlloc(size).pipe(
                           Effect.tap((chunk) =>
                             Effect.sync(() => {
-                              if (chunk._tag === "Some") fullReadBytes += chunk.value.byteLength;
+                              if (chunk._tag === "Some") importReadBytes += chunk.value.byteLength;
                             }),
                           ),
                         ),
                     },
               ),
-            );
-          },
+            ),
         });
         const outcomes = yield* Effect.gen(function* () {
           const scanner = yield* AgentSessionScanner.AgentSessionScanner;
           const scan = yield* scanner.scan;
           expect(scan.candidates[0]?.threadCount).toBe(5);
+          importReadBytes = 0;
           return yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
         }).pipe(
           Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })),
@@ -2259,7 +2260,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           "Importable",
           "Importable",
         ]);
-        expect(fullReadBytes).toBe(80 * 1024 * 1024);
+        expect(importReadBytes).toBe(85 * 1024 * 1024);
       }),
     );
 
@@ -2396,7 +2397,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                     thread: { messages: [{ text: "Replacement prompt" }] },
                   });
                 } else {
-                  expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+                  expect(outcomes).toEqual([]);
                 }
               }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
             }),

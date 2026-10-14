@@ -156,6 +156,7 @@ import {
   projectThreadProjectionForWire,
 } from "./orchestration-v2/WireProjection.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
@@ -3860,7 +3861,7 @@ export const layer = Layer.unwrap(
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(AgentSessionScanner.layer),
+              Layer.provide(AgentSessionScanner.layer.pipe(Layer.provide(ProjectionStore.layer))),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // One server-lifetime service means clients share the same PR caches, and a WS

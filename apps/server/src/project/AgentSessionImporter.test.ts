@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as AgentSessionImporter from "./AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
@@ -76,7 +77,7 @@ it.effect("imports messages once and preserves the provider native resume bindin
           getThreadRecords: () =>
             imported
               ? Effect.succeed({
-                  thread: { id: threadId, projectId, historyOrigin: "v1_import" },
+                  thread: { id: threadId, projectId, historyOrigin: "v1_import", deletedAt: null },
                 } as never)
               : Effect.fail(new Orchestrator.OrchestratorProjectionError({ threadId })),
         }),
@@ -94,6 +95,9 @@ it.effect("imports messages once and preserves the provider native resume bindin
           recordImportedTranscript: (input) => Effect.sync(() => void recorded.push(input)),
         }),
         IdAllocator.layer,
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getAgentSessionOwners: () => Effect.succeed([]),
+        }),
       ),
     ),
   );
@@ -193,6 +197,9 @@ it.effect.each([{ providerInstanceId }, { providerSessionId }])(
           }),
           Layer.mock(Orchestrator.OrchestratorV2)({}),
           IdAllocator.layer,
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getAgentSessionOwners: () => Effect.succeed([]),
+          }),
         ),
       ),
     );

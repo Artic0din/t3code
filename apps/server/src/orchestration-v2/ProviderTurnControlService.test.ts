@@ -210,6 +210,7 @@ it.effect(
       const layerProjection = Layer.succeed(
         ProjectionStore.ProjectionStoreV2,
         ProjectionStore.ProjectionStoreV2.of({
+          getAgentSessionOwners: () => Effect.die("unused getAgentSessionOwners"),
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),

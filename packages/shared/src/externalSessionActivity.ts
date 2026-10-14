@@ -67,6 +67,8 @@ export type ExternalSessionActivityRefresh =
   | { readonly _tag: "succeeded"; readonly result: AgentSessionScanResult };
 
 const ADD_PROJECT_REASON = "Add this folder as a T3 project before importing the session.";
+const DELETED_SESSION_REASON =
+  "This imported session was deleted from T3. It cannot be imported again.";
 
 export function externalSessionImportMessage(result: AgentSessionImportResult): string {
   const imported =
@@ -113,6 +115,12 @@ function sessionAction(
   observation: AgentSessionObservation,
   knownThreadIds: ReadonlySet<string>,
 ): ExternalSessionActivityAction {
+  if (observation.importedThreadDeleted === true) {
+    return {
+      kind: "explain",
+      reason: DELETED_SESSION_REASON,
+    };
+  }
   const threadId = externalSessionThreadId(observation);
   if (knownThreadIds.has(threadId)) {
     return { kind: "open", threadId };
@@ -206,7 +214,9 @@ export function presentExternalSessionActivity(input: {
                 ...input.refresh.previous,
                 rows: input.refresh.previous.rows.map((row) => {
                   const threadId = externalSessionThreadId(row);
-                  return input.knownThreadIds.has(threadId)
+                  return !(
+                    row.action.kind === "explain" && row.action.reason === DELETED_SESSION_REASON
+                  ) && input.knownThreadIds.has(threadId)
                     ? { ...row, action: { kind: "open" as const, threadId } }
                     : row;
                 }),

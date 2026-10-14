@@ -44,6 +44,31 @@ describe("external session activity preference", () => {
 });
 
 describe("presentExternalSessionActivity", () => {
+  it("keeps a deleted session's explanation when stale shells arrive during a failed refresh", () => {
+    const shown = presentExternalSessionActivity({
+      enabled: true,
+      refresh: {
+        _tag: "succeeded",
+        result: {
+          ...scan,
+          sessions: scan.sessions.map((session) => ({ ...session, importedThreadDeleted: true })),
+        },
+      },
+      knownThreadIds: new Set(["import:codex:session-1"]),
+    });
+    if (shown.status !== "shown") throw new Error("Expected scanned session rows");
+    expect(shown.snapshot.rows[0]?.action).toEqual({
+      kind: "explain",
+      reason: "This imported session was deleted from T3. It cannot be imported again.",
+    });
+    expect(
+      presentExternalSessionActivity({
+        enabled: true,
+        refresh: { _tag: "failed", message: "Scan unavailable", previous: shown.snapshot },
+        knownThreadIds: new Set(["import:codex:session-1"]),
+      }),
+    ).toMatchObject({ previous: shown.snapshot });
+  });
   it("updates retained actions after imported identities arrive during a failed refresh", () => {
     const shown = presentExternalSessionActivity({
       enabled: true,

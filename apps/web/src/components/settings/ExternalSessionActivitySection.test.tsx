@@ -257,6 +257,24 @@ afterEach(async () => {
 });
 
 describe("external session actions", () => {
+  it("explains a deleted import without offering another dead-end Import", async () => {
+    state.scan.mockResolvedValue({
+      _tag: "Success",
+      value: {
+        ...scan,
+        sessions: scan.sessions!.map((session) => ({ ...session, importedThreadDeleted: true })),
+      },
+    });
+    await act(async () => render());
+    await click("Refresh");
+    expect(container.textContent).toContain(
+      "This imported session was deleted from T3. It cannot be imported again.",
+    );
+    expect(button("Import")).toBeUndefined();
+    expect(button("Open")).toBeUndefined();
+    expect(state.import).not.toHaveBeenCalled();
+    expect(state.unarchive).not.toHaveBeenCalled();
+  });
   it("does not fetch archives while opted out or before a scan", async () => {
     state.enabled = false;
     await act(async () => render());

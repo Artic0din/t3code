@@ -52,6 +52,7 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -172,7 +173,7 @@ export interface AgentSessionThread {
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
 }
 
-export type AgentSessionRecentThread =
+export type AgentSessionRecentThread = (
   | {
       readonly _tag: "Importable";
       readonly thread: AgentSessionThread;
@@ -180,7 +181,22 @@ export type AgentSessionRecentThread =
     }
   | { readonly _tag: "AlreadyImported"; readonly source: AgentSessionImportSource }
   | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
-  | { readonly _tag: "Skipped" };
+  | { readonly _tag: "Skipped" }
+) & { readonly ownershipProviderInstanceIds?: ReadonlyArray<ProviderInstanceId> };
+
+function activeImportedOwnersBySession(
+  owners: ReadonlyArray<ProjectionStore.ProjectionAgentSessionOwner>,
+  aliases: ReadonlyMap<ProviderInstanceId, ProviderInstanceId>,
+) {
+  return new Map(
+    owners
+      .filter((owner) => owner.imported && !owner.deleted)
+      .map((owner) => [
+        `${owner.driver}\0${aliases.get(owner.providerInstanceId) ?? owner.providerInstanceId}\0${owner.nativeId}`,
+        owner,
+      ]),
+  );
+}
 
 /** Service tag for agent session discovery. */
 export class AgentSessionScanner extends Context.Service<
@@ -649,6 +665,15 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const readSessionOwners = () =>
+    projections
+      .getAgentSessionOwners()
+      .pipe(
+        Effect.mapError(
+          (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+        ),
+      );
   // Resolve through realpath so macOS `/var` vs `/private/var` aliases match
   // candidate realpaths used by the T3-managed worktree filter.
   const baseDir = yield* fileSystem
@@ -1198,6 +1223,7 @@ export const make = Effect.gen(function* () {
 
     const raw: Array<RawCandidate> = [];
     const sourceReports: Array<AgentSessionSourceReport> = [];
+    const instanceAliases = new Map<ProviderInstanceId, ProviderInstanceId>();
     let truncated = false;
 
     for (const source of ["claudeAgent", "codex"] as const) {
@@ -1205,9 +1231,7 @@ export const make = Effect.gen(function* () {
         readonly instanceId: ProviderInstanceId;
         readonly config: ProviderInstanceConfig;
       }> = Object.entries(settings.providerInstances)
-        .filter(
-          ([, instance]) => instance.driver === source && resolveProviderInstanceEnabled(instance),
-        )
+        .filter(([, instance]) => instance.driver === source)
         .map(([instanceId, config]) => ({
           instanceId: ProviderInstanceId.make(instanceId),
           config,
@@ -1233,7 +1257,8 @@ export const make = Effect.gen(function* () {
         return leftDefault - rightDefault;
       });
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
-      const seenHomes = new Set<string>();
+      const seenHomes = new Map<string, ProviderInstanceId>();
+      const instanceHomeKeys = new Map<ProviderInstanceId, string>();
       for (const { instanceId, config: instance } of instances) {
         const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
         const environmentHome =
@@ -1261,9 +1286,17 @@ export const make = Effect.gen(function* () {
         }
 
         const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
-        if (seenHomes.has(homeKey)) continue;
-        seenHomes.add(homeKey);
+        instanceHomeKeys.set(instanceId, homeKey);
+        if (!resolveProviderInstanceEnabled(instance)) continue;
+        const canonicalInstance = seenHomes.get(homeKey);
+        if (canonicalInstance !== undefined) continue;
+        seenHomes.set(homeKey, instanceId);
         homes.push({ homePath, providerInstanceId: instanceId });
+      }
+      // Disabling an instance stops discovery, but does not release its native sessions.
+      for (const [instanceId, homeKey] of instanceHomeKeys) {
+        const canonicalInstance = seenHomes.get(homeKey);
+        if (canonicalInstance !== undefined) instanceAliases.set(instanceId, canonicalInstance);
       }
 
       const transcriptCandidates: Array<TranscriptCandidate> = [];
@@ -1334,10 +1367,8 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    return { candidates: raw, truncated, sourceReports };
+    return { candidates: raw, truncated, sourceReports, instanceAliases };
   });
-
-  let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
@@ -1346,7 +1377,27 @@ export const make = Effect.gen(function* () {
     const raw = collected.candidates;
     let truncated = collected.truncated;
     const sourceReports = collected.sourceReports.map((report) => ({ ...report }));
-    cachedCandidates = raw;
+    const sessionOwners = yield* readSessionOwners();
+    const importedOwners = activeImportedOwnersBySession(sessionOwners, collected.instanceAliases);
+    const nativeSessionKeys = new Set(
+      sessionOwners
+        .filter((owner) => !owner.imported)
+        .map(
+          (owner) =>
+            `${owner.driver}\0${collected.instanceAliases.get(owner.providerInstanceId) ?? owner.providerInstanceId}\0${owner.nativeId}`,
+        ),
+    );
+    const deletedImportedIds = new Set(
+      sessionOwners.filter((owner) => owner.deleted).map((owner) => owner.threadId as string),
+    );
+    const deletedSessionKeys = new Set(
+      sessionOwners
+        .filter((owner) => owner.imported && owner.deleted)
+        .map(
+          (owner) =>
+            `${owner.driver}\0${collected.instanceAliases.get(owner.providerInstanceId) ?? owner.providerInstanceId}\0${owner.nativeId}`,
+        ),
+    );
 
     // Filesystem identity merges symlinks and case aliases without collapsing
     // distinct case-sensitive directories.
@@ -1411,13 +1462,19 @@ export const make = Effect.gen(function* () {
           transcript.sessionId === null ||
           transcript.mtimeMs === null ||
           transcript.mtimeMs < cutoffMs ||
-          transcript.mtimeMs > nowMs
+          transcript.mtimeMs > nowMs ||
+          nativeSessionKeys.has(
+            `${candidate.source}\0${candidate.providerInstanceId}\0${transcript.sessionId}`,
+          )
         )
           continue;
         sessionFacts.push({
           key,
           provider: candidate.source,
-          providerInstanceId: candidate.providerInstanceId,
+          providerInstanceId:
+            importedOwners.get(
+              `${candidate.source}\0${candidate.providerInstanceId}\0${transcript.sessionId}`,
+            )?.providerInstanceId ?? candidate.providerInstanceId,
           sessionId: transcript.sessionId,
           observedActivityAtMs: transcript.observedActivityAtMs,
         });
@@ -1548,6 +1605,12 @@ export const make = Effect.gen(function* () {
         provider: fact.provider,
         providerInstanceId: fact.providerInstanceId,
         providerSessionId: fact.sessionId,
+        ...(deletedImportedIds.has(`import:${fact.providerInstanceId}:${fact.sessionId}`) ||
+        deletedSessionKeys.has(
+          `${fact.provider}\0${collected.instanceAliases.get(fact.providerInstanceId) ?? fact.providerInstanceId}\0${fact.sessionId}`,
+        )
+          ? { importedThreadDeleted: true }
+          : {}),
         projectPath: location?.projectPath ?? null,
         ...(location?.projectId === undefined ? {} : { projectId: location.projectId }),
         repository: location?.repository ?? null,
@@ -1583,8 +1646,29 @@ export const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
 
-    const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
-    cachedCandidates = candidates;
+    const matchesSessionFilter = (source: AgentSessionImportSource) =>
+      sessionFilter === undefined ||
+      (source.providerInstanceId === sessionFilter.providerInstanceId &&
+        source.providerSessionId === sessionFilter.providerSessionId);
+    const collected = yield* collectCandidates();
+    const candidates = collected.candidates;
+    const sessionOwners = yield* readSessionOwners();
+    const nativeOwners = sessionOwners.filter((owner) => !owner.imported);
+    const importedOwners = activeImportedOwnersBySession(sessionOwners, collected.instanceAliases);
+    const nativeSessionKeys = new Set(
+      nativeOwners.map(
+        (owner) =>
+          `${owner.driver}\0${collected.instanceAliases.get(owner.providerInstanceId) ?? owner.providerInstanceId}\0${owner.nativeId}`,
+      ),
+    );
+    const deletedSessionKeys = new Set(
+      sessionOwners
+        .filter((owner) => owner.imported && owner.deleted)
+        .map(
+          (owner) =>
+            `${owner.driver}\0${collected.instanceAliases.get(owner.providerInstanceId) ?? owner.providerInstanceId}\0${owner.nativeId}`,
+        ),
+    );
 
     const eligibleTranscripts: Array<{
       readonly candidate: RawCandidate;
@@ -1593,7 +1677,9 @@ export const make = Effect.gen(function* () {
     for (const candidate of candidates) {
       if (
         sessionFilter !== undefined &&
-        candidate.providerInstanceId !== sessionFilter.providerInstanceId
+        candidate.providerInstanceId !==
+          (collected.instanceAliases.get(sessionFilter.providerInstanceId) ??
+            sessionFilter.providerInstanceId)
       ) {
         continue;
       }
@@ -1642,8 +1728,24 @@ export const make = Effect.gen(function* () {
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
+          const ownershipProviderInstanceIds = [...collected.instanceAliases]
+            .filter(([, canonical]) => canonical === candidate.providerInstanceId)
+            .map(([instanceId]) => instanceId);
+          const isUnavailable = (sessionId: string) => {
+            const key = `${candidate.source}\0${candidate.providerInstanceId}\0${sessionId}`;
+            return nativeSessionKeys.has(key) || deletedSessionKeys.has(key);
+          };
+          if (transcript.sessionId !== null && isUnavailable(transcript.sessionId)) {
+            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+          }
+          const importedOwner =
+            transcript.sessionId === null
+              ? undefined
+              : importedOwners.get(
+                  `${candidate.source}\0${candidate.providerInstanceId}\0${transcript.sessionId}`,
+                );
           const completed = completedByFile.get(
-            `${candidate.providerInstanceId}\0${transcript.filePath}`,
+            `${importedOwner?.providerInstanceId ?? candidate.providerInstanceId}\0${transcript.filePath}`,
           );
           if (
             completed === undefined &&
@@ -1661,12 +1763,15 @@ export const make = Effect.gen(function* () {
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
           if (completedSource !== undefined) {
+            if (!matchesSessionFilter(completedSource))
+              return Option.none<AgentSessionRecentThread>();
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
             return Option.some<AgentSessionRecentThread>({
               _tag: "AlreadyImported",
               source: completedSource,
+              ownershipProviderInstanceIds,
             });
           }
           if (
@@ -1720,29 +1825,29 @@ export const make = Effect.gen(function* () {
           if (parsedThread === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          if (
-            sessionFilter !== undefined &&
-            (parsedThread.providerInstanceId !== sessionFilter.providerInstanceId ||
-              parsedThread.providerSessionId !== sessionFilter.providerSessionId)
-          ) {
-            return Option.none<AgentSessionRecentThread>();
+          if (isUnavailable(parsedThread.providerSessionId)) {
+            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-
           const source: AgentSessionImportSource = {
             ...identity,
             provider: parsedThread.source,
-            providerInstanceId: parsedThread.providerInstanceId,
+            providerInstanceId:
+              importedOwners.get(
+                `${candidate.source}\0${candidate.providerInstanceId}\0${parsedThread.providerSessionId}`,
+              )?.providerInstanceId ?? parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,
           };
-          const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
+          if (!matchesSessionFilter(source)) return Option.none<AgentSessionRecentThread>();
+          const sessionKey = `${source.providerInstanceId}\0${source.providerSessionId}`;
           if (importedSessions.has(sessionKey)) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
-            thread: parsedThread,
+            thread: { ...parsedThread, providerInstanceId: source.providerInstanceId },
             source,
+            ownershipProviderInstanceIds,
           });
         }).pipe(importReadLock.withPermits(1)),
       ),

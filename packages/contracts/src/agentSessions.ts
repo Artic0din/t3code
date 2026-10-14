@@ -80,6 +80,7 @@ export const AgentSessionObservation = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   repository: Schema.NullOr(Schema.String),
   lastObservedActivityAt: Schema.NullOr(IsoDateTime),
+  importedThreadDeleted: Schema.optional(Schema.Boolean),
 });
 export type AgentSessionObservation = typeof AgentSessionObservation.Type;
 

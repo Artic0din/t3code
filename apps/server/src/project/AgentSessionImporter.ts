@@ -35,6 +35,7 @@ import * as Stream from "effect/Stream";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -174,6 +175,7 @@ const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
   const importRecentAgentThreads = Effect.fn("importRecentAgentThreadsV2")(function* (
     input: AgentSessionImportInput,
   ) {
@@ -238,14 +240,48 @@ const make = Effect.gen(function* () {
         const threadId = ThreadId.make(
           `import:${source.providerInstanceId}:${source.providerSessionId}`,
         );
-        if (outcome._tag === "AlreadyImported") {
-          importedThreadIds.add(threadId);
-          importedCount += 1;
-          return;
-        }
         if (outcome._tag === "Duplicate") {
           if (importedThreadIds.has(threadId)) {
             yield* runtimes.recordImportedTranscript({ threadId, source }).pipe(Effect.ignore);
+          }
+          return;
+        }
+        // Discovery may predate a native turn or deletion in another client.
+        const owners = yield* projections
+          .getAgentSessionOwners({
+            providerInstanceIds: outcome.ownershipProviderInstanceIds ?? [
+              source.providerInstanceId,
+            ],
+            nativeId: source.providerSessionId,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+            ),
+          );
+        if (
+          owners.some(
+            (owner) =>
+              (!owner.imported || owner.deleted) &&
+              owner.driver === source.provider &&
+              owner.nativeId === source.providerSessionId,
+          )
+        ) {
+          skippedCount += 1;
+          return;
+        }
+        if (outcome._tag === "AlreadyImported") {
+          const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, []));
+          if (
+            Option.isSome(existing) &&
+            existing.value.thread.deletedAt === null &&
+            existing.value.thread.projectId === input.projectId &&
+            existing.value.thread.historyOrigin === "v1_import"
+          ) {
+            importedThreadIds.add(threadId);
+            importedCount += 1;
+          } else {
+            skippedCount += 1;
           }
           return;
         }
@@ -263,6 +299,7 @@ const make = Effect.gen(function* () {
           }
           const existing = yield* Effect.option(orchestrator.getThreadRecords(threadId, []));
           if (Option.isSome(existing)) {
+            if (existing.value.thread.deletedAt !== null) return false;
             if (existing.value.thread.projectId !== input.projectId) {
               return yield* new AgentSessionThreadProjectConflictError({
                 threadId,
@@ -281,6 +318,7 @@ const make = Effect.gen(function* () {
           const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[driver] ?? DEFAULT_MODEL;
           const providerThreadId = idAllocator.derive.providerThread({
             driver,
+            providerInstanceId: thread.providerInstanceId,
             nativeThreadId: thread.providerSessionId,
           });
           const createdAt = dateTime(thread.createdAt);
