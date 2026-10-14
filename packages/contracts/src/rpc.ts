@@ -499,6 +499,7 @@ export const WS_METHODS = {
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
 
   taskContextGroupsList: "taskContextGroups.list",
+  taskContextGroupsSubscribe: "taskContextGroups.subscribe",
   taskContextGroupsGet: "taskContextGroups.get",
   taskContextGroupsForThread: "taskContextGroups.forThread",
   taskContextGroupsMutate: "taskContextGroups.mutate",
@@ -1740,6 +1741,13 @@ const WsTaskContextGroupsListRpc = Rpc.make(WS_METHODS.taskContextGroupsList, {
   error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
 });
 
+const WsTaskContextGroupsSubscribeRpc = Rpc.make(WS_METHODS.taskContextGroupsSubscribe, {
+  payload: TaskContextGroupListInput,
+  success: NonNegativeInt,
+  error: Schema.Union([TaskContextGroupError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsTaskContextGroupsGetRpc = Rpc.make(WS_METHODS.taskContextGroupsGet, {
   payload: TaskContextGroupGetInput,
   success: TaskContextGroupGetResult,
@@ -1848,6 +1856,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsTaskContextGroupsListRpc,
+  WsTaskContextGroupsSubscribeRpc,
   WsTaskContextGroupsGetRpc,
   WsTaskContextGroupsForThreadRpc,
   WsTaskContextGroupsMutateRpc,

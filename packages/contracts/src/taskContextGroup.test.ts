@@ -1,19 +1,21 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import { ProjectId, TaskContextGroupId, TaskContextResourceId, ThreadId } from "./baseSchemas.ts";
-import { ComposerContextId } from "./composerContext.ts";
+import { ComposerContextId, OrchestrationMessageContext } from "./composerContext.ts";
 import {
   buildTaskContextTurnSnapshot,
   isHttpUrl,
   linkedThreadDoesNotWidenWorkspace,
   mergeTaskContextIntoMessage,
+  restoreFrozenTaskContextIntoMessage,
   nextMemberThreadIds,
   nextResources,
   nextTaskContextGroupId,
   refuseClientPathResource,
   relatedTaskContextThreads,
   turnReceivedTaskContext,
-  type TaskContextGroup,
+  TaskContextGroup,
 } from "./taskContextGroup.ts";
 
 const groupId = TaskContextGroupId.make("tcg:feature-auth");
@@ -21,6 +23,8 @@ const threadA = ThreadId.make("thread:frontend");
 const threadB = ThreadId.make("thread:backend");
 const projectA = ProjectId.make("project:frontend");
 const projectB = ProjectId.make("project:backend");
+const isTaskContextGroup = Schema.is(TaskContextGroup);
+const encodeMessageContext = Schema.encodeSync(OrchestrationMessageContext);
 
 const group = (patch: Partial<TaskContextGroup> = {}): TaskContextGroup => ({
   id: groupId,
@@ -136,6 +140,135 @@ describe("per-repository isolation", () => {
 });
 
 describe("turn snapshot inspectability", () => {
+  it("restores the trusted queued brief and resolves collisions with replacement context", () => {
+    const frozen = mergeTaskContextIntoMessage({
+      text: "Work",
+      context: undefined,
+      group: group(),
+      capturedAt: "2026-10-13T00:00:00.000Z",
+    });
+    const record = frozen.context!.records[0]!;
+    const forged = buildTaskContextTurnSnapshot(
+      group({ brief: "Forged" }),
+      "2026-10-14T00:00:00.000Z",
+    ).record;
+    const restored = restoreFrozenTaskContextIntoMessage({
+      text: "Edit [forged](t3-context://v1/task-context/forged)",
+      context: {
+        version: 1,
+        records: [
+          {
+            version: 1,
+            kind: "note",
+            contextId: record.contextId,
+            label: "Note",
+            payload: { body: "Keep this note" },
+          },
+          { ...forged, contextId: ComposerContextId.make("forged") },
+        ],
+      },
+      frozenContext: frozen.context,
+    });
+    expect(turnReceivedTaskContext(restored.context)).toEqual(
+      turnReceivedTaskContext(frozen.context),
+    );
+    expect(restored.context?.records).toHaveLength(2);
+    const snapshot = restored.context!.records[1]!;
+    expect(snapshot.contextId).not.toBe(record.contextId);
+    expect(restored.text).toContain(`/task-context/${snapshot.contextId})`);
+    expect(restored.text).not.toContain("/forged)");
+    expect(restored.context!.records[0]).toEqual({
+      version: 1,
+      kind: "note",
+      contextId: record.contextId,
+      label: "Note",
+      payload: { body: "Keep this note" },
+    });
+  });
+
+  it("keeps queued slash commands exact and removes snapshots when no frozen snapshot exists", () => {
+    const frozen = mergeTaskContextIntoMessage({
+      text: "Work",
+      context: undefined,
+      group: group(),
+      capturedAt: "2026-10-13T00:00:00.000Z",
+    });
+    const slash = restoreFrozenTaskContextIntoMessage({
+      text: " /compact",
+      context: undefined,
+      frozenContext: frozen.context,
+    });
+    expect(slash.text).toBe(" /compact");
+    expect(turnReceivedTaskContext(slash.context)).toEqual(turnReceivedTaskContext(frozen.context));
+    const absent = restoreFrozenTaskContextIntoMessage({
+      text: frozen.text,
+      context: frozen.context,
+      frozenContext: undefined,
+    });
+    expect(absent.text.trim()).toBe("Work");
+    expect(absent.context).toBeUndefined();
+  });
+  it("removes server-owned context from a send after detaching", () => {
+    const previous = mergeTaskContextIntoMessage({
+      text: "Work",
+      context: undefined,
+      group: group(),
+      capturedAt: "2026-10-13T00:00:00.000Z",
+    });
+    const detached = mergeTaskContextIntoMessage({
+      text: previous.text,
+      context: previous.context,
+      group: null,
+      capturedAt: "2026-10-13T01:00:00.000Z",
+    });
+    expect(detached.text.trim()).toBe("Work");
+    expect(turnReceivedTaskContext(detached.context)).toBeNull();
+  });
+
+  it("rejects content that cannot fit in a durable context record", () => {
+    const oversized = group({
+      brief: "b".repeat(32_000),
+      resources: [0, 1].map((i) => ({
+        kind: "note" as const,
+        resourceId: TaskContextResourceId.make(`note_${i}`),
+        title: "Note",
+        body: "n".repeat(16_000),
+      })),
+    });
+    expect(isTaskContextGroup(oversized)).toBe(false);
+  });
+
+  it("keeps slash commands unchanged", () => {
+    expect(
+      mergeTaskContextIntoMessage({
+        text: " /compact",
+        context: undefined,
+        group: group(),
+        capturedAt: "2026-10-13T00:00:00.000Z",
+      }),
+    ).toEqual({
+      text: " /compact",
+      context: undefined,
+    });
+  });
+
+  it("replaces incoming task snapshots with one record and matching references", () => {
+    const previous = ["old_a", "old_b"].map((id) => ({
+      ...buildTaskContextTurnSnapshot(group(), "2026-10-13T00:00:00.000Z").record,
+      contextId: ComposerContextId.make(id),
+    }));
+    const merged = mergeTaskContextIntoMessage({
+      text: "[Old](t3-context://v1/task-context/old_a) and [Other](t3-context://v1/task-context/old_b)",
+      context: { version: 1, records: previous },
+      group: group({ brief: "Current" }),
+      capturedAt: "2026-10-13T00:00:00.000Z",
+    });
+    const encoded = encodeMessageContext(merged.context!);
+    expect(encoded.records).toHaveLength(1);
+    expect(merged.text).not.toContain("/old_");
+    expect(turnReceivedTaskContext(merged.context)?.brief).toBe("Current");
+  });
+
   it("snapshots the live brief onto a turn without rewriting older turns", () => {
     const first = mergeTaskContextIntoMessage({
       text: "Start the API change.",

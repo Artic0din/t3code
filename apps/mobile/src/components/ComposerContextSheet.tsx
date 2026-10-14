@@ -6,6 +6,8 @@ import type {
   EnvironmentId,
   ScopedThreadRef,
 } from "@t3tools/contracts";
+import { turnReceivedTaskContext } from "@t3tools/contracts";
+import { TaskContextSnapshotDetails } from "./TaskContextSnapshotDetails";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { videoMimeType } from "@t3tools/shared/video";
 import { useState } from "react";
@@ -103,6 +105,7 @@ export function ComposerContextSheet(props: {
   const [bodyHeight, setBodyHeight] = useState(0);
   const measuredHeight = headerHeight + bodyHeight;
   const record = props.record;
+  const taskSnapshot = turnReceivedTaskContext({ records: record ? [record] : [] });
   const localAttachment =
     record && "attachmentId" in record
       ? props.attachments?.find((entry) => entry.id === record.attachmentId)
@@ -255,6 +258,8 @@ export function ComposerContextSheet(props: {
                 Context unavailable. The reference was copied without its payload. Copy it again
                 from the original message or remove it.
               </Text>
+            ) : taskSnapshot !== null ? (
+              <TaskContextSnapshotDetails snapshot={taskSnapshot} />
             ) : "payload" in record ? (
               <Text className="text-foreground">
                 This context type is not supported by this version of the app. Its payload will be

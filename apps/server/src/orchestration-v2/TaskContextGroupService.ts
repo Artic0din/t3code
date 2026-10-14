@@ -6,21 +6,20 @@ import {
   TaskContextGroupError,
   TaskContextGroupId,
   TaskContextResourceId,
+  TASK_CONTEXT_TITLE_MAX_CHARS,
   ThreadId,
   isHttpUrl,
   linkedThreadDoesNotWidenWorkspace,
-  mergeTaskContextIntoMessage,
   nextMemberThreadIds,
   nextResources,
   refuseClientPathResource,
-  relatedTaskContextThreads,
+  type ApplicationStoredEvent,
   type OrchestrationMessageContext,
   type TaskContextGroupForThreadResult,
   type TaskContextGroupGetResult,
   type TaskContextGroupListResult,
   type TaskContextGroupMutateInput,
   type TaskContextGroupMutateResult,
-  type TaskContextGroupResource,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -28,26 +27,25 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 
 import * as ProjectService from "../project/ProjectService.ts";
-import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ApplicationEventStore from "../persistence/OrchestrationEventStore.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as TaskContextGroupStore from "./TaskContextGroupStore.ts";
 
 const encodeGroup = Schema.encodeEffect(Schema.fromJsonString(TaskContextGroup));
-const decodeGroup = Schema.decodeUnknownOption(Schema.fromJsonString(TaskContextGroup));
-
-type GroupRow = {
-  readonly group_id: string;
-  readonly document_json: string;
-  readonly updated_at: string;
-};
-
+const validateGroupDocument = Schema.encodeEffect(TaskContextGroup);
 export class TaskContextGroupService extends Context.Service<
   TaskContextGroupService,
   {
     readonly list: () => Effect.Effect<TaskContextGroupListResult, TaskContextGroupError>;
+    readonly subscribeChanges: () => Stream.Stream<number, TaskContextGroupError>;
     readonly get: (
       groupId: TaskContextGroupId,
     ) => Effect.Effect<TaskContextGroupGetResult, TaskContextGroupError>;
@@ -56,6 +54,7 @@ export class TaskContextGroupService extends Context.Service<
     ) => Effect.Effect<TaskContextGroupForThreadResult, TaskContextGroupError>;
     readonly mutate: (
       input: TaskContextGroupMutateInput,
+      authorize?: Effect.Effect<void, TaskContextGroupError>,
     ) => Effect.Effect<TaskContextGroupMutateResult, TaskContextGroupError>;
     readonly enrichTurn: (input: {
       readonly threadId: ThreadId;
@@ -85,17 +84,60 @@ function nowIso(): Effect.Effect<IsoDateTime> {
   return DateTime.now.pipe(Effect.map((value) => DateTime.formatIso(DateTime.toUtc(value))));
 }
 
+function affectsGroupReferences(event: ApplicationStoredEvent): boolean {
+  const type = "event" in event ? event.event.type : event.type;
+  return (
+    type === "thread.created" ||
+    type === "thread.metadata-updated" ||
+    type === "thread.deleted" ||
+    type === "project.created" ||
+    type === "project.meta-updated" ||
+    type === "project.deleted"
+  );
+}
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const sql = yield* SqlClient.SqlClient;
-  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const store = yield* TaskContextGroupStore.TaskContextGroupStore;
   const projects = yield* ProjectService.ProjectService;
+  const applicationEvents = yield* ApplicationEventStore.OrchestrationEventStore;
   const lock = yield* Semaphore.make(1);
+  const revision = yield* Ref.make(0);
+  const changes = yield* PubSub.sliding<void>(1);
+  const notifyChanged = PubSub.publish(changes, undefined).pipe(Effect.asVoid);
+  const subscribeChanges = () =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(changes);
+        const afterSequence = yield* applicationEvents.latestApplicationSequence.pipe(
+          Effect.mapError((error) => failure("orchestration_error", errorMessage(error))),
+        );
+        const referenceChanges = applicationEvents
+          .streamProjectedApplicationEvents({
+            afterSequence,
+            project: (event) => ({
+              sequence: event.sequence,
+              affectsReferences: affectsGroupReferences(event),
+            }),
+          })
+          .pipe(
+            Stream.filter((event) => event.affectsReferences),
+            Stream.map(() => undefined),
+            Stream.mapError((error) => failure("orchestration_error", errorMessage(error))),
+          );
+        return Stream.concat(
+          Stream.succeed(undefined),
+          Stream.merge(Stream.fromSubscription(subscription), referenceChanges),
+        ).pipe(Stream.mapEffect(() => Ref.updateAndGet(revision, (value) => value + 1)));
+      }),
+    );
 
   const requireThread = Effect.fn("TaskContextGroupService.requireThread")(function* (
     threadId: ThreadId,
   ) {
-    const shell = yield* threads
+    const shell = yield* orchestrator
       .getThreadShell(threadId)
       .pipe(
         Effect.mapError((error) =>
@@ -111,46 +153,10 @@ const make = Effect.gen(function* () {
     return shell;
   });
 
-  const decodeRow = (row: GroupRow): Effect.Effect<TaskContextGroup, TaskContextGroupError> => {
-    const decoded = decodeGroup(row.document_json);
-    if (Option.isNone(decoded)) {
-      return Effect.fail(failure("orchestration_error", "Task context group document is corrupt."));
-    }
-    return Effect.succeed(decoded.value);
-  };
-
-  const listRows = () =>
-    sql<GroupRow>`
-      SELECT group_id, document_json, updated_at
-      FROM task_context_groups
-      ORDER BY updated_at DESC, group_id ASC
-    `.pipe(
-      Effect.mapError((error) =>
-        failure(
-          "orchestration_error",
-          `Unable to list task context groups: ${errorMessage(error)}`,
-        ),
-      ),
-    );
-
-  const getRow = (groupId: TaskContextGroupId) =>
-    sql<GroupRow>`
-      SELECT group_id, document_json, updated_at
-      FROM task_context_groups
-      WHERE group_id = ${groupId}
-    `.pipe(
-      Effect.mapError((error) =>
-        failure(
-          "orchestration_error",
-          `Unable to load task context group ${groupId}: ${errorMessage(error)}`,
-        ),
-      ),
-      Effect.map((rows) => rows[0] ?? null),
-    );
-
   const writeGroup = Effect.fn("TaskContextGroupService.writeGroup")(function* (
     group: TaskContextGroup,
   ) {
+    yield* validateGroup(group);
     const documentJson = yield* encodeGroup(group).pipe(
       Effect.mapError((error) =>
         failure(
@@ -173,111 +179,53 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+    yield* notifyChanged;
   });
 
-  const findGroup = (groupId: TaskContextGroupId) =>
-    Effect.gen(function* () {
-      const row = yield* getRow(groupId);
-      if (row === null) return null;
-      return yield* decodeRow(row);
-    });
+  const findGroup = store.get;
 
   const findGroupForThread = (threadId: ThreadId) =>
     Effect.gen(function* () {
-      const rows = yield* listRows();
-      for (const row of rows) {
-        const group = yield* decodeRow(row);
-        if (group.memberThreadIds.includes(threadId)) return group;
+      const shell = yield* requireThread(threadId);
+      if (shell.taskContextGroupId == null) return null;
+      const group = yield* findGroup(shell.taskContextGroupId);
+      if (group === null) {
+        return yield* failure("not_found", "The thread's shared context group was not found.");
       }
-      return null;
+      return group;
     });
 
-  const refreshResource = Effect.fn("TaskContextGroupService.refreshResource")(function* (
-    resource: TaskContextGroupResource,
-  ) {
-    switch (resource.kind) {
-      case "note":
-      case "url":
-        return resource;
-      case "thread": {
-        const shell = yield* threads
-          .getThreadShell(resource.threadId)
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
-                "orchestration_error",
-                `Unable to resolve thread ${resource.threadId}: ${errorMessage(error)}`,
-              ),
-            ),
-          );
-        if (shell === null || shell.deletedAt !== null) {
-          return {
-            ...resource,
-            title: resource.title ?? null,
-            availability: "missing" as const,
-          } satisfies TaskContextGroupResource;
-        }
-        return {
-          ...resource,
-          title: shell.title,
-          availability: "available" as const,
-        } satisfies TaskContextGroupResource;
-      }
-      case "project": {
-        const project = yield* projects
-          .getById(resource.projectId)
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
-                "orchestration_error",
-                `Unable to resolve project ${resource.projectId}: ${errorMessage(error)}`,
-              ),
-            ),
-          );
-        if (Option.isNone(project) || project.value.deletedAt !== null) {
-          return {
-            ...resource,
-            name: resource.name ?? null,
-            availability: "missing" as const,
-          } satisfies TaskContextGroupResource;
-        }
-        return {
-          ...resource,
-          name: project.value.title,
-          availability: "available" as const,
-        } satisfies TaskContextGroupResource;
-      }
-      default: {
-        const unreachable: never = resource;
-        return unreachable;
-      }
-    }
-  });
+  const validateGroup = (group: TaskContextGroup) =>
+    validateGroupDocument(group).pipe(
+      Effect.mapError(() =>
+        failure(
+          "invalid_resource",
+          "Shared context exceeds its limits. Shorten the brief or remove resources or members to fit the 64,000-character turn limit.",
+        ),
+      ),
+      Effect.asVoid,
+    );
 
-  const refreshGroup = Effect.fn("TaskContextGroupService.refreshGroup")(function* (
-    group: TaskContextGroup,
-  ) {
-    const resources = yield* Effect.forEach(group.resources, refreshResource, { concurrency: 1 });
-    return { ...group, resources };
-  });
+  const refreshGroup = store.resolve;
 
   const syncShellMembership = Effect.fn("TaskContextGroupService.syncShellMembership")(
     function* (input: {
       readonly threadId: ThreadId;
-      readonly groupId: TaskContextGroupId;
+      readonly group: TaskContextGroup;
       readonly op: "attach" | "detach";
     }) {
+      yield* validateGroup(input.group);
       const commandId = CommandId.make(
         [
           "command",
           "task-context-group",
           input.op,
           encodeURIComponent(input.threadId),
-          encodeURIComponent(input.groupId),
+          encodeURIComponent(input.group.id),
           yield* crypto.randomUUIDv4.pipe(Effect.orDie),
         ].join(":"),
       );
-      yield* threads
+      yield* orchestrator
         .dispatch({
           type:
             input.op === "attach"
@@ -285,7 +233,8 @@ const make = Effect.gen(function* () {
               : "thread.task-context-group.detach",
           commandId,
           threadId: input.threadId,
-          groupId: input.groupId,
+          groupId: input.group.id,
+          group: input.group,
         })
         .pipe(
           Effect.mapError((error) =>
@@ -295,19 +244,15 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
+      yield* notifyChanged;
     },
   );
 
   const list = (): Effect.Effect<TaskContextGroupListResult, TaskContextGroupError> =>
-    Effect.gen(function* () {
-      const rows = yield* listRows();
-      const groups = yield* Effect.forEach(
-        rows,
-        (row) => decodeRow(row).pipe(Effect.flatMap(refreshGroup)),
-        { concurrency: 1 },
-      );
-      return { groups };
-    });
+    store.list().pipe(
+      Effect.flatMap((groups) => Effect.forEach(groups, store.resolve, { concurrency: 1 })),
+      Effect.map((groups) => ({ groups })),
+    );
 
   const get = (
     groupId: TaskContextGroupId,
@@ -322,30 +267,30 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
   ): Effect.Effect<TaskContextGroupForThreadResult, TaskContextGroupError> =>
     Effect.gen(function* () {
-      const shell = yield* requireThread(threadId);
-      const byShell =
-        shell.taskContextGroupId === undefined || shell.taskContextGroupId === null
-          ? null
-          : yield* findGroup(shell.taskContextGroupId);
-      const group = byShell ?? (yield* findGroupForThread(threadId));
+      const group = yield* findGroupForThread(threadId);
       if (group === null) return { group: null, relatedThreads: [] };
       const refreshed = yield* refreshGroup(group);
-      const snapshot = yield* threads
-        .getShellSnapshot()
-        .pipe(
-          Effect.mapError((error) =>
-            failure("orchestration_error", `Unable to read threads: ${errorMessage(error)}`),
+      const related = yield* Effect.forEach(
+        refreshed.memberThreadIds.filter((memberId) => memberId !== threadId),
+        (memberId) =>
+          orchestrator.getThreadShell(memberId).pipe(
+            Effect.mapError(() =>
+              failure("orchestration_error", "Related threads could not be loaded."),
+            ),
+            Effect.map((thread) => ({
+              threadId: memberId,
+              title:
+                thread === null || thread.deletedAt !== null
+                  ? "Missing thread"
+                  : thread.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Thread",
+              availability:
+                thread === null || thread.deletedAt !== null
+                  ? ("missing" as const)
+                  : ("available" as const),
+            })),
           ),
-        );
-      const related = relatedTaskContextThreads(
-        [...snapshot.threads, ...snapshot.archivedThreads].map((thread) => ({
-          id: thread.id,
-          title: thread.title,
-          taskContextGroupId: thread.taskContextGroupId ?? null,
-        })),
-        refreshed.id,
-        threadId,
-      ).map((thread) => ({ threadId: thread.id, title: thread.title }));
+        { concurrency: 1 },
+      );
       return { group: refreshed, relatedThreads: related };
     });
 
@@ -395,7 +340,7 @@ const make = Effect.gen(function* () {
             kind: "thread" as const,
             resourceId,
             threadId: shell.id,
-            title: shell.title,
+            title: shell.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Thread",
             availability: "available" as const,
           };
         }
@@ -420,7 +365,7 @@ const make = Effect.gen(function* () {
             kind: "project" as const,
             resourceId,
             projectId: project.value.id,
-            name: project.value.title,
+            name: project.value.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Project",
             availability: "available" as const,
           };
         }
@@ -434,9 +379,11 @@ const make = Effect.gen(function* () {
 
   const mutate = (
     input: TaskContextGroupMutateInput,
+    authorize: Effect.Effect<void, TaskContextGroupError> = Effect.void,
   ): Effect.Effect<TaskContextGroupMutateResult, TaskContextGroupError> =>
     lock.withPermits(1)(
       Effect.gen(function* () {
+        yield* authorize;
         const timestamp = yield* nowIso();
 
         if (input.action === "create") {
@@ -446,7 +393,7 @@ const make = Effect.gen(function* () {
             if (shell.taskContextGroupId !== existing.id) {
               yield* syncShellMembership({
                 threadId: shell.id,
-                groupId: existing.id,
+                group: existing,
                 op: "attach",
               });
             }
@@ -454,17 +401,18 @@ const make = Effect.gen(function* () {
           }
           const group: TaskContextGroup = {
             id: yield* mintGroupId(),
-            title: input.title ?? (shell.title.trim().slice(0, 200) || "Shared task context"),
+            title:
+              input.title ??
+              (shell.title.trim().slice(0, TASK_CONTEXT_TITLE_MAX_CHARS) || "Shared task context"),
             brief: input.brief ?? "",
             resources: [],
             memberThreadIds: [shell.id],
             createdAt: timestamp,
             updatedAt: timestamp,
           };
-          yield* writeGroup(group);
           yield* syncShellMembership({
             threadId: shell.id,
-            groupId: group.id,
+            group,
             op: "attach",
           });
           return { group };
@@ -494,16 +442,15 @@ const make = Effect.gen(function* () {
             if (members === undefined) {
               yield* syncShellMembership({
                 threadId: input.threadId,
-                groupId: current.id,
+                group: current,
                 op: "attach",
               });
               return { group: yield* refreshGroup(current) };
             }
             next = { ...current, memberThreadIds: [...members], updatedAt: timestamp };
-            yield* writeGroup(next);
             yield* syncShellMembership({
               threadId: input.threadId,
-              groupId: next.id,
+              group: next,
               op: "attach",
             });
             return { group: yield* refreshGroup(next) };
@@ -511,18 +458,23 @@ const make = Effect.gen(function* () {
           case "detach-thread": {
             const members = nextMemberThreadIds(current.memberThreadIds, input.threadId, "detach");
             if (members === undefined) {
-              yield* syncShellMembership({
-                threadId: input.threadId,
-                groupId: current.id,
-                op: "detach",
-              });
               return { group: yield* refreshGroup(current) };
             }
             next = { ...current, memberThreadIds: [...members], updatedAt: timestamp };
-            yield* writeGroup(next);
+            const shell = yield* orchestrator
+              .getThreadShell(input.threadId)
+              .pipe(
+                Effect.mapError(() =>
+                  failure("orchestration_error", "The member thread could not be loaded."),
+                ),
+              );
+            if (shell === null) {
+              yield* writeGroup(next);
+              return { group: yield* refreshGroup(next) };
+            }
             yield* syncShellMembership({
               threadId: input.threadId,
-              groupId: next.id,
+              group: next,
               op: "detach",
             });
             return { group: yield* refreshGroup(next) };
@@ -558,41 +510,27 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const enrichTurn = (input: {
+  const enrichTurn = Effect.fn("TaskContextGroupService.enrichTurn")(function* (input: {
     readonly threadId: ThreadId;
     readonly text: string;
     readonly context: OrchestrationMessageContext | undefined;
-  }) =>
-    Effect.gen(function* () {
-      const shell = yield* requireThread(input.threadId);
-      const byShell =
-        shell.taskContextGroupId === undefined || shell.taskContextGroupId === null
-          ? null
-          : yield* findGroup(shell.taskContextGroupId);
-      const group = byShell ?? (yield* findGroupForThread(input.threadId));
-      const refreshed = group === null ? null : yield* refreshGroup(group);
-      const capturedAt = yield* nowIso();
-      const merged = mergeTaskContextIntoMessage({
-        text: input.text,
-        context: input.context,
-        group: refreshed,
-        capturedAt,
-      });
-      const isolation = linkedThreadDoesNotWidenWorkspace({
-        ownWorktreePath: shell.worktreePath,
-        ownProjectId: shell.projectId,
-        siblingWorktreePath: null,
-        siblingProjectId: shell.projectId,
-      });
-      return {
-        text: merged.text,
-        context: merged.context,
-        checkpointCwd: isolation.checkpointCwd,
-        projectId: isolation.projectId,
-      };
+  }) {
+    const shell = yield* requireThread(input.threadId);
+    const merged = yield* store.capture({
+      thread: shell,
+      text: input.text,
+      context: input.context,
     });
+    const isolation = linkedThreadDoesNotWidenWorkspace({
+      ownWorktreePath: shell.worktreePath,
+      ownProjectId: shell.projectId,
+      siblingWorktreePath: null,
+      siblingProjectId: shell.projectId,
+    });
+    return { ...merged, checkpointCwd: isolation.checkpointCwd, projectId: isolation.projectId };
+  });
 
-  return TaskContextGroupService.of({ list, get, forThread, mutate, enrichTurn });
+  return TaskContextGroupService.of({ list, get, forThread, mutate, enrichTurn, subscribeChanges });
 });
 
 export const layer: Layer.Layer<
@@ -600,6 +538,8 @@ export const layer: Layer.Layer<
   never,
   | Crypto.Crypto
   | SqlClient.SqlClient
-  | ThreadManagementService.ThreadManagementService
+  | Orchestrator.OrchestratorV2
+  | TaskContextGroupStore.TaskContextGroupStore
   | ProjectService.ProjectService
+  | ApplicationEventStore.OrchestrationEventStore
 > = Layer.effect(TaskContextGroupService, make);

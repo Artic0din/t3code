@@ -2125,6 +2125,14 @@ const layerWsRpc = (
           observeRpcEffect(WS_METHODS.taskContextGroupsList, taskContextGroups.list(), {
             "rpc.aggregate": "taskContextGroups",
           }),
+        [WS_METHODS.taskContextGroupsSubscribe]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.taskContextGroupsSubscribe,
+            taskContextGroups.subscribeChanges(),
+            {
+              "rpc.aggregate": "taskContextGroups",
+            },
+          ),
         [WS_METHODS.taskContextGroupsGet]: (input) =>
           observeRpcEffect(WS_METHODS.taskContextGroupsGet, taskContextGroups.get(input.groupId), {
             "rpc.aggregate": "taskContextGroups",

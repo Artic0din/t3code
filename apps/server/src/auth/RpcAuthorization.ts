@@ -101,6 +101,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
   [WS_METHODS.taskContextGroupsList]: AuthOrchestrationReadScope,
+  [WS_METHODS.taskContextGroupsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.taskContextGroupsGet]: AuthOrchestrationReadScope,
   [WS_METHODS.taskContextGroupsForThread]: AuthOrchestrationReadScope,
   [WS_METHODS.taskContextGroupsMutate]: AuthOrchestrationOperateScope,

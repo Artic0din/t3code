@@ -1,4 +1,5 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
+import { TaskContextGroup } from "./taskContextGroup.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
@@ -2723,18 +2724,6 @@ export const OrchestrationV2Command = Schema.Union([
     orderKey: TrimmedNonEmptyString,
   }),
   Schema.Struct({
-    type: Schema.Literal("thread.task-context-group.attach"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    groupId: TaskContextGroupId,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.task-context-group.detach"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    groupId: TaskContextGroupId,
-  }),
-  Schema.Struct({
     type: Schema.Literal("thread.visit"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3074,6 +3063,13 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literals(["thread.task-context-group.attach", "thread.task-context-group.detach"]),
+    commandId: CommandId,
+    threadId: ThreadId,
+    groupId: TaskContextGroupId,
+    group: TaskContextGroup,
+  }),
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

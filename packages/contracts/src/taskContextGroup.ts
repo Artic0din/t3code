@@ -1,7 +1,11 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { ComposerContextId, type ComposerContextRecord } from "./composerContext.ts";
+import {
+  COMPOSER_CONTEXT_UNKNOWN_PAYLOAD_MAX_CHARS,
+  ComposerContextId,
+  type ComposerContextRecord,
+} from "./composerContext.ts";
 import {
   IsoDateTime,
   ProjectId,
@@ -12,25 +16,29 @@ import {
 } from "./baseSchemas.ts";
 
 const SHORT = Schema.String.check(Schema.isMaxLength(2_048));
-const BRIEF_MAX = 32_000;
-const TITLE_MAX = 200;
-const NOTE_MAX = 16_000;
+export const TASK_CONTEXT_BRIEF_MAX_CHARS = 32_000;
+export const TASK_CONTEXT_TITLE_MAX_CHARS = 200;
+export const TASK_CONTEXT_NOTE_MAX_CHARS = 16_000;
 
-export const TaskContextGroupTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX));
-export const TaskContextGroupBrief = Schema.String.check(Schema.isMaxLength(BRIEF_MAX));
+export const TaskContextGroupTitle = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(TASK_CONTEXT_TITLE_MAX_CHARS),
+);
+export const TaskContextGroupBrief = Schema.String.check(
+  Schema.isMaxLength(TASK_CONTEXT_BRIEF_MAX_CHARS),
+);
 
 export const TaskContextNoteResource = Schema.Struct({
   kind: Schema.Literal("note"),
   resourceId: TaskContextResourceId,
-  title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
-  body: Schema.String.check(Schema.isMaxLength(NOTE_MAX)),
+  title: TaskContextGroupTitle,
+  body: Schema.String.check(Schema.isMaxLength(TASK_CONTEXT_NOTE_MAX_CHARS)),
 });
 export type TaskContextNoteResource = typeof TaskContextNoteResource.Type;
 
 export const TaskContextUrlResource = Schema.Struct({
   kind: Schema.Literal("url"),
   resourceId: TaskContextResourceId,
-  title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
+  title: TaskContextGroupTitle,
   url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_048)),
 });
 export type TaskContextUrlResource = typeof TaskContextUrlResource.Type;
@@ -39,7 +47,7 @@ export const TaskContextThreadResource = Schema.Struct({
   kind: Schema.Literal("thread"),
   resourceId: TaskContextResourceId,
   threadId: ThreadId,
-  title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)))),
+  title: Schema.optional(Schema.NullOr(TaskContextGroupTitle)),
   availability: Schema.optional(Schema.Literals(["available", "missing", "inaccessible"])),
 });
 export type TaskContextThreadResource = typeof TaskContextThreadResource.Type;
@@ -48,7 +56,7 @@ export const TaskContextProjectResource = Schema.Struct({
   kind: Schema.Literal("project"),
   resourceId: TaskContextResourceId,
   projectId: ProjectId,
-  name: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)))),
+  name: Schema.optional(Schema.NullOr(TaskContextGroupTitle)),
   availability: Schema.optional(Schema.Literals(["available", "missing", "inaccessible"])),
 });
 export type TaskContextProjectResource = typeof TaskContextProjectResource.Type;
@@ -61,7 +69,7 @@ export const TaskContextGroupResource = Schema.Union([
 ]);
 export type TaskContextGroupResource = typeof TaskContextGroupResource.Type;
 
-export const TaskContextGroup = Schema.Struct({
+const TaskContextGroupDocument = Schema.Struct({
   id: TaskContextGroupId,
   title: TaskContextGroupTitle,
   brief: TaskContextGroupBrief,
@@ -70,7 +78,40 @@ export const TaskContextGroup = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
-export type TaskContextGroup = typeof TaskContextGroup.Type;
+export type TaskContextGroup = typeof TaskContextGroupDocument.Type;
+export const TaskContextGroup = TaskContextGroupDocument.check(
+  Schema.makeFilter((group) => taskContextGroupFitsMessage(group)),
+);
+
+function taskContextGroupFitsMessage(group: TaskContextGroup): boolean {
+  const resources = group.resources.map((resource) => {
+    if (resource.kind === "thread") {
+      return {
+        ...resource,
+        title: "\u0000".repeat(TASK_CONTEXT_TITLE_MAX_CHARS),
+        availability: "inaccessible",
+      };
+    }
+    if (resource.kind === "project") {
+      return {
+        ...resource,
+        name: "\u0000".repeat(TASK_CONTEXT_TITLE_MAX_CHARS),
+        availability: "inaccessible",
+      };
+    }
+    return resource;
+  });
+  return (
+    JSON.stringify({
+      groupId: group.id,
+      title: group.title,
+      brief: group.brief,
+      resources,
+      memberThreadIds: group.memberThreadIds,
+      capturedAt: "2000-01-01T00:00:00.000Z",
+    }).length <= COMPOSER_CONTEXT_UNKNOWN_PAYLOAD_MAX_CHARS
+  );
+}
 
 export class TaskContextGroupError extends Schema.TaggedError<TaskContextGroupError>()(
   "TaskContextGroupError",
@@ -83,6 +124,7 @@ export class TaskContextGroupError extends Schema.TaggedError<TaskContextGroupEr
       "cross_environment",
       "path_refused",
       "orchestration_error",
+      "permission_denied",
     ]),
     message: SHORT,
   },
@@ -116,7 +158,8 @@ export const TaskContextGroupForThreadResult = Schema.Struct({
   relatedThreads: Schema.Array(
     Schema.Struct({
       threadId: ThreadId,
-      title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
+      title: TaskContextGroupTitle,
+      availability: Schema.optional(Schema.Literals(["available", "missing"])),
     }),
   ),
 });
@@ -153,12 +196,12 @@ const AttachResourceAction = Schema.Struct({
   resource: Schema.Union([
     Schema.Struct({
       kind: Schema.Literal("note"),
-      title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
-      body: Schema.String.check(Schema.isMaxLength(NOTE_MAX)),
+      title: TaskContextGroupTitle,
+      body: Schema.String.check(Schema.isMaxLength(TASK_CONTEXT_NOTE_MAX_CHARS)),
     }),
     Schema.Struct({
       kind: Schema.Literal("url"),
-      title: TrimmedNonEmptyString.check(Schema.isMaxLength(TITLE_MAX)),
+      title: TaskContextGroupTitle,
       url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_048)),
     }),
     Schema.Struct({
@@ -350,8 +393,62 @@ export function buildTaskContextTurnSnapshot(
     label,
     payload: snapshot,
   } satisfies ComposerContextRecord;
-  const referenceMarkdown = `[${label.replace(/[[\]\\\r\n]/g, " ").trim() || "Shared task context"}](t3-context://v1/${TASK_CONTEXT_COMPOSER_KIND}/${contextId})`;
+  const referenceMarkdown = formatTaskContextReference(record);
   return { record, referenceMarkdown, snapshot };
+}
+
+function formatTaskContextReference(record: ComposerContextRecord): string {
+  const label = record.label.replace(/[[\]\\\r\n]/g, " ").trim() || "Shared task context";
+  return `[${label}](t3-context://v1/${TASK_CONTEXT_COMPOSER_KIND}/${record.contextId})`;
+}
+
+function bindTaskContextIntoMessage(input: {
+  readonly text: string;
+  readonly context:
+    | { readonly version: 1; readonly records: ReadonlyArray<ComposerContextRecord> }
+    | undefined;
+  readonly record: ComposerContextRecord | null;
+}) {
+  const retained = (input.context?.records ?? []).filter(
+    (entry) => entry.kind !== TASK_CONTEXT_COMPOSER_KIND,
+  );
+  const previousReferences = /\[[^\]\r\n]*\]\(t3-context:\/\/v1\/task-context\/[a-z0-9_-]+\)/gi;
+  const slashCommand = input.text.trimStart().startsWith("/");
+  if (input.record === null) {
+    return {
+      text: slashCommand ? input.text : input.text.replace(previousReferences, ""),
+      context: retained.length === 0 ? undefined : { version: 1 as const, records: retained },
+    };
+  }
+  let contextId = input.record.contextId;
+  let suffix = 0;
+  while (retained.some((entry) => entry.contextId === contextId)) {
+    contextId = ComposerContextId.make(`${input.record.contextId}_${++suffix}`);
+  }
+  const record = { ...input.record, contextId };
+  const reference = formatTaskContextReference(record);
+  const replaced = slashCommand ? input.text : input.text.replace(previousReferences, reference);
+  const text =
+    slashCommand || replaced.includes(reference) ? replaced : `${input.text}\n\n${reference}`;
+  return { text, context: { version: 1 as const, records: [...retained, record] } };
+}
+
+export function restoreFrozenTaskContextIntoMessage(input: {
+  readonly text: string;
+  readonly context:
+    | { readonly version: 1; readonly records: ReadonlyArray<ComposerContextRecord> }
+    | undefined;
+  readonly frozenContext:
+    | { readonly version: 1; readonly records: ReadonlyArray<ComposerContextRecord> }
+    | undefined;
+}) {
+  const record =
+    input.frozenContext?.records.find((entry) => entry.kind === TASK_CONTEXT_COMPOSER_KIND) ?? null;
+  return bindTaskContextIntoMessage({
+    text: input.text,
+    context: input.context ?? input.frozenContext,
+    record,
+  });
 }
 
 export function mergeTaskContextIntoMessage(input: {
@@ -367,36 +464,23 @@ export function mergeTaskContextIntoMessage(input: {
     | { readonly version: 1; readonly records: ReadonlyArray<ComposerContextRecord> }
     | undefined;
 } {
-  if (input.group === null) {
+  if (input.text.trimStart().startsWith("/")) {
     return { text: input.text, context: input.context };
   }
-  const { record, referenceMarkdown } = buildTaskContextTurnSnapshot(input.group, input.capturedAt);
-  const existing = input.context?.records ?? [];
-  if (existing.some((entry) => entry.kind === TASK_CONTEXT_COMPOSER_KIND)) {
-    return {
-      text: input.text,
-      context: {
-        version: 1,
-        records: existing.map((entry) =>
-          entry.kind === TASK_CONTEXT_COMPOSER_KIND ? record : entry,
-        ),
-      },
-    };
-  }
-  const text = input.text.includes("t3-context://v1/task-context/")
-    ? input.text
-    : `${referenceMarkdown}\n\n${input.text}`;
-  return {
-    text,
-    context: { version: 1, records: [...existing, record] },
-  };
+  const record =
+    input.group === null
+      ? null
+      : buildTaskContextTurnSnapshot(input.group, input.capturedAt).record;
+  return bindTaskContextIntoMessage({ ...input, record });
 }
+
+const decodeTurnSnapshot = Schema.decodeUnknownOption(TaskContextTurnSnapshot);
 
 export function turnReceivedTaskContext(
   context: { readonly records: ReadonlyArray<ComposerContextRecord> } | undefined | null,
 ): TaskContextTurnSnapshot | null {
   const record = context?.records.find((entry) => entry.kind === TASK_CONTEXT_COMPOSER_KIND);
   if (record === undefined || !("payload" in record)) return null;
-  const decoded = Schema.decodeUnknownOption(TaskContextTurnSnapshot)(record.payload);
+  const decoded = decodeTurnSnapshot(record.payload);
   return Option.isSome(decoded) ? decoded.value : null;
 }

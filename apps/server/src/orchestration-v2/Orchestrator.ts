@@ -123,6 +123,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import * as TaskContextGroupStore from "./TaskContextGroupStore.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -783,6 +784,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const idAllocator = yield* IdAllocatorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
+  const configuredTaskContextStore = yield* Effect.serviceOption(
+    TaskContextGroupStore.TaskContextGroupStore,
+  );
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
@@ -4459,6 +4463,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      const taskContextStore = Option.isSome(configuredTaskContextStore)
+        ? configuredTaskContextStore
+        : yield* Effect.serviceOption(TaskContextGroupStore.TaskContextGroupStore);
+      if (Option.isSome(taskContextStore)) {
+        const captured = yield* taskContextStore.value
+          .capture({
+            thread: projection.thread,
+            text: command.text,
+            context: command.context,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorCommandRejectedError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
+          );
+        command = { ...command, ...captured };
+      } else if (projection.thread.taskContextGroupId != null) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Shared context is unavailable. Reconnect and send again.",
+        });
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -7696,6 +7728,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (candidate) =>
           candidate.type === "user_message" && candidate.messageId === queuedMessage.id,
       );
+      const edited = yield* TaskContextGroupStore.restoreQueuedEdit({
+        text: command.text,
+        context: command.context,
+        frozenContext: queuedMessage.context,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorCommandRejectedError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+        ),
+      );
 
       const now = yield* DateTime.now;
       const emitEvent = emit(events, command);
@@ -7710,9 +7756,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: {
           ...queuedMessage,
-          text: command.text,
+          ...edited,
           ...editedAttachments,
-          ...(command.context ? { context: command.context } : {}),
           updatedAt: now,
         },
       });
@@ -7726,9 +7771,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: {
             ...queuedTurnItem,
-            text: command.text,
+            ...edited,
             ...editedAttachments,
-            ...(command.context ? { context: command.context } : {}),
             updatedAt: now,
           },
         });
@@ -10582,6 +10626,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         acceptedAt,
         events: plan.events,
         effects: plan.effects,
+        ...(command.type === "thread.task-context-group.attach" ||
+        command.type === "thread.task-context-group.detach"
+          ? { taskContextGroup: command.group }
+          : {}),
         ...(plan.cancelUnsettledEffects === undefined
           ? {}
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),

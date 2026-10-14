@@ -26,8 +26,14 @@ import {
   ProviderTurnId,
   RunId,
   ThreadId,
+  TaskContextGroupId,
+  turnReceivedTaskContext,
+  type TaskContextGroup,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -74,9 +80,30 @@ import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as Scheduler from "../scheduling/Scheduler.ts";
 
-const layerPlatformTest = Layer.merge(
+const layerPlatformTest = Layer.mergeAll(
   NodeServices.layer,
+  Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
+    peek: () =>
+      Effect.succeed({
+        repositoryIdentity: null,
+        faviconPath: null,
+        repositoryIdentityResolved: false,
+      }),
+    getAvailable: () =>
+      Effect.succeed({
+        repositoryIdentity: null,
+        faviconPath: null,
+        repositoryIdentityResolved: false,
+      }),
+    request: () => Effect.void,
+    invalidate: () => Effect.void,
+    subscribeChanges: Effect.never,
+  }),
+  Layer.mock(WorkspacePaths.WorkspacePaths)({
+    normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+  }),
   Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
     resolveLink: () => Effect.die("unused title link"),
   }),
@@ -477,6 +504,104 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
 );
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+  it.effect("captures shared context in construction-bound scheduler and worker calls", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const scheduler = yield* Scheduler.Scheduler;
+      const threadId = ThreadId.make("runtime-shared-context-thread");
+      const projectId = ProjectId.make("runtime-shared-context-project");
+      const timestamp = "2026-10-14T00:00:00.000Z";
+      yield* seedProject({
+        projectId,
+        title: "Shared context",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: timestamp,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("runtime-shared-context-create"),
+        threadId,
+        projectId,
+        title: "Shared context",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const group = {
+        id: TaskContextGroupId.make("runtime-shared-context-group"),
+        title: "Shared task",
+        brief: "Construction-bound brief",
+        resources: [],
+        memberThreadIds: [threadId],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      } satisfies TaskContextGroup;
+      yield* orchestrator.dispatch({
+        type: "thread.task-context-group.attach",
+        commandId: CommandId.make("runtime-shared-context-attach"),
+        threadId,
+        groupId: group.id,
+        group,
+      });
+      const receipts = yield* Queue.unbounded<string>();
+      yield* scheduler.register(
+        "shared-context",
+        threads
+          .sendToThread({
+            projectId,
+            threadId,
+            commandId: CommandId.make("runtime-shared-context-scheduled"),
+            messageId: MessageId.make("runtime-shared-context-scheduled-message"),
+            text: "Scheduled work",
+            attachments: [],
+            mode: "queue",
+            createdBy: "user",
+            creationSource: "server",
+          })
+          .pipe(
+            Effect.exit,
+            Effect.flatMap((result) =>
+              Queue.offer(
+                receipts,
+                Exit.isSuccess(result) ? "accepted" : Cause.pretty(result.cause),
+              ),
+            ),
+            Effect.asVoid,
+          ),
+      );
+      assert.equal(yield* Queue.take(receipts), "accepted");
+      yield* threads
+        .sendToThread({
+          projectId,
+          threadId,
+          commandId: CommandId.make("runtime-shared-context-worker"),
+          messageId: MessageId.make("runtime-shared-context-worker-message"),
+          text: "Worker work",
+          attachments: [],
+          mode: "queue",
+          createdBy: "agent",
+          creationSource: "provider",
+        })
+        .pipe(Effect.provideContext(Context.empty()));
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      for (const id of [
+        "runtime-shared-context-scheduled-message",
+        "runtime-shared-context-worker-message",
+      ]) {
+        const message = projection.messages.find((item) => item.id === id);
+        assert.equal(turnReceivedTaskContext(message?.context)?.brief, "Construction-bound brief");
+      }
+      assert.equal(projection.thread.projectId, projectId);
+      assert.equal(projection.thread.worktreePath, null);
+    }).pipe(Effect.provide(Scheduler.layer)),
+  );
+
   it.effect("emits model updates separately from provider switches", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
