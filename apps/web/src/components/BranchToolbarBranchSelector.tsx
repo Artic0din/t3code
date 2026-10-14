@@ -2,6 +2,7 @@ import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { parseExplicitIssueReference } from "@t3tools/shared/git";
+import { useAtomValue } from "@effect/atom-react";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useRightPanelStore } from "../rightPanelStore";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -9,7 +10,14 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ContextMenuItem, EnvironmentId, VcsRef, ThreadId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthSourceControlWriteScope,
+  type ContextMenuItem,
+  type EnvironmentId,
+  type VcsRef,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { ChevronDownIcon, CircleDotIcon, GitBranchIcon } from "lucide-react";
 import {
   useCallback,
@@ -31,14 +39,13 @@ import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { usePaginatedBranches } from "../state/queries";
 import { useProject, useServerConfigs, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { vcsEnvironment } from "../state/vcs";
+import { gitEnvironment } from "../state/git";
 import { cn } from "../lib/utils";
-import {
-  THREAD_DETAILS_PANEL_CHEVRON_CLASS,
-  THREAD_DETAILS_PANEL_ICON_CLASS,
-} from "./chat/threadDetailsPanelStyles";
+import { THREAD_DETAILS_PANEL_ICON_CLASS } from "./chat/threadDetailsPanelStyles";
 import { ThreadDetailsPrRows } from "./chat/ThreadDetailsPrRows";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { openIssueThreadDialog } from "./IssueThreadDialog";
@@ -112,11 +119,17 @@ export function BranchToolbarBranchSelector({
   onComposerFocusRequest,
 }: BranchToolbarBranchSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
+  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, "thread session stop");
   const updateThreadMetadata = useAtomCommand(
     threadEnvironment.updateMetadata,
     "thread metadata update",
   );
+  // An automatic default loses to any launch that lands first; that rejection is expected.
+  const updateEmptyThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
   const switchRef = useAtomCommand(vcsEnvironment.switchRef, {
     reportFailure: false,
   });
@@ -155,6 +168,8 @@ export function BranchToolbarBranchSelector({
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const branchCwd = activeWorktreePath ?? activeProjectCwd;
   const hasServerThread = serverThread !== null;
+  const canUpdateThreadBranch = !hasServerThread || canOperateThread;
+  const canChangeThreadBranch = canWriteSourceControl && canUpdateThreadBranch;
   const effectiveEnvMode =
     effectiveEnvModeOverride ??
     resolveEffectiveEnvMode({
@@ -168,7 +183,12 @@ export function BranchToolbarBranchSelector({
   // ---------------------------------------------------------------------------
   const setThreadBranch = useCallback(
     (branch: string | null, worktreePath: string | null, automatic = false) => {
-      if (!activeThreadId || !activeProject) return;
+      if (
+        !activeThreadId ||
+        !activeProject ||
+        (hasServerThread && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+      )
+        return;
       if (serverSession && worktreePath !== activeWorktreePath) {
         void stopThreadSession({
           environmentId,
@@ -176,12 +196,14 @@ export function BranchToolbarBranchSelector({
         });
       }
       if (hasServerThread) {
-        void updateThreadMetadata({
+        void (automatic ? updateEmptyThreadMetadata : updateThreadMetadata)({
           environmentId,
           input: {
             threadId: activeThreadId,
             branch,
             worktreePath,
+            // A launched thread records its own worktree; a late default must not reset it.
+            ...(automatic ? { expectedEmpty: true } : {}),
           },
         });
       }
@@ -216,6 +238,7 @@ export function BranchToolbarBranchSelector({
       effectiveEnvMode,
       draftThread?.environmentSelection,
       stopThreadSession,
+      updateEmptyThreadMetadata,
       updateThreadMetadata,
     ],
   );
@@ -275,12 +298,24 @@ export function BranchToolbarBranchSelector({
   const isSelectingWorktreeBase =
     effectiveEnvMode === "worktree" && !envLocked && !activeWorktreePath;
   const checkoutPullRequestItemValue =
-    prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
+    canChangeThreadBranch && prReference && onCheckoutPullRequestRequest
+      ? `__checkout_pull_request__:${prReference}`
+      : null;
   const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
+  const canPrepareIssueThread = useAtomValue(
+    gitEnvironment.prepareIssueThread.permissionAtom(
+      environmentId,
+      activeProjectCwd !== null && issueReference !== null
+        ? { cwd: activeProjectCwd, reference: issueReference, threadId }
+        : undefined,
+    ),
+  );
   // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
   const supportsIssueThreads =
     useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
   const startFromIssueItemValue =
+    canChangeThreadBranch &&
+    canPrepareIssueThread &&
     issueReference &&
     onCheckoutPullRequestRequest &&
     supportsIssueThreads &&
@@ -288,7 +323,8 @@ export function BranchToolbarBranchSelector({
     activeProject?.repositoryIdentity?.provider === "github"
       ? `__start_from_issue__:${issueReference}`
       : null;
-  const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
+  const canCreateBranch =
+    canChangeThreadBranch && !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
   // The ref is created under its sanitized name, so the collision check has to
   // use that name too. Matching on the raw query would offer to create a ref
   // that already exists whenever sanitizing changes the name.
@@ -417,6 +453,20 @@ export function BranchToolbarBranchSelector({
   );
 
   const runBranchAction = (action: () => Promise<void>) => {
+    if (
+      !readEnvironmentScope(environmentId, AuthSourceControlWriteScope) ||
+      (hasServerThread && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
+    ) {
+      // The menu already closed when the item was chosen; explain the no-op.
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Action unavailable",
+          description: "This connection cannot change the thread's branch.",
+        }),
+      );
+      return;
+    }
     startBranchActionTransition(async () => {
       await action();
       branchRefState.refresh();
@@ -425,7 +475,7 @@ export function BranchToolbarBranchSelector({
   };
 
   const selectBranch = (refName: VcsRef) => {
-    if (!branchCwd || !activeProjectCwd || isBranchActionPending) return;
+    if (!canUpdateThreadBranch || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
       setThreadBranch(refName.name, null);
@@ -486,6 +536,7 @@ export function BranchToolbarBranchSelector({
   };
 
   const createRef = (rawName: string) => {
+    if (!canChangeThreadBranch) return;
     const name = sanitizeNewRefName(rawName);
     if (!branchCwd || !name || isBranchActionPending) return;
 
@@ -531,8 +582,13 @@ export function BranchToolbarBranchSelector({
     ? null
     : (defaultBranchName ?? currentGitBranch);
 
+  // A started thread's server is creating its worktree and records the branch
+  // itself; defaulting it here would reset the thread to the base checkout and
+  // detach the agent that just started.
+  const threadStarted = serverSession !== null;
   useEffect(() => {
     if (
+      threadStarted ||
       effectiveEnvMode !== "worktree" ||
       activeWorktreePath ||
       activeThreadBranch ||
@@ -546,6 +602,7 @@ export function BranchToolbarBranchSelector({
     activeWorktreePath,
     effectiveEnvMode,
     setThreadBranch,
+    threadStarted,
     worktreeBaseBranchCandidate,
   ]);
 
@@ -698,6 +755,17 @@ export function BranchToolbarBranchSelector({
         projectCwd={activeProjectCwd}
         index={index}
         value={itemValue}
+        disabled={
+          !canUpdateThreadBranch ||
+          (!canWriteSourceControl &&
+            !isSelectingWorktreeBase &&
+            (!activeProjectCwd ||
+              !resolveBranchSelectionTarget({
+                activeProjectCwd,
+                activeWorktreePath,
+                refName,
+              }).reuseExistingWorktree))
+        }
         onClick={() => selectPickerItem(itemValue)}
         onContextMenu={(event) => handleBranchContextMenu(event, itemValue)}
       />
@@ -789,15 +857,15 @@ export function BranchToolbarBranchSelector({
               )}
             />
             <ComposerContextLabel displayMode={displayMode}>
-              <MiddleTruncate value={triggerLabel} className="w-full" />
+              <MiddleTruncate
+                value={triggerLabel}
+                variant={displayMode === "panel" ? "cap-aligned" : "default"}
+                className="w-full"
+              />
             </ComposerContextLabel>
-            {displayMode === "panel" ? (
-              <span data-slot="select-icon">
-                <ChevronDownIcon className={THREAD_DETAILS_PANEL_CHEVRON_CLASS} />
-              </span>
-            ) : (
+            {displayMode !== "panel" ? (
               <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
-            )}
+            ) : null}
           </ComboboxTrigger>
         </span>
         {displayMode === "panel" && prNumber !== undefined && prUrl !== undefined ? (

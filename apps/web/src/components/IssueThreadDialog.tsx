@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useIssueResolution, usePrepareIssueThreadAction } from "~/lib/sourceControlActions";
 import { cn } from "~/lib/utils";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { gitEnvironment } from "~/state/git";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -121,6 +122,14 @@ export function IssueThreadDialog({
     reference: open ? parsedDebouncedReference : null,
   });
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
+  const canPrepareIssueThread = useAtomValue(
+    gitEnvironment.prepareIssueThread.permissionAtom(
+      scope.environmentId,
+      scope.cwd !== null && parsedReference !== null
+        ? { cwd: scope.cwd, reference: parsedReference, threadId }
+        : undefined,
+    ),
+  );
   // A failed start from an earlier dialog is scope-wide state; a newly opened dialog starts clean.
   const resetPrepareErrorOnOpen = useRef(prepareIssueThreadAction.resetError);
   useEffect(() => {
@@ -141,6 +150,7 @@ export function IssueThreadDialog({
       issueResolution.isPending);
 
   const handleConfirm = useCallback(async () => {
+    if (!canPrepareIssueThread) return;
     if (!parsedReference) {
       setReferenceDirty(true);
       return;
@@ -174,6 +184,7 @@ export function IssueThreadDialog({
     }
     onOpenChange(false);
   }, [
+    canPrepareIssueThread,
     onOpenChange,
     onPrepared,
     parsedReference,
@@ -198,7 +209,12 @@ export function IssueThreadDialog({
         : prepareIssueThreadAction.error
           ? "Failed to start the issue thread."
           : null);
-  const canStart = scope.cwd !== null && resolvedIssue !== null && !isResolving && !isStarting;
+  const canStart =
+    canPrepareIssueThread &&
+    scope.cwd !== null &&
+    resolvedIssue !== null &&
+    !isResolving &&
+    !isStarting;
 
   return (
     <Dialog
