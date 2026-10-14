@@ -1236,16 +1236,14 @@ const make = Effect.gen(function* () {
         messages: [...childControls.messages, ...resultRecords.messages],
         turnItems: resultRecords.turnItems,
       };
-      // A restart cut the child's run and its continuation has not settled, or
-      // the child started working again after this read.
-      const heldForRestart =
+      const heldForRecovery =
         task.result === null &&
         progress.state === "result_available" &&
         (yield* threadManagement
-          .delegatedTaskResultPending(task.childThreadId)
+          .delegatedTaskResultPending(task.childThreadId, progress.resultRun?.id)
           .pipe(Effect.mapError(threadManagementFailure)));
       const workState =
-        task.result !== null ? "result_available" : heldForRestart ? "working" : progress.state;
+        task.result !== null ? "result_available" : heldForRecovery ? "working" : progress.state;
       const status =
         task.result !== null
           ? taskStatusForRun(

@@ -50,6 +50,7 @@ export interface ProviderAdapterRegistryV2Shape {
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Shape, ProviderAdapterRegistryV2Error>;
   readonly list: () => Effect.Effect<ReadonlyArray<ProviderInstanceId>>;
+  readonly getQuotaOwnerKeys?: () => Effect.Effect<ReadonlyMap<ProviderInstanceId, string>>;
   readonly getMetadata?: (instanceId: ProviderInstanceId) => Effect.Effect<
     {
       readonly driver: ProviderAdapter.ProviderAdapterV2Shape["driver"];
@@ -140,6 +141,19 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
       list: () =>
         instances.listInstances.pipe(
           Effect.map((available) => available.map((instance) => instance.instanceId)),
+        ),
+      getQuotaOwnerKeys: () =>
+        instances.listInstances.pipe(
+          Effect.map(
+            (available) =>
+              new Map(
+                available.flatMap((instance) =>
+                  instance.quotaOwnerKey === undefined
+                    ? []
+                    : [[instance.instanceId, instance.quotaOwnerKey] as const],
+                ),
+              ),
+          ),
         ),
       getMetadata: (instanceId) =>
         Effect.gen(function* () {

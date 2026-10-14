@@ -132,12 +132,15 @@ export function resolveScopedSettingsTargets(
 export function scopedSettingsAreMixed(
   targets: readonly Pick<ScopedSettingsTarget, "settings">[],
   keys: readonly (keyof ServerSettings)[],
+  settingValue?: (settings: ServerSettings) => unknown,
 ): boolean {
   const first = targets[0];
   return (
     first !== undefined &&
     targets.some((candidate) =>
-      keys.some((key) => !Equal.equals(first.settings[key], candidate.settings[key])),
+      settingValue === undefined
+        ? keys.some((key) => !Equal.equals(first.settings[key], candidate.settings[key]))
+        : !Equal.equals(settingValue(first.settings), settingValue(candidate.settings)),
     )
   );
 }

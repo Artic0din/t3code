@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderInstanceConfig,
+  type ModelSelection,
 } from "@t3tools/contracts";
 import { getBackgroundActivityPresetSettings } from "@t3tools/shared/backgroundActivitySettings";
 import * as Duration from "effect/Duration";
@@ -12,6 +13,8 @@ import {
   backgroundActivitySharedPolicySettings,
   buildProviderInstanceUpdatePatch,
   formatDiagnosticsDescription,
+  formatModelFallbackList,
+  parseModelFallbackList,
   getChangedBrowserSettingLabels,
   getChangedTypographySettingLabels,
   hasChangedBackgroundActivitySettings,
@@ -19,6 +22,61 @@ import {
   projectGroupingModeFromToggle,
   resolveBackgroundActivityProfileOption,
 } from "./SettingsPanels.logic";
+
+describe("fallback model editor", () => {
+  const first: ModelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "o3",
+    options: [{ id: "reasoningEffort", value: "high" }],
+  };
+  const second: ModelSelection = {
+    instanceId: ProviderInstanceId.make("other"),
+    model: "other-model",
+    options: [{ id: "thinking", value: true }],
+  };
+
+  it("keeps all selections and options on an unchanged blur", () => {
+    const models = [first, second];
+    expect(parseModelFallbackList(formatModelFallbackList(models))).toEqual(models);
+  });
+
+  it("keeps options with their selections across reorder, removal, and edits", () => {
+    expect(parseModelFallbackList(JSON.stringify([second, first]))).toEqual([second, first]);
+    expect(parseModelFallbackList(JSON.stringify([first]))).toEqual([first]);
+    const edited = { ...first, model: "new-model" };
+    expect(parseModelFallbackList(JSON.stringify([edited, second]))).toEqual([edited, second]);
+  });
+
+  it("uses explicitly updated options and preserves duplicate selections independently", () => {
+    const updated = { ...first, options: [{ id: "reasoningEffort", value: "low" }] };
+    const models = [first, updated];
+    expect(parseModelFallbackList(formatModelFallbackList(models))).toEqual(models);
+    expect(parseModelFallbackList(JSON.stringify([updated]))).toEqual([updated]);
+  });
+
+  it("keeps the retained duplicate's options when the first row is edited", () => {
+    const lowerEffort = { ...first, options: [{ id: "reasoningEffort", value: "low" }] };
+    const edited = { ...first, model: "new-model" };
+    expect(parseModelFallbackList(JSON.stringify([edited, lowerEffort]))).toEqual([
+      edited,
+      lowerEffort,
+    ]);
+    expect(parseModelFallbackList(JSON.stringify([lowerEffort]))).toEqual([lowerEffort]);
+  });
+
+  it("rejects invalid JSON and model options without turning them into an empty list", () => {
+    expect(parseModelFallbackList("codex o3")).toBeNull();
+    expect(
+      parseModelFallbackList(
+        JSON.stringify([{ ...first, options: [{ id: "effort", value: 42 }] }]),
+      ),
+    ).toBeNull();
+    expect(
+      parseModelFallbackList(JSON.stringify([{ instanceId: "codex", model: " " }])),
+    ).toBeNull();
+    expect(parseModelFallbackList("[]")).toEqual([]);
+  });
+});
 
 describe("typography settings restore", () => {
   it("detects family and size changes by font row", () => {

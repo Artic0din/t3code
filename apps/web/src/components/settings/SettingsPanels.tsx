@@ -144,6 +144,8 @@ import {
   backgroundActivityOverrideSettings,
   backgroundActivitySharedPolicySettings,
   durationToSeconds,
+  formatModelFallbackList,
+  parseModelFallbackList,
   getChangedBrowserSettingLabels,
   getChangedTypographySettingLabels,
   normalizeIntervalSeconds,
@@ -2183,6 +2185,7 @@ export function GeneralSettingsPanel() {
   const isEnvironmentScope = scope.environmentIds.length === 1 && environmentId !== null;
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
+  const [modelFallbackError, setModelFallbackError] = useState<string | null>(null);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
@@ -2366,12 +2369,13 @@ export function GeneralSettingsPanel() {
         <SettingsRow
           serverScoped
           {...searchableSetting("model-fallback")}
-          description="After an explicit usage limit, continue on the next model in this list. One provider instance id and model per line. Kept per environment. Authentication, network, and other provider errors stay on the current model."
+          description="After an explicit usage limit, continue on the next model in this list. Edit the JSON list with instanceId, model, and optional options. Kept per environment. Authentication, network, and other provider errors stay on the current model."
           settingKeys={["modelFallback"]}
           control={
             <div className="flex w-72 flex-col gap-2">
               <ScopedSwitch
                 settingKeys={["modelFallback"]}
+                settingValue={(value) => value.modelFallback.enabled}
                 checked={settings.modelFallback.enabled}
                 onCheckedChange={(checked) =>
                   updateSettings({ modelFallback: { enabled: Boolean(checked) } })
@@ -2385,16 +2389,28 @@ export function GeneralSettingsPanel() {
                 rows={4}
                 spellCheck={false}
                 aria-label="Fallback models"
+                aria-invalid={modelFallbackError !== null}
                 className="w-full rounded-md border px-2 py-1 text-xs"
-                onBlur={(event) =>
+                onChange={() => setModelFallbackError(null)}
+                onBlur={(event) => {
+                  const models = parseModelFallbackList(event.currentTarget.value);
+                  if (models === null) {
+                    setModelFallbackError("Enter a JSON array of valid model selections.");
+                    return;
+                  }
+                  setModelFallbackError(null);
                   updateSettings({
                     modelFallback: {
-                      enabled: settings.modelFallback.enabled,
-                      models: parseModelFallbackList(event.currentTarget.value),
+                      models,
                     },
-                  })
-                }
+                  });
+                }}
               />
+              {modelFallbackError !== null ? (
+                <p role="alert" className="text-destructive text-xs">
+                  {modelFallbackError}
+                </p>
+              ) : null}
               {scope.kind !== "environment" || !isEnvironmentScope ? (
                 <p className="text-muted-foreground text-xs">
                   Select one environment to edit its fallback models.
@@ -3656,21 +3672,4 @@ export function ArchivedThreadsPanel() {
       )}
     </SettingsPageContainer>
   );
-}
-
-function formatModelFallbackList(models: readonly { instanceId: string; model: string }[]): string {
-  return models.map((model) => `${model.instanceId} ${model.model}`).join("\n");
-}
-
-function parseModelFallbackList(value: string) {
-  return value.split("\n").flatMap((line) => {
-    const trimmed = line.trim();
-    const separator = trimmed.indexOf(" ");
-    if (separator <= 0) return [];
-    const instanceId = trimmed.slice(0, separator).trim();
-    const model = trimmed.slice(separator + 1).trim();
-    if (instanceId.length === 0 || model.length === 0) return [];
-    if (!Schema.is(ProviderInstanceId)(instanceId)) return [];
-    return [{ instanceId: ProviderInstanceId.make(instanceId), model }];
-  });
 }

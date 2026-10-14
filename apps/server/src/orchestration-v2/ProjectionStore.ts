@@ -1,10 +1,12 @@
 import {
   latestRootProviderFailure,
+  latestExecutedRun,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { modelSelectionsEqual } from "@t3tools/shared/model";
 import type {
   OrchestrationV2AppThread,
   OrchestrationV2CheckpointScope,
@@ -495,8 +497,9 @@ export const ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION = 2;
 function needsRecovery(
   projection: OrchestrationV2ThreadProjection,
   kind: ProjectionRecoveryKind,
+  parentProjection?: OrchestrationV2ThreadProjection,
 ): boolean {
-  if (projection.thread.deletedAt !== null) return false;
+  if (projection.thread.deletedAt !== null && kind !== "subagent-results") return false;
   switch (kind) {
     case "queued-runs":
       return (
@@ -514,6 +517,14 @@ function needsRecovery(
         projection.thread.lineage.relationshipToParent === "subagent" &&
         parentThreadId !== null &&
         projection.thread.forkedFrom?.type === "node" &&
+        parentProjection?.subagents.some(
+          (task) =>
+            task.origin === "app_owned" &&
+            task.childThreadId === projection.thread.id &&
+            projection.thread.forkedFrom?.type === "node" &&
+            task.id === projection.thread.forkedFrom.nodeId &&
+            task.result === null,
+        ) === true &&
         ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
           projection.runs.at(-1)?.status ?? "idle",
         ) &&
@@ -3369,8 +3380,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             readonly run_id: string;
             readonly completed_at: string | null;
             readonly failure_payload_json: string;
+            readonly run_payload_json: string;
           }>`
-            SELECT t.payload_json, r.run_id, r.completed_at, item.payload_json AS failure_payload_json
+            SELECT t.payload_json, r.run_id, r.completed_at, item.payload_json AS failure_payload_json,
+              r.payload_json AS run_payload_json
             FROM orchestration_v2_projection_threads t
             INNER JOIN orchestration_v2_projection_runs r ON r.run_id = (
               SELECT latest.run_id FROM orchestration_v2_projection_runs latest
@@ -3397,6 +3410,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
               AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
               AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_turn_items stop
+                WHERE stop.thread_id = t.thread_id AND stop.run_id = r.run_id
+                  AND stop.type = 'run_interrupt_request'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_context_transfers result
+                WHERE result.source_thread_id = t.thread_id
+                  AND result.type = 'subagent_result'
+                  AND (
+                    json_extract(result.payload_json, '$.sourcePoint.runId') IS NULL
+                    OR json_extract(result.payload_json, '$.sourcePoint.runId') = r.run_id
+                  )
+              )
+              AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runtime_requests request
                 WHERE request.thread_id = t.thread_id AND request.status = 'pending'
               )
@@ -3417,6 +3444,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           const candidates: Array<ProjectionLimitRecoveryCandidate> = [];
           for (const row of rows) {
             const thread = yield* decodeThreadPayload(row.payload_json);
+            const run = yield* decodeRunPayload(row.run_payload_json);
+            if (!modelSelectionsEqual(thread.modelSelection, run.modelSelection)) continue;
             const item = yield* decodeTurnItemPayload(row.failure_payload_json);
             const summary = threadErrorSummary(item.type === "error" ? item.failure : null, null);
             if (summary.lastErrorClass !== "usage_limit") continue;
@@ -3568,11 +3597,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               `;
             case "subagent-results":
               return sql`
-                SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
-                WHERE CASE WHEN json_valid(child.payload_json) THEN
+                SELECT pending.child_thread_id AS thread_id
+                FROM orchestration_v2_projection_subagents AS pending
+                CROSS JOIN orchestration_v2_projection_threads AS child
+                  ON child.thread_id = pending.child_thread_id
+                WHERE pending.origin = 'app_owned' AND pending.child_thread_id IS NOT NULL
+                  AND CASE WHEN json_valid(pending.payload_json)
+                    THEN json_type(pending.payload_json, '$.result') = 'null'
+                    ELSE 0 END
+                  AND CASE WHEN json_valid(child.payload_json) THEN
                   json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
-                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
+                  AND json_extract(child.payload_json, '$.lineage.parentThreadId') = pending.thread_id
                   AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
+                  AND json_extract(child.payload_json, '$.forkedFrom.nodeId') = pending.subagent_id
                   AND (
                     SELECT status FROM orchestration_v2_projection_runs
                     WHERE thread_id = child.thread_id
@@ -3651,7 +3688,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         })();
         const rows = yield* sql<{ readonly thread_id: string }>`
           SELECT thread_id FROM orchestration_v2_projection_threads
-          WHERE deleted_at IS NULL
+          WHERE ${kind === "subagent-results" ? sql`1 = 1` : sql`deleted_at IS NULL`}
             AND thread_id IN (${candidates})
             ${kind === "queued-runs" ? sql`AND archived_at IS NULL` : sql``}
           ORDER BY updated_at ASC, thread_id ASC
@@ -5925,6 +5962,14 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   thread.archivedAt === null &&
                   thread.settledOverride !== "settled",
               )
+              .filter((projection) => {
+                if (options.fallback !== true) return true;
+                const run = latestExecutedRun(projection.runs);
+                return (
+                  run !== null &&
+                  modelSelectionsEqual(projection.thread.modelSelection, run.modelSelection)
+                );
+              })
               .map(threadShellFromProjection)
               .filter((thread) =>
                 options.fallback === true
@@ -5970,7 +6015,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         Effect.gen(function* () {
           const projections = (yield* Ref.get(replayState)).projections;
           return [...projections.values()]
-            .filter((projection) => needsRecovery(projection, kind))
+            .filter((projection) =>
+              needsRecovery(
+                projection,
+                kind,
+                projection.thread.lineage.parentThreadId === null
+                  ? undefined
+                  : projections.get(projection.thread.lineage.parentThreadId),
+              ),
+            )
             .toSorted(
               (left, right) =>
                 DateTime.toEpochMillis(left.thread.updatedAt) -

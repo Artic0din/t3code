@@ -52,8 +52,51 @@ function plan(
 }
 
 describe("planModelFallback", () => {
+  it.each([
+    weekly,
+    { ...weekly, code: "seven_day_gpt" },
+    { ...weekly, message: "Account usage limit" },
+  ])(
+    "skips an alias of an exhausted account while allowing an isolated auth home: %s",
+    (signal) => {
+      const alias = { ...gpt, instanceId: ProviderInstanceId.make("codex-alias") };
+      const isolated = { ...gpt, instanceId: ProviderInstanceId.make("codex-isolated") };
+      const patch = {
+        current: gpt,
+        tried: [gpt],
+        models: [alias, isolated],
+        signal,
+        quotaOwnerKeys: new Map([
+          [gpt.instanceId, "codex:shared-auth"],
+          [alias.instanceId, "codex:shared-auth"],
+          [isolated.instanceId, "codex:isolated-auth"],
+        ]),
+      };
+      const decision = plan(patch);
+      assert.equal(decision.type, "switch");
+      if (decision.type !== "switch") return;
+      assert.deepEqual(decision.to, isolated);
+    },
+  );
+
   it("keeps today's pause when fallback is disabled", () => {
     assert.deepEqual(plan({ enabled: false }).type, "leave-paused");
+  });
+
+  it("keeps a different family eligible on an alias of the same account", () => {
+    const alias = { ...sonnet, instanceId: ProviderInstanceId.make("claude-alias") };
+    const patch = {
+      models: [alias],
+      signal: { ...weekly, code: "seven_day_opus" },
+      quotaOwnerKeys: new Map([
+        [claude, "claude:shared-auth"],
+        [alias.instanceId, "claude:shared-auth"],
+      ]),
+    };
+    const decision = plan(patch);
+    assert.equal(decision.type, "switch");
+    if (decision.type !== "switch") return;
+    assert.deepEqual(decision.to, alias);
   });
 
   it("selects the next configured model on an explicit quota signal", () => {
@@ -339,6 +382,25 @@ describe("decideFromProjection", () => {
     if (decision.type !== "pause") return;
     assert.equal(decision.reason, "exhausted");
   });
+
+  it("retains earlier exhausted ownership across provider aliases in the quota chain", () => {
+    const alias = { ...opusNext, instanceId: ProviderInstanceId.make("claude-alias") };
+    const decision = decideFromProjection({
+      enabled: true,
+      models: [alias, gpt],
+      unavailableInstanceIds: [],
+      continuation: "supported",
+      current: gpt,
+      quotaOwnerKeys: new Map([
+        [claude, "claude:shared-auth"],
+        [alias.instanceId, "claude:shared-auth"],
+      ]),
+      runs: [limited(opus, 1, "seven_day_opus"), limited(gpt, 2, "weekly_gpt")],
+    });
+    assert.equal(decision.type, "pause");
+    if (decision.type !== "pause") return;
+    assert.equal(decision.reason, "exhausted");
+  });
 });
 
 describe("nextModelFallbackCommand", () => {
@@ -346,25 +408,24 @@ describe("nextModelFallbackCommand", () => {
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread-1");
       const runId = RunId.make("run-1");
-      const rejected = new Set(
-        Array.from({ length: 9 }, (_, index) =>
-          String(
-            modelFallbackCommand({ threadId, runId, decision: plan(), attempt: index + 1 })
-              ?.commandId,
-          ),
-        ),
-      );
-      const command = yield* nextModelFallbackCommand({ threadId, runId, decision: plan() }, (id) =>
-        Effect.succeed(
-          rejected.has(String(id)) ? Option.some({ status: "rejected" }) : Option.none(),
-        ),
-      );
+      let lookups = 0;
+      const command = yield* nextModelFallbackCommand({ threadId, runId, decision: plan() }, () => {
+        lookups += 1;
+        return Effect.succeed(
+          Option.some({
+            commandId: CommandId.make("rejected:attempt-1000"),
+            status: "rejected" as const,
+            retryAttempt: 1_000,
+          }),
+        );
+      });
       assert.equal(
         command?.commandId,
         CommandId.make(
-          `model-fallback:${threadId}:${runId}:${gpt.instanceId}:${gpt.model}:attempt-10`,
+          `model-fallback-retry:${encodeURIComponent(`model-fallback:${threadId}:${runId}:${gpt.instanceId}:${gpt.model}`)}:attempt-1001`,
         ),
       );
+      assert.equal(lookups, 1);
     }),
   );
 });

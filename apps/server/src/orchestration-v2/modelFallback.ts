@@ -13,6 +13,15 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 export const MODEL_FALLBACK_NOTE_PREFIX = "model-fallback-note:";
+const MODEL_FALLBACK_RETRY_PREFIX = "model-fallback-retry:";
+const MODEL_FALLBACK_NOTE_RETRY_PREFIX = "model-fallback-note-retry:";
+
+export function isModelFallbackNoteCommand(commandId: CommandId): boolean {
+  return (
+    commandId.startsWith(MODEL_FALLBACK_NOTE_PREFIX) ||
+    commandId.startsWith(MODEL_FALLBACK_NOTE_RETRY_PREFIX)
+  );
+}
 
 export type QuotaWindow = "hourly" | "daily" | "weekly" | "monthly";
 
@@ -90,15 +99,18 @@ function sharesExhaustedQuota(
   candidate: ModelSelection,
   current: ModelSelection,
   signal: ModelFallbackSignal,
+  quotaOwnerKeys: ReadonlyMap<string, string> | undefined,
 ): boolean {
+  const owner = quotaOwnerKeys?.get(current.instanceId);
+  const sharesOwner =
+    candidate.instanceId === current.instanceId ||
+    (owner !== undefined && owner === quotaOwnerKeys?.get(candidate.instanceId));
   if (isInstanceScopedQuota(signal)) {
-    return candidate.instanceId === current.instanceId;
+    return sharesOwner;
   }
   const family = quotaFamily(signal);
   if (family !== null) {
-    return (
-      candidate.instanceId === current.instanceId && candidate.model.toLowerCase().includes(family)
-    );
+    return sharesOwner && candidate.model.toLowerCase().includes(family);
   }
   return false;
 }
@@ -145,15 +157,12 @@ interface ExhaustedQuota {
   readonly signal: ModelFallbackSignal;
 }
 
-/** Models already burned in the current quota chain, newest first, stopping at a non-quota run. */
 function quotaChain(runs: readonly FallbackRunEvidence[]): {
   readonly signal: ModelFallbackSignal | null;
   readonly current: ModelSelection | null;
   readonly tried: readonly ModelSelection[];
   readonly exhausted: readonly ExhaustedQuota[];
 } {
-  // Same executed-run rule as latestExecutedRun and the candidate query: a
-  // run cancelled before it started never reached the provider.
   const ordered = [...runs]
     .filter(
       (run) => run.completedAt !== null && !(run.status === "cancelled" && run.startedAt === null),
@@ -190,6 +199,7 @@ export function decideFromProjection(input: {
   readonly current: ModelSelection;
   readonly runs: readonly FallbackRunEvidence[];
   readonly skipped?: readonly ModelSelection[];
+  readonly quotaOwnerKeys?: ReadonlyMap<string, string>;
 }): ModelFallbackDecision {
   const chain = quotaChain(input.runs);
   return planModelFallback({
@@ -202,6 +212,7 @@ export function decideFromProjection(input: {
     continuation: input.continuation,
     unavailableInstanceIds: input.unavailableInstanceIds,
     signal: chain.signal,
+    ...(input.quotaOwnerKeys === undefined ? {} : { quotaOwnerKeys: input.quotaOwnerKeys }),
   });
 }
 
@@ -217,6 +228,7 @@ export function planModelFallback(input: {
   /** Earlier quotas in this chain; a candidate sharing any of them is skipped. */
   readonly exhausted?: readonly ExhaustedQuota[];
   readonly signal: ModelFallbackSignal | null;
+  readonly quotaOwnerKeys?: ReadonlyMap<string, string>;
 }): ModelFallbackDecision {
   if (!input.enabled) return { type: "leave-paused", reason: "disabled" };
   if (!explicitQuotaExhaustion(input.signal) || input.signal === null) {
@@ -233,7 +245,9 @@ export function planModelFallback(input: {
       !unavailable.has(candidate.instanceId) &&
       !input.tried.some((tried) => modelSelectionsEqual(tried, candidate)) &&
       !skipped.some((entry) => modelSelectionsEqual(entry, candidate)) &&
-      !exhausted.some((quota) => sharesExhaustedQuota(candidate, quota.selection, quota.signal)),
+      !exhausted.some((quota) =>
+        sharesExhaustedQuota(candidate, quota.selection, quota.signal, input.quotaOwnerKeys),
+      ),
   );
   if (next === undefined) {
     return {
@@ -287,11 +301,9 @@ function commandIdentity(
   threadId: ThreadId,
   runId: RunId,
   selection: ModelSelection | undefined,
-  attempt: number,
 ): string {
   const target = selection === undefined ? "" : `:${selection.instanceId}:${selection.model}`;
-  const retry = attempt <= 1 ? "" : `:attempt-${attempt}`;
-  return `model-fallback:${threadId}:${runId}${target}${retry}`;
+  return `model-fallback:${threadId}:${runId}${target}`;
 }
 
 export function modelFallbackCommand(input: {
@@ -300,15 +312,17 @@ export function modelFallbackCommand(input: {
   readonly decision: ModelFallbackDecision;
   /** Bump after a rejected receipt so a later sweep can retry the same target. */
   readonly attempt?: number;
-}): OrchestrationV2Command | null {
+}): Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }> | null {
   if (input.decision.type === "leave-paused") return null;
   const note = input.decision.type === "pause";
   const attempt = input.attempt ?? 1;
-  const identity = note
-    ? `${MODEL_FALLBACK_NOTE_PREFIX}${input.threadId}:${input.runId}${
-        attempt <= 1 ? "" : `:attempt-${attempt}`
-      }`
-    : commandIdentity(input.threadId, input.runId, input.decision.to, attempt);
+  const group = note
+    ? `${MODEL_FALLBACK_NOTE_PREFIX}${input.threadId}:${input.runId}`
+    : commandIdentity(input.threadId, input.runId, input.decision.to);
+  const identity =
+    attempt <= 1
+      ? group
+      : `${note ? MODEL_FALLBACK_NOTE_RETRY_PREFIX : MODEL_FALLBACK_RETRY_PREFIX}${encodeURIComponent(group)}:attempt-${attempt}`;
   return {
     type: "message.dispatch",
     commandId: CommandId.make(identity),
@@ -330,12 +344,52 @@ export const nextModelFallbackCommand = Effect.fn("modelFallback.nextCommand")(f
     readonly runId: RunId;
     readonly decision: ModelFallbackDecision;
   },
-  receipt: (commandId: CommandId) => Effect.Effect<Option.Option<{ readonly status: string }>, E>,
+  receipt: (input: {
+    readonly threadId: ThreadId;
+    readonly retryGroup: CommandId;
+  }) => Effect.Effect<
+    Option.Option<{
+      readonly commandId: CommandId;
+      readonly status: "accepted" | "rejected";
+      readonly retryAttempt?: number | null;
+    }>,
+    E
+  >,
 ) {
-  for (let attempt = 1; ; attempt += 1) {
-    const command = modelFallbackCommand({ ...input, attempt });
-    if (command === null) return null;
-    const prior = yield* receipt(command.commandId).pipe(Effect.orElseSucceed(() => Option.none()));
-    if (Option.isNone(prior) || prior.value.status !== "rejected") return command;
+  const first = modelFallbackCommand(input);
+  if (first === null) return null;
+  const prior = yield* receipt({ threadId: input.threadId, retryGroup: first.commandId });
+  if (Option.isSome(prior) && prior.value.status === "accepted") {
+    return {
+      ...first,
+      commandId: prior.value.commandId,
+      messageId: MessageId.make(prior.value.commandId),
+    };
   }
+  const attempt = Option.isNone(prior)
+    ? 1
+    : (prior.value.retryAttempt ?? 1) + (prior.value.status === "rejected" ? 1 : 0);
+  return modelFallbackCommand({ ...input, attempt });
 });
+
+export function modelFallbackRetry(command: OrchestrationV2Command) {
+  if (command.type !== "message.dispatch" || command.modelFallbackOfRunId === undefined)
+    return undefined;
+  const note = isModelFallbackNoteCommand(command.commandId);
+  const group = note
+    ? `${MODEL_FALLBACK_NOTE_PREFIX}${command.threadId}:${command.modelFallbackOfRunId}`
+    : commandIdentity(command.threadId, command.modelFallbackOfRunId, command.modelSelection);
+  if (command.commandId === group) return { retryGroup: CommandId.make(group), retryAttempt: 1 };
+  const prefix = `${note ? MODEL_FALLBACK_NOTE_RETRY_PREFIX : MODEL_FALLBACK_RETRY_PREFIX}${encodeURIComponent(group)}:attempt-`;
+  const legacyPrefix = `${group}:attempt-`;
+  const suffix = command.commandId.startsWith(prefix)
+    ? command.commandId.slice(prefix.length)
+    : command.commandId.startsWith(legacyPrefix)
+      ? command.commandId.slice(legacyPrefix.length)
+      : null;
+  if (suffix === null || !/^[1-9]\d*$/.test(suffix) || Number(suffix) < 2) return undefined;
+  return {
+    retryGroup: CommandId.make(group),
+    retryAttempt: Number(suffix),
+  };
+}

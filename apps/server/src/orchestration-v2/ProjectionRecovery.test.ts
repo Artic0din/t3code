@@ -4,6 +4,7 @@ import {
   ContextTransferId,
   EventId,
   MessageId,
+  type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
@@ -13,6 +14,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   RunId,
+  RunAttemptId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
@@ -20,6 +22,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -112,6 +115,128 @@ const createRun = Effect.fn(function* (
   });
   return runId;
 });
+
+it.effect.each(
+  [
+    { name: "model", selection: { ...modelSelection, model: "o3" }, eligible: false },
+    {
+      name: "provider",
+      selection: { ...modelSelection, instanceId: ProviderInstanceId.make("other-codex") },
+      eligible: false,
+    },
+    {
+      name: "option value",
+      selection: {
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "fastMode", value: true },
+        ],
+      },
+      eligible: false,
+    },
+    { name: "removed options", selection: modelSelection, eligible: false },
+    {
+      name: "option order",
+      selection: {
+        ...modelSelection,
+        options: [
+          { id: "fastMode", value: true },
+          { id: "reasoningEffort", value: "low" },
+        ],
+      },
+      eligible: true,
+    },
+  ].flatMap((testCase) =>
+    (["sqlite", "memory"] as const).map((storage) => ({ ...testCase, storage })),
+  ),
+)(
+  "filters superseded main-thread fallback candidates after changing $name in $storage",
+  ({ name, selection, eligible, storage }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const original: ModelSelection = {
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "low" },
+          { id: "fastMode", value: true },
+        ],
+      };
+      const threadId = yield* createThread(`fallback-selection-${name}`, {
+        modelSelection: original,
+      });
+      const rootNodeId = NodeId.make(`node:${threadId}:root`);
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+      const runId = yield* createRun(threadId, "failed", {
+        modelSelection: original,
+        rootNodeId,
+        providerThreadId,
+        activeAttemptId: RunAttemptId.make(`attempt:${threadId}`),
+        completedAt: now,
+      });
+      yield* projections.apply({
+        id: EventId.make(`event:${threadId}:quota`),
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`item:${threadId}:quota`),
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          type: "error",
+          status: "failed",
+          title: "Usage limit reached",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          failure: {
+            class: "usage_limit",
+            code: "usageLimitExceeded",
+            message: "Weekly quota exhausted.",
+            retryable: false,
+          },
+        },
+      });
+      const candidates = projections.getLimitRecoveryCandidates({
+        now,
+        autoResume: false,
+        snooze: false,
+        fallback: true,
+      });
+      assert.deepEqual(
+        (yield* candidates).map((candidate) => candidate.id),
+        [threadId],
+      );
+      yield* projections.apply({
+        id: EventId.make(`event:${threadId}:manual-selection`),
+        type: "thread.model-selection-updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...(yield* projections.getThread(threadId)),
+          modelSelection: selection,
+          providerInstanceId: selection.instanceId,
+          updatedAt: now,
+        },
+      });
+      assert.deepEqual(
+        (yield* candidates).map((candidate) => candidate.id),
+        eligible ? [threadId] : [],
+      );
+      assert.deepEqual(
+        (yield* projections.getThreadProjection(threadId)).runs.map((run) => run.id),
+        [runId],
+      );
+    }).pipe(Effect.provide(storage === "sqlite" ? layerTest : ProjectionStore.layerMemory)),
+);
 
 it.effect("selects unfinished recovery work without reading settled thread histories", () =>
   Effect.gen(function* () {
@@ -210,8 +335,42 @@ it.effect("selects unfinished recovery work without reading settled thread histo
       new Set(yield* projections.getRecoveryThreadIds("runtime")),
       new Set([queued, archived, blocked, background, outboxOnly, requestOnly]),
     );
-    assert.deepEqual(yield* projections.getRecoveryThreadIds("delegated-completions"), [delivery]);
-    assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), []);
+    for (const [kind, expected, index] of [
+      [
+        "delegated-completions",
+        [delivery],
+        "orchestration_v2_projection_runs_delivery_recovery_idx",
+      ],
+      ["subagent-results", [], "orchestration_v2_projection_subagents_result_recovery_idx"],
+    ] as const) {
+      let query: string | undefined;
+      const tracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            end(endTime, exit);
+            const statement = span.attributes.get("db.query.text");
+            if (
+              typeof statement === "string" &&
+              statement.includes("SELECT thread_id FROM orchestration_v2_projection_threads")
+            )
+              query = statement;
+          };
+          return span;
+        },
+      });
+      assert.deepEqual(
+        yield* projections.getRecoveryThreadIds(kind).pipe(Effect.withTracer(tracer)),
+        expected,
+      );
+      assert.isDefined(query);
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(`EXPLAIN QUERY PLAN ${query}`);
+      assert.isTrue(
+        plan.some((row) => row.detail.includes(index)),
+        plan.map((row) => row.detail).join("\n"),
+      );
+    }
     const recoveryState = yield* projections.getRuntimeRecoveryProjection(queued);
     assert.deepEqual(
       recoveryState.runs.map((run) => run.id),
@@ -239,11 +398,39 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
         deletedAt: name === "deleted" ? now : null,
       });
       yield* createRun(child, name === "running" ? "running" : "completed");
+      yield* projections.apply({
+        id: EventId.make(`event:recovery:subagent-${name}`),
+        type: "subagent.updated",
+        threadId: parent,
+        occurredAt: now,
+        payload: {
+          id: NodeId.make(`node:${name}`),
+          threadId: parent,
+          runId: null,
+          parentNodeId: NodeId.make("node:recovery:parent"),
+          origin: "app_owned",
+          createdBy: "agent",
+          driver,
+          providerInstanceId,
+          providerThreadId: null,
+          childThreadId: child,
+          nativeTaskRef: null,
+          prompt: "Complete the delegated task.",
+          title: null,
+          model: null,
+          completionWake: "settled_only",
+          status: "running",
+          result: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        },
+      });
       children.push(child);
     }
     assert.deepEqual(
       new Set(yield* projections.getRecoveryThreadIds("subagent-results")),
-      new Set(children.slice(0, 2)),
+      new Set(children.slice(0, 3)),
     );
     const completed = children[0]!;
     const transferId = ContextTransferId.make("transfer:recovery:subagent-result");
@@ -272,8 +459,13 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
       },
     });
     const archivedChild = children[1];
+    const deletedChild = children[2];
     assert.isDefined(archivedChild);
-    assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), [archivedChild]);
+    assert.isDefined(deletedChild);
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), [
+      archivedChild,
+      deletedChild,
+    ]);
     assert.deepEqual(yield* projections.getUnreadableThreadIds(), []);
     yield* sql`
       UPDATE orchestration_v2_projection_context_transfers SET payload_json = '{}'

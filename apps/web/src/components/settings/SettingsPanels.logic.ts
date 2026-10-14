@@ -1,6 +1,7 @@
 import type {
   BackgroundActivityProfile,
   BackgroundActivitySettings,
+  ModelSelection,
   ProviderDriverKind,
   ProviderInstanceConfig,
   PreviewViewportSetting,
@@ -10,6 +11,9 @@ import type {
   UnifiedSettings,
 } from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import { ModelSelection as ModelSelectionSchema } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import {
   getBackgroundActivityBaseProfile,
   normalizeBackgroundActivitySettings,
@@ -18,6 +22,18 @@ import {
 } from "@t3tools/shared/backgroundActivitySettings";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
+
+const decodeModelFallbackList = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(ModelSelectionSchema)),
+);
+
+export function formatModelFallbackList(models: readonly ModelSelection[]): string {
+  return JSON.stringify(models, null, 2);
+}
+
+export function parseModelFallbackList(value: string): readonly ModelSelection[] | null {
+  return Option.getOrNull(decodeModelFallbackList(value));
+}
 
 export function isProjectGroupingEnabled(mode: SidebarProjectGroupingMode): boolean {
   return mode !== "separate";

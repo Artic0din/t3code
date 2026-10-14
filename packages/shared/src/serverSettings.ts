@@ -288,7 +288,6 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
-    // The model list replaces; deepMerge would keep entries the client removed.
     modelFallback: modelFallbackPatch,
     ...patchForMerge
   } = patch;

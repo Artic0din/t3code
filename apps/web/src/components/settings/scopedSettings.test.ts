@@ -136,6 +136,45 @@ describe("environment-local fallback lists", () => {
       },
     ]);
   });
+
+  it("disables enabled environments with different lists without changing either list", () => {
+    const selected = [
+      environment("Laptop", { settings: { modelFallback: { enabled: true, models } } }),
+      environment("Server", { settings: { modelFallback: { enabled: true, models: [] } } }),
+    ];
+    const targets = resolveScopedSettingsTargets(all, selected);
+    const mixed = scopedSettingsAreMixed(
+      targets,
+      ["modelFallback"],
+      (settings) => settings.modelFallback.enabled,
+    );
+    expect(mixed).toBe(false);
+    const checked = mixed ? false : targets[0]!.settings.modelFallback.enabled;
+    const plan = planScopedSettingsPatch(all, selected, { modelFallback: { enabled: !checked } });
+    expect(plan.serverWrites).toHaveLength(2);
+    for (const write of plan.serverWrites) {
+      const previous = selected.find(
+        (candidate) => candidate.environmentId === write.environmentId,
+      )!.serverConfig!.settings;
+      const updated = applyServerSettingsPatch(previous, write.patch);
+      expect(updated.modelFallback.enabled).toBe(false);
+      expect(updated.modelFallback.models).toEqual(previous.modelFallback.models);
+    }
+    const disagreeing = targets.map((target, index) => ({
+      ...target,
+      settings: {
+        ...target.settings,
+        modelFallback: { ...target.settings.modelFallback, enabled: index === 0 },
+      },
+    }));
+    expect(
+      scopedSettingsAreMixed(
+        disagreeing,
+        ["modelFallback"],
+        (settings) => settings.modelFallback.enabled,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("scoped settings targets", () => {

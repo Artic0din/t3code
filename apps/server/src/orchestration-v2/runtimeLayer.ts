@@ -337,16 +337,7 @@ export const layerProduction = Layer.mergeAll(
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
   ),
-  ModelFallbackWorker.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        ProjectionStore.layer,
-        layerThreadManagementProvided,
-        layerProviderSwitchServiceProvided,
-        layerCommandReceiptStoreProvided,
-      ),
-    ),
-  ),
+  ModelFallbackWorker.layer.pipe(Layer.provide(layerOrchestratorProvided)),
   layerProviderContinuationWorkerProvided,
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),

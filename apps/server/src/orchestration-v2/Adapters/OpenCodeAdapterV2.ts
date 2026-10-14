@@ -378,6 +378,7 @@ interface OpenCodeSubagentContext {
   childProviderThreadId: OrchestrationV2ProviderThread["id"] | null;
   model: string | null;
   result: string | null;
+  failure: OrchestrationV2ProviderFailure | undefined;
 }
 
 interface OpenCodeThreadState {
@@ -1349,6 +1350,7 @@ export function makeOpenCodeAdapterV2(
               childProviderThreadId: null,
               model: null,
               result: null,
+              failure: undefined,
             };
             subagentsByNativeItemId.set(part.id, context);
           }
@@ -1460,6 +1462,14 @@ export function makeOpenCodeAdapterV2(
                 : status.item === "pending"
                   ? "pending"
                   : "running";
+          if (part.state.status === "error") {
+            context.failure ??= makeProviderFailure({
+              class: "unknown",
+              message: part.state.error,
+            });
+          } else if (part.state.status === "completed") {
+            context.failure = undefined;
+          }
           const subagent: OrchestrationV2Subagent = {
             id: nodeId,
             threadId: turn.threadId,
@@ -1476,6 +1486,7 @@ export function makeOpenCodeAdapterV2(
             title,
             model: context.model,
             status: subagentStatus,
+            failure: subagentStatus === "failed" ? context.failure : undefined,
             result: context.result,
             startedAt: context.startedAt,
             completedAt,
@@ -2083,6 +2094,9 @@ export function makeOpenCodeAdapterV2(
           });
           state.activeTurn = null;
           if (!turn.isRoot) {
+            if (state.parentSubagent !== null && status !== "failed") {
+              state.parentSubagent.failure = undefined;
+            }
             yield* emitProviderEvent({
               type: "node.updated",
               driver: OPENCODE_PROVIDER,
@@ -2226,6 +2240,7 @@ export function makeOpenCodeAdapterV2(
           message: Extract<OpenCodeMessage, { role: "user" }>,
         ) {
           if (state.appThread === null || state.parentSubagent === null) return null;
+          state.parentSubagent.failure = undefined;
           const now = yield* DateTime.now;
           const startedAt = dateTimeFromEpoch(message.time.created, now);
           const rootNodeId = idAllocator.derive.nodeFromProviderItem({
@@ -2690,6 +2705,20 @@ export function makeOpenCodeAdapterV2(
                 yield* updateProviderSession("error", message);
               }
               for (const state of states) {
+                if (
+                  state.parentSubagent !== null &&
+                  event.properties.sessionID === state.nativeSessionId
+                ) {
+                  state.parentSubagent.failure =
+                    isMessageAbortedError(event) || state.activeTurn?.interrupted === true
+                      ? undefined
+                      : makeProviderFailure({
+                          message,
+                          code: event.properties.error?.name ?? null,
+                          class:
+                            event.properties.error === undefined ? "unknown" : "provider_error",
+                        });
+                }
                 if (state.activeTurn !== null) {
                   yield* finalizeTurn(
                     state,

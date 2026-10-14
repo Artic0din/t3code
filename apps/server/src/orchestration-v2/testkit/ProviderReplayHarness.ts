@@ -1,7 +1,11 @@
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/contracts";
+import type {
+  ModelFallbackSettings,
+  ProviderDriverKind,
+  ProviderReplayTranscript,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -231,6 +235,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly replayGate?: ProviderReplayGate;
+    readonly modelFallback?: ModelFallbackSettings;
   } = {},
 ): Layer.Layer<
   Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2,
@@ -259,6 +264,7 @@ export function layerWithRegistry<Error>(
     // as server startup does after a crash or restart.
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    readonly modelFallback?: ModelFallbackSettings;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -285,6 +291,7 @@ export function layerWithRegistry<Error>(
   const layerProvidedRegistry = registryLayer.pipe(Layer.provide(layerContinuationRequests));
   const layerServerSettings = ServerSettings.layerTest({
     responseStreamingMode: "turn",
+    ...(options.modelFallback === undefined ? {} : { modelFallback: options.modelFallback }),
     ...(options.continueThreadsAfterServerUpdate === undefined
       ? {}
       : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
@@ -310,6 +317,7 @@ export function layerWithRegistry<Error>(
         layerEventSinkProvided,
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        layerServerSettings,
       ),
     ),
   );

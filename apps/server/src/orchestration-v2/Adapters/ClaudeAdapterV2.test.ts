@@ -5855,6 +5855,261 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     return { childThreadId, toolThreadIds, assistantTexts };
   };
 
+  it.effect.each(
+    (["tool_result", "task_notification"] as const).flatMap((source) =>
+      (
+        [
+          {
+            name: "failed limit",
+            errors: ["rate_limit"],
+            terminal: "failed",
+            status: "failed",
+            failureClass: "usage_limit",
+            code: "rate_limit",
+          },
+          {
+            name: "completed wrapper with an unrecovered limit",
+            errors: ["rate_limit"],
+            terminal: "completed",
+            status: "failed",
+            failureClass: "usage_limit",
+            code: "rate_limit",
+          },
+          {
+            name: "authentication failure",
+            errors: ["authentication_failed"],
+            terminal: "failed",
+            status: "failed",
+            failureClass: "provider_error",
+            code: "authentication_failed",
+          },
+          {
+            name: "opaque failure mentioning limits",
+            errors: [],
+            terminal: "failed",
+            status: "failed",
+            failureClass: "unknown",
+            code: null,
+          },
+          {
+            name: "successful answer mentioning limits",
+            errors: [],
+            terminal: "completed",
+            status: "completed",
+            failureClass: null,
+            code: null,
+          },
+          {
+            name: "recovered limit",
+            errors: ["rate_limit", undefined],
+            terminal: "completed",
+            status: "completed",
+            failureClass: null,
+            code: null,
+          },
+          {
+            name: "newer provider error",
+            errors: ["rate_limit", "server_error"],
+            terminal: "failed",
+            status: "failed",
+            failureClass: "provider_error",
+            code: "server_error",
+          },
+        ] as const
+      ).map((scenario) => ({ ...scenario, source })),
+    ),
+  )("projects $name through $source without changing the parent outcome", (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const taskId = "task-native-child-failure";
+        const toolUseId = "toolu-native-child-failure";
+        const summary = "Implemented usage limit reporting. Bearer native-child-placeholder";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-native-child-failure"),
+            text: "Audit the recent commits.",
+            attachments: [],
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "assistant",
+            parent_tool_use_id: null,
+            uuid: "native-child-launch",
+            session_id: WAKE_NATIVE_SESSION,
+            message: {
+              id: "msg-native-child-launch",
+              role: "assistant",
+              model: "claude-sonnet-4-6",
+              content: [{ type: "tool_use", id: toolUseId, name: "Agent", input: {} }],
+            },
+          }),
+        );
+        for (const [index, error] of scenario.errors.entries()) {
+          yield* harness.offerAndWait(
+            makeAssistantErrorFrame({
+              uuid: `native-child-error-${index}`,
+              error,
+              parentToolUseId: toolUseId,
+            }),
+          );
+          if (index === 0) {
+            yield* harness.offerAndWait(
+              makeSubagentTaskStartedFrame({ taskId, toolUseId, uuid: "native-child-started" }),
+            );
+          }
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_progress",
+              task_id: taskId,
+              description: "Checking the diff",
+              uuid: `native-child-progress-${index}`,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+        }
+        if (scenario.errors.length === 0) {
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({ taskId, toolUseId, uuid: "native-child-started" }),
+          );
+          for (const frame of makeSubagentAssistantFrames({
+            parentToolUseId: toolUseId,
+            uuid: "native-child-success",
+            text: "Implemented usage limit reporting.",
+          })) {
+            yield* harness.offerAndWait(frame);
+          }
+        }
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({
+            taskId: "task-native-sibling",
+            toolUseId: "toolu-native-sibling",
+            uuid: "native-sibling-started",
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeAssistantErrorFrame({
+            uuid: "native-sibling-success",
+            error: undefined,
+            parentToolUseId: "toolu-native-sibling",
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({
+            uuid: "native-parent-success",
+            text: "Parent remains healthy.",
+          }),
+        );
+        const terminalFrame =
+          scenario.source === "task_notification"
+            ? claudeSdkFrame({
+                ...makeSubagentNotificationFrame({
+                  taskId,
+                  toolUseId,
+                  summary,
+                  uuid: "native-child-terminal",
+                }),
+                status: scenario.terminal,
+              })
+            : claudeSdkFrame({
+                type: "user",
+                parent_tool_use_id: null,
+                uuid: "native-child-terminal",
+                session_id: WAKE_NATIVE_SESSION,
+                message: {
+                  role: "user",
+                  content: [
+                    {
+                      type: "tool_result",
+                      tool_use_id: toolUseId,
+                      is_error: scenario.terminal === "failed",
+                      content: summary,
+                    },
+                  ],
+                },
+              });
+        yield* harness.offerAndWait(terminalFrame);
+        yield* harness.offerAndWait(terminalFrame);
+        yield* harness.offerAndWait(
+          makeSubagentNotificationFrame({
+            taskId: "task-native-sibling",
+            toolUseId: "toolu-native-sibling",
+            summary: "Sibling finished.",
+            uuid: "native-sibling-terminal",
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "native-parent-terminal", result: "Parent finished." }),
+        );
+        const parentTerminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(parentTerminal.status, "completed");
+        const task = harness.events
+          .flatMap((event) =>
+            event.type === "subagent.updated" && event.subagent.nativeTaskRef?.nativeId === taskId
+              ? [event.subagent]
+              : [],
+          )
+          .at(-1)!;
+        assert.equal(task.origin, "provider_native");
+        assert.deepEqual(
+          task.failure,
+          scenario.failureClass === null
+            ? undefined
+            : {
+                class: scenario.failureClass,
+                code: scenario.code,
+                message: "Implemented usage limit reporting. Bearer [REDACTED]",
+                retryable: null,
+              },
+        );
+        const nativeNode = harness.events
+          .flatMap((event) =>
+            event.type === "node.updated" && event.node.id === task.id ? [event.node] : [],
+          )
+          .at(-1)!;
+        const childNode = harness.events
+          .flatMap((event) =>
+            event.type === "node.updated" && event.node.threadId === task.childThreadId
+              ? [event.node]
+              : [],
+          )
+          .at(-1)!;
+        const item = harness.events
+          .flatMap((event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.subagentId === task.id
+              ? [event.turnItem]
+              : [],
+          )
+          .at(-1)!;
+        assert.deepEqual(
+          [task.status, nativeNode.status, childNode.status, item.status],
+          [scenario.status, scenario.status, scenario.status, scenario.status],
+        );
+        assert.equal(nativeNode.countsForRun, false);
+        assert.equal(childNode.countsForRun, false);
+        assert.equal(childNode.runId, null);
+        const sibling = harness.events
+          .flatMap((event) =>
+            event.type === "subagent.updated" &&
+            event.subagent.nativeTaskRef?.nativeId === "task-native-sibling"
+              ? [event.subagent]
+              : [],
+          )
+          .at(-1)!;
+        assert.equal(sibling.status, "completed");
+        assert.isUndefined(sibling.failure);
+        assert.lengthOf(harness.offeredMessages, 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("a subagent re-run in the foreground does not join a later wake", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -6765,254 +7020,274 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("re-opens a resumed subagent whose task_started races past settle", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const SUBAGENT_TASK_ID = "task-resume-postsettle";
-        const SUBAGENT_TOOL_USE_ID = "toolu-resume-postsettle";
-        const RESUME_TOOL_USE_ID = "toolu-resume-postsettle-sendmessage";
-        const FIRST_SUMMARY = "Answered early.";
-        const SECOND_SUMMARY = "RESUME_SETTLE_DONE";
-        const subagentTaskStarted = claudeSdkFrame({
-          type: "system",
-          subtype: "task_started",
-          task_id: SUBAGENT_TASK_ID,
-          tool_use_id: SUBAGENT_TOOL_USE_ID,
-          description: "Sleep then echo done token",
-          subagent_type: "general-purpose",
-          task_type: "local_agent",
-          prompt: "Run the shell command, then return exactly RESUME_SETTLE_DONE.",
-          uuid: "00000000-0000-4000-8000-000000000501",
-          session_id: WAKE_NATIVE_SESSION,
-        });
-        const firstNotification = claudeSdkFrame({
-          type: "system",
-          subtype: "task_notification",
-          task_id: SUBAGENT_TASK_ID,
-          tool_use_id: SUBAGENT_TOOL_USE_ID,
-          status: "completed",
-          output_file: "/tmp/task-resume-postsettle.output",
-          summary: FIRST_SUMMARY,
-          uuid: "00000000-0000-4000-8000-000000000502",
-          session_id: WAKE_NATIVE_SESSION,
-        });
-        const resumeTaskStarted = claudeSdkFrame({
-          type: "system",
-          subtype: "task_started",
-          task_id: SUBAGENT_TASK_ID,
-          tool_use_id: RESUME_TOOL_USE_ID,
-          description: "Sleep then echo done token",
-          is_backgrounded: true,
-          task_type: "local_agent",
-          uuid: "00000000-0000-4000-8000-000000000505",
-          session_id: WAKE_NATIVE_SESSION,
-        });
-        // As recorded in claude_background_subagent_lifecycle: the resumed
-        // run's notification carries the SendMessage call's tool_use_id.
-        const secondNotification = claudeSdkFrame({
-          type: "system",
-          subtype: "task_notification",
-          task_id: SUBAGENT_TASK_ID,
-          tool_use_id: RESUME_TOOL_USE_ID,
-          status: "completed",
-          output_file: "/tmp/task-resume-postsettle.output",
-          summary: SECOND_SUMMARY,
-          uuid: "00000000-0000-4000-8000-000000000506",
-          session_id: WAKE_NATIVE_SESSION,
-        });
+  it.effect.each(["completed", "failed"] as const)(
+    "re-opens a %s subagent whose task_started races past settle",
+    (firstStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const SUBAGENT_TASK_ID = "task-resume-postsettle";
+          const SUBAGENT_TOOL_USE_ID = "toolu-resume-postsettle";
+          const RESUME_TOOL_USE_ID = "toolu-resume-postsettle-sendmessage";
+          const FIRST_SUMMARY = "Answered early.";
+          const SECOND_SUMMARY = "RESUME_SETTLE_DONE";
+          const subagentTaskStarted = claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: SUBAGENT_TOOL_USE_ID,
+            description: "Sleep then echo done token",
+            subagent_type: "general-purpose",
+            task_type: "local_agent",
+            prompt: "Run the shell command, then return exactly RESUME_SETTLE_DONE.",
+            uuid: "00000000-0000-4000-8000-000000000501",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const firstNotification = claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: SUBAGENT_TOOL_USE_ID,
+            status: firstStatus,
+            output_file: "/tmp/task-resume-postsettle.output",
+            summary: FIRST_SUMMARY,
+            uuid: "00000000-0000-4000-8000-000000000502",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const resumeTaskStarted = claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: RESUME_TOOL_USE_ID,
+            description: "Sleep then echo done token",
+            is_backgrounded: true,
+            task_type: "local_agent",
+            uuid: "00000000-0000-4000-8000-000000000505",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          // As recorded in claude_background_subagent_lifecycle: the resumed
+          // run's notification carries the SendMessage call's tool_use_id.
+          const secondNotification = claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: RESUME_TOOL_USE_ID,
+            status: "completed",
+            output_file: "/tmp/task-resume-postsettle.output",
+            summary: SECOND_SUMMARY,
+            uuid: "00000000-0000-4000-8000-000000000506",
+            session_id: WAKE_NATIVE_SESSION,
+          });
 
-        const harness = yield* makeWakeHarness;
-        const now = yield* DateTime.now;
-        const subagentEvents = () =>
-          harness.events.filter(
-            (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
-              event.type === "subagent.updated",
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const subagentEvents = () =>
+            harness.events.filter(
+              (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+                event.type === "subagent.updated",
+            );
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-9a"),
+              text: "Spawn a background subagent and stop.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, subagentTaskStarted);
+          yield* awaitUntil(() => subagentEvents().length >= 1, "subagent node created");
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000503",
+              result: "Spawned the subagent in the background.",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+          if (firstStatus === "failed") {
+            yield* harness.offerAndWait(
+              makeAssistantErrorFrame({
+                uuid: "resume-postsettle-child-limit",
+                error: "rate_limit",
+                parentToolUseId: SUBAGENT_TOOL_USE_ID,
+              }),
+            );
+          }
+          yield* Queue.offer(harness.sdkMessages, firstNotification);
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "first continuation request",
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000504",
+              result: "The subagent answered early.",
+            }),
+          );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-9b"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+          assert.equal(subagentEvents().at(-1)?.subagent.status, firstStatus);
+          assert.equal(
+            subagentEvents().at(-1)?.subagent.failure?.class,
+            firstStatus === "failed" ? "usage_limit" : undefined,
+          );
+          assert.equal(subagentEvents().at(-1)?.subagent.result, FIRST_SUMMARY);
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+
+          // The resume task_started races past settle: no turn is active, so it
+          // must re-open the session registry entry (pinning idle again) and
+          // buffer for replay. Its notification then counts as wake evidence
+          // and carries the new summary as the continuation detail. The resume
+          // rides on a SendMessage tool call whose frames race past settle too;
+          // on drain replay the SendMessage tool_result is a delivery ACK and
+          // must not terminalize the re-opened subagent.
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: "msg_resume_postsettle_sendmessage",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: RESUME_TOOL_USE_ID,
+                    name: "SendMessage",
+                    input: {
+                      to: SUBAGENT_TASK_ID,
+                      summary: "Resume the subagent",
+                      message: "Continue and return the token.",
+                    },
+                  },
+                ],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000508",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, resumeTaskStarted);
+          // Shaped like the recorded SendMessage ACK in
+          // claude_background_subagent_lifecycle: the text block is the JSON of
+          // tool_use_result, and "message" names the agent's short id.
+          const resumeAck = {
+            success: true,
+            message: `Resuming agent ${SUBAGENT_TASK_ID.slice(0, 7)}`,
+            resumedAgentId: SUBAGENT_TASK_ID,
+            pin: { id: SUBAGENT_TASK_ID, name: SUBAGENT_TASK_ID, ref: "42ab31" },
+          };
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "user",
+              message: {
+                role: "user",
+                content: [
+                  {
+                    tool_use_id: RESUME_TOOL_USE_ID,
+                    type: "tool_result",
+                    content: [
+                      {
+                        type: "text",
+                        text: encodeJsonString(resumeAck),
+                      },
+                    ],
+                  },
+                ],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000509",
+              session_id: WAKE_NATIVE_SESSION,
+              tool_use_result: resumeAck,
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, secondNotification);
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 2,
+            "second continuation request",
+          );
+          assert.equal(harness.continuationRequests[1]?.detail, SECOND_SUMMARY);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000507",
+              result: "The subagent finished with RESUME_SETTLE_DONE.",
+            }),
+          );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-9c"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 3,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => harness.terminalEvents().length === 3,
+            "resume continuation terminal",
           );
 
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now,
-            attemptId: RunAttemptId.make("attempt-claude-wake-9a"),
-            text: "Spawn a background subagent and stop.",
-            attachments: [],
-          }),
-        );
-        yield* Queue.offer(harness.sdkMessages, subagentTaskStarted);
-        yield* awaitUntil(() => subagentEvents().length >= 1, "subagent node created");
-        yield* Queue.offer(
-          harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000503",
-            result: "Spawned the subagent in the background.",
-          }),
-        );
-        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
-
-        yield* Queue.offer(harness.sdkMessages, firstNotification);
-        yield* awaitUntil(
-          () => harness.continuationRequests.length === 1,
-          "first continuation request",
-        );
-        yield* Queue.offer(
-          harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000504",
-            result: "The subagent answered early.",
-          }),
-        );
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now,
-            attemptId: RunAttemptId.make("attempt-claude-wake-9b"),
-            text: "Background task completed.",
-            attachments: [],
-            providerTurnOrdinal: 2,
-            messageCreatedBy: "agent",
-            messageCreationSource: "provider",
-          }),
-        );
-        yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
-        assert.equal(subagentEvents().at(-1)?.subagent.status, "completed");
-        assert.equal(subagentEvents().at(-1)?.subagent.result, FIRST_SUMMARY);
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
-
-        // The resume task_started races past settle: no turn is active, so it
-        // must re-open the session registry entry (pinning idle again) and
-        // buffer for replay. Its notification then counts as wake evidence
-        // and carries the new summary as the continuation detail. The resume
-        // rides on a SendMessage tool call whose frames race past settle too;
-        // on drain replay the SendMessage tool_result is a delivery ACK and
-        // must not terminalize the re-opened subagent.
-        yield* Queue.offer(
-          harness.sdkMessages,
-          claudeSdkFrame({
-            type: "assistant",
-            message: {
-              model: "claude-sonnet-4-6",
-              id: "msg_resume_postsettle_sendmessage",
-              type: "message",
-              role: "assistant",
-              content: [
-                {
-                  type: "tool_use",
-                  id: RESUME_TOOL_USE_ID,
-                  name: "SendMessage",
-                  input: {
-                    to: SUBAGENT_TASK_ID,
-                    summary: "Resume the subagent",
-                    message: "Continue and return the token.",
-                  },
-                },
-              ],
-            },
-            parent_tool_use_id: null,
-            uuid: "00000000-0000-4000-8000-000000000508",
-            session_id: WAKE_NATIVE_SESSION,
-          }),
-        );
-        yield* Queue.offer(harness.sdkMessages, resumeTaskStarted);
-        // Shaped like the recorded SendMessage ACK in
-        // claude_background_subagent_lifecycle: the text block is the JSON of
-        // tool_use_result, and "message" names the agent's short id.
-        const resumeAck = {
-          success: true,
-          message: `Resuming agent ${SUBAGENT_TASK_ID.slice(0, 7)}`,
-          resumedAgentId: SUBAGENT_TASK_ID,
-          pin: { id: SUBAGENT_TASK_ID, name: SUBAGENT_TASK_ID, ref: "42ab31" },
-        };
-        yield* Queue.offer(
-          harness.sdkMessages,
-          claudeSdkFrame({
-            type: "user",
-            message: {
-              role: "user",
-              content: [
-                {
-                  tool_use_id: RESUME_TOOL_USE_ID,
-                  type: "tool_result",
-                  content: [
-                    {
-                      type: "text",
-                      text: encodeJsonString(resumeAck),
-                    },
-                  ],
-                },
-              ],
-            },
-            parent_tool_use_id: null,
-            uuid: "00000000-0000-4000-8000-000000000509",
-            session_id: WAKE_NATIVE_SESSION,
-            tool_use_result: resumeAck,
-          }),
-        );
-        yield* Queue.offer(harness.sdkMessages, secondNotification);
-        yield* awaitUntil(
-          () => harness.continuationRequests.length === 2,
-          "second continuation request",
-        );
-        assert.equal(harness.continuationRequests[1]?.detail, SECOND_SUMMARY);
-        assert.isTrue(yield* harness.hasPendingBackgroundWork);
-
-        yield* Queue.offer(
-          harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000507",
-            result: "The subagent finished with RESUME_SETTLE_DONE.",
-          }),
-        );
-        yield* harness.runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now,
-            attemptId: RunAttemptId.make("attempt-claude-wake-9c"),
-            text: "Background task completed.",
-            attachments: [],
-            providerTurnOrdinal: 3,
-            messageCreatedBy: "agent",
-            messageCreationSource: "provider",
-          }),
-        );
-        yield* awaitUntil(
-          () => harness.terminalEvents().length === 3,
-          "resume continuation terminal",
-        );
-
-        // The drained replay re-opens the row (running, stale result cleared)
-        // before the second notification terminalizes it again.
-        const statuses = subagentEvents().map((event) => event.subagent.status);
-        const firstCompleted = statuses.indexOf("completed");
-        const reopenedIndex = statuses.lastIndexOf("running");
-        assert.isAbove(reopenedIndex, firstCompleted);
-        assert.isNull(subagentEvents()[reopenedIndex]?.subagent.result);
-        // The drain-replayed reopen re-attributes the subagent to the
-        // continuation run performing the replay, so that run's ingestion
-        // fiber routes the resumed lifecycle and lingers past settle until
-        // the resumed task completes.
-        assert.equal(subagentEvents()[reopenedIndex]?.subagent.runId, "run-attempt-claude-wake-9c");
-        // The execution node re-opens too, even though the registry entry was
-        // already pre-opened by the wake buffer before the drain replay.
-        const nodeStatuses = harness.events
-          .filter(
-            (event): event is Extract<ProviderAdapterV2Event, { type: "node.updated" }> =>
-              event.type === "node.updated" &&
-              event.node.kind === "subagent" &&
-              event.node.nativeItemRef?.nativeId === SUBAGENT_TASK_ID,
-          )
-          .map((event) => event.node.status);
-        assert.isAbove(nodeStatuses.lastIndexOf("running"), nodeStatuses.indexOf("completed"));
-        const finalSubagent = subagentEvents().at(-1)?.subagent;
-        assert.equal(finalSubagent?.status, "completed");
-        assert.equal(finalSubagent?.result, SECOND_SUMMARY);
-        // The completion keeps the resuming run's attribution.
-        assert.equal(finalSubagent?.runId, "run-attempt-claude-wake-9c");
-        assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
-    ),
+          // The drained replay re-opens the row (running, stale result cleared)
+          // before the second notification terminalizes it again.
+          const statuses = subagentEvents().map((event) => event.subagent.status);
+          const firstTerminal = statuses.indexOf(firstStatus);
+          const reopenedIndex = statuses.lastIndexOf("running");
+          assert.isAbove(reopenedIndex, firstTerminal);
+          assert.isNull(subagentEvents()[reopenedIndex]?.subagent.result);
+          assert.isUndefined(subagentEvents()[reopenedIndex]?.subagent.failure);
+          // The drain-replayed reopen re-attributes the subagent to the
+          // continuation run performing the replay, so that run's ingestion
+          // fiber routes the resumed lifecycle and lingers past settle until
+          // the resumed task completes.
+          assert.equal(
+            subagentEvents()[reopenedIndex]?.subagent.runId,
+            "run-attempt-claude-wake-9c",
+          );
+          // The execution node re-opens too, even though the registry entry was
+          // already pre-opened by the wake buffer before the drain replay.
+          const nodeStatuses = harness.events
+            .filter(
+              (event): event is Extract<ProviderAdapterV2Event, { type: "node.updated" }> =>
+                event.type === "node.updated" &&
+                event.node.kind === "subagent" &&
+                event.node.nativeItemRef?.nativeId === SUBAGENT_TASK_ID,
+            )
+            .map((event) => event.node.status);
+          assert.isAbove(nodeStatuses.lastIndexOf("running"), nodeStatuses.indexOf(firstStatus));
+          const finalSubagent = subagentEvents().at(-1)?.subagent;
+          assert.equal(finalSubagent?.status, "completed");
+          assert.equal(finalSubagent?.result, SECOND_SUMMARY);
+          assert.isUndefined(finalSubagent?.failure);
+          // The completion keeps the resuming run's attribution.
+          assert.equal(finalSubagent?.runId, "run-attempt-claude-wake-9c");
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
   );
 
   it.effect("resets Waiting roster and wake eligibility when the CLI process is replaced", () =>

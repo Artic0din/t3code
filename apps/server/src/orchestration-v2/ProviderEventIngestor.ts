@@ -7,6 +7,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -27,6 +28,7 @@ import * as Schema from "effect/Schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -255,6 +257,7 @@ export const layer: Layer.Layer<
   | IdAllocator.IdAllocatorV2
   | ProjectionStore.ProjectionStoreV2
   | ThreadCommandExecutor.ThreadCommandExecutor
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(
   ProviderEventIngestorV2,
   Effect.gen(function* () {
@@ -262,6 +265,7 @@ export const layer: Layer.Layer<
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const analytics = yield* ProviderTurnAnalytics;
     const completedTurnAnalytics = new Set<string>();
 
@@ -288,8 +292,9 @@ export const layer: Layer.Layer<
             id: eventId,
             type: payloadInput.type,
             threadId,
-            runId: payloadInput.runId ?? input.runId,
-            nodeId: payloadInput.nodeId ?? input.nodeId,
+            runId: payloadInput.runId === null ? undefined : (payloadInput.runId ?? input.runId),
+            nodeId:
+              payloadInput.nodeId === null ? undefined : (payloadInput.nodeId ?? input.nodeId),
             driver: input.event.driver,
             providerInstanceId: input.providerInstanceId,
             rawEventId: input.rawEventId,
@@ -440,16 +445,109 @@ export const layer: Layer.Layer<
                 nodeId: input.event.node.id,
               }),
             ];
-          case "subagent.updated":
-            return [
+          case "subagent.updated": {
+            const task = input.event.subagent;
+            const events = [
               yield* makeDomainEvent(input, {
                 type: "subagent.updated",
-                threadId: input.event.subagent.threadId,
-                payload: input.event.subagent,
-                runId: input.event.subagent.runId,
-                nodeId: input.event.subagent.id,
+                threadId: task.threadId,
+                payload: task,
+                runId: task.runId,
+                nodeId: task.id,
               }),
             ];
+            if (
+              task.origin !== "provider_native" ||
+              task.status !== "failed" ||
+              task.failure === undefined
+            ) {
+              return events;
+            }
+            const occurredAt = task.completedAt ?? task.updatedAt;
+            const nativeItemId = `native-subagent:${task.id}:${task.runId ?? "runless"}:${task.startedAt === null ? "unstarted" : DateTime.toEpochMillis(task.startedAt)}`;
+            const errorThreadId = task.childThreadId ?? task.threadId;
+            const errorId = idAllocator.derive.turnItemFromProviderItem({
+              driver: task.driver,
+              nativeItemId: `${nativeItemId}:error`,
+            });
+            const existingError = yield* projections.getTurnItem({
+              threadId: errorThreadId,
+              itemId: errorId,
+            });
+            const error = {
+              id: errorId,
+              threadId: errorThreadId,
+              runId: task.childThreadId === null ? task.runId : null,
+              nodeId: task.childThreadId === null ? task.id : null,
+              providerThreadId: task.childThreadId === null ? task.providerThreadId : null,
+              providerTurnId: null,
+              nativeItemRef: task.nativeTaskRef,
+              parentItemId: null,
+              ordinal:
+                existingError?.ordinal ??
+                (yield* projections.getNextTurnItemOrdinal(errorThreadId)),
+              type: "error",
+              status: "failed",
+              title:
+                task.failure.class === "usage_limit" ? "Usage limit reached" : "Provider error",
+              failure: task.failure,
+              startedAt: existingError?.startedAt ?? occurredAt,
+              completedAt: occurredAt,
+              updatedAt: task.updatedAt,
+            } satisfies OrchestrationV2TurnItem;
+            events.push(
+              yield* makeDomainEvent(input, {
+                type: "turn-item.updated",
+                threadId: error.threadId,
+                runId: error.runId,
+                nodeId: error.nodeId,
+                payload: error,
+                occurredAt,
+              }),
+            );
+            if (
+              task.failure.class !== "usage_limit" ||
+              !(yield* serverSettings.getSettings).modelFallback.enabled
+            ) {
+              return events;
+            }
+            const noticeId = idAllocator.derive.turnItemFromProviderItem({
+              driver: task.driver,
+              nativeItemId: `${nativeItemId}:notice`,
+            });
+            const existingNotice = yield* projections.getTurnItem({
+              threadId: task.threadId,
+              itemId: noticeId,
+            });
+            const notice = {
+              ...error,
+              id: noticeId,
+              threadId: task.threadId,
+              runId: task.runId,
+              nodeId: task.id,
+              providerThreadId: task.providerThreadId,
+              ordinal:
+                existingNotice?.ordinal ??
+                (yield* projections.getNextTurnItemOrdinal(task.threadId)) +
+                  (existingError === null && errorThreadId === task.threadId ? 1 : 0),
+              type: "system_notice",
+              status: "completed",
+              title: "Delegated agent stopped",
+              message: `${task.title ?? "This delegated agent"}${task.model === null ? "" : ` (${task.model})`} hit a usage limit. T3 cannot safely continue this provider-owned agent on another model. Message the parent to delegate the remaining work again.`,
+              startedAt: existingNotice?.startedAt ?? occurredAt,
+            } satisfies OrchestrationV2TurnItem;
+            events.push(
+              yield* makeDomainEvent(input, {
+                type: "turn-item.updated",
+                threadId: notice.threadId,
+                runId: notice.runId,
+                nodeId: notice.nodeId,
+                payload: notice,
+                occurredAt,
+              }),
+            );
+            return events;
+          }
           case "message.updated":
             return [
               yield* makeDomainEvent(input, {

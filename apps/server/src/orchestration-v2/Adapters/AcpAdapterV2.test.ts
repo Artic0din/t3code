@@ -26,6 +26,7 @@ import {
   RunId,
   ThreadId,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2Subagent,
 } from "@t3tools/contracts";
 import { HostProcessIsExecutable, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -6129,152 +6130,172 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect("finishes a settled root's carryover subagent from its structured end", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const path = yield* Path.Path;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const selfInvocation = yield* resolveSelfInvocation();
-      const mockAgentPath = yield* path.fromFileUrl(
-        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
-      );
-      const protocolEvents = yield* Queue.bounded<EffectAcpProtocol.AcpProtocolLogEvent>(256);
-      const instanceId = ProviderInstanceId.make("acp-test");
-      const childSessionId = "019f44a6-4820-7402-925d-bc862ee711dd";
-      let finishSubagent: AcpAdapterV2ExtensionContext["finishSubagent"] | undefined;
-      const adapter = makeAcpAdapterV2({
-        crypto: yield* Crypto.Crypto,
-        instanceId,
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          enablePostSettleContinuation: true,
-          // The spawn tool reports a background subagent that keeps running.
-          extractSubagentUpdate: (toolCall) =>
-            toolCall.toolCallId !== "tool-call-generic-1"
-              ? undefined
-              : {
-                  nativeTaskId: "task-generic-1",
-                  prompt: "background subagent",
-                  title: "background subagent",
-                  model: null,
-                  status: "running",
-                  childSessionId,
-                  result: null,
-                },
-          registerExtensions: (context) =>
-            Effect.sync(() => {
-              finishSubagent = context.finishSubagent;
-            }),
-          makeRuntime: makeMockRuntime({
-            childProcessSpawner,
-            mockAgentPath,
-            environment: { T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS: "1" },
-            protocolEvents,
-          }),
-        },
-        fileSystem,
-        idAllocator,
-        serverConfig,
-        selfInvocation,
-        continuationRequests: { offer: () => Effect.void },
-      });
-      const threadId = ThreadId.make("thread-acp-carryover-subagent-finished");
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-      });
-      const modelSelection = { instanceId, model: "default" } as const;
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-acp-carryover-finished"),
-        modelSelection,
-        runtimePolicy,
-      });
-      if (runtime.hasPendingBackgroundWork === undefined) {
-        return yield* Effect.die("post-settle continuation must expose hasPendingBackgroundWork");
-      }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
-      const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
-      yield* runtime.events.pipe(
-        Stream.runForEach((event) => Queue.offer(events, event)),
-        Effect.forkScoped,
-      );
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy,
-      });
-      yield* runtime.startTurn(
-        makeTurnInput({
-          threadId,
-          providerThread,
+  it.effect.each([
+    { status: "failed", result: "tool crashed. token=child-secret" },
+    { status: "completed", result: "Usage limit documentation reviewed." },
+  ] as const)(
+    "finishes a settled root's carryover subagent from its structured $status end",
+    ({ status, result }) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const path = yield* Path.Path;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const protocolEvents = yield* Queue.bounded<EffectAcpProtocol.AcpProtocolLogEvent>(256);
+        const instanceId = ProviderInstanceId.make("acp-test");
+        const childSessionId = "019f44a6-4820-7402-925d-bc862ee711dd";
+        let finishSubagent: AcpAdapterV2ExtensionContext["finishSubagent"] | undefined;
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
           instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            enablePostSettleContinuation: true,
+            // The spawn tool reports a background subagent that keeps running.
+            extractSubagentUpdate: (toolCall) =>
+              toolCall.toolCallId !== "tool-call-generic-1"
+                ? undefined
+                : {
+                    nativeTaskId: "task-generic-1",
+                    prompt: "background subagent",
+                    title: "background subagent",
+                    model: null,
+                    status: "running",
+                    childSessionId,
+                    result: null,
+                  },
+            registerExtensions: (context) =>
+              Effect.sync(() => {
+                finishSubagent = context.finishSubagent;
+              }),
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner,
+              mockAgentPath,
+              environment: { T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS: "1" },
+              protocolEvents,
+            }),
+          },
+          fileSystem,
+          idAllocator,
+          serverConfig,
+          selfInvocation,
+          continuationRequests: { offer: () => Effect.void },
+        });
+        const threadId = ThreadId.make("thread-acp-carryover-subagent-finished");
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-carryover-finished"),
+          modelSelection,
           runtimePolicy,
-          now: yield* DateTime.now,
-        }),
-      );
-      const providerTurnId = idAllocator.derive.providerTurn({
-        driver: ACP_TEST_DRIVER,
-        nativeTurnId: acpScopedNativeId(instanceId, "mock-session-1:turn:1"),
-      });
-      let rootStatus: string | null = null;
-      while (rootStatus === null) {
-        const event = yield* Queue.take(events);
-        if (event.type === "turn.terminal" && event.providerTurnId === providerTurnId) {
-          rootStatus = event.status;
+        });
+        if (runtime.hasPendingBackgroundWork === undefined) {
+          return yield* Effect.die("post-settle continuation must expose hasPendingBackgroundWork");
         }
-      }
-      // The root completed with the subagent still running: it is carryover.
-      assert.equal(rootStatus, "completed");
-      assert.isTrue(yield* hasPendingBackgroundWork);
-      assert.isDefined(finishSubagent);
-      const subagentStatuses = Effect.gen(function* () {
-        // Adapter events reach this queue through the events stream fiber.
-        yield* Effect.yieldNow;
-        yield* Effect.yieldNow;
-        const statuses: Array<[string, string | null]> = [];
-        let polled = yield* Queue.poll(events);
-        while (Option.isSome(polled)) {
-          const event = polled.value;
-          if (event.type === "turn_item.updated" && event.turnItem.type === "subagent") {
-            statuses.push([event.turnItem.status, event.turnItem.result]);
+        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ACP_TEST_DRIVER,
+          nativeTurnId: acpScopedNativeId(instanceId, "mock-session-1:turn:1"),
+        });
+        let rootStatus: string | null = null;
+        while (rootStatus === null) {
+          const event = yield* Queue.take(events);
+          if (event.type === "turn.terminal" && event.providerTurnId === providerTurnId) {
+            rootStatus = event.status;
           }
-          polled = yield* Queue.poll(events);
         }
-        return statuses;
-      });
-      yield* subagentStatuses;
+        // The root completed with the subagent still running: it is carryover.
+        assert.equal(rootStatus, "completed");
+        assert.isTrue(yield* hasPendingBackgroundWork);
+        assert.isDefined(finishSubagent);
+        const subagentRows: Array<OrchestrationV2Subagent> = [];
+        const subagentStatuses = Effect.gen(function* () {
+          // Adapter events reach this queue through the events stream fiber.
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          const statuses: Array<[string, string | null]> = [];
+          let polled = yield* Queue.poll(events);
+          while (Option.isSome(polled)) {
+            const event = polled.value;
+            if (event.type === "subagent.updated") subagentRows.push(event.subagent);
+            if (event.type === "turn_item.updated" && event.turnItem.type === "subagent") {
+              statuses.push([event.turnItem.status, event.turnItem.result]);
+            }
+            polled = yield* Queue.poll(events);
+          }
+          return statuses;
+        });
+        yield* subagentStatuses;
 
-      // A nested subagent reports to its own parent session, not the root.
-      yield* finishSubagent!({
-        sessionId: "some-other-session",
-        childSessionId,
-        status: "completed",
-        result: "WRONG_PARENT",
-      });
-      assert.deepEqual(yield* subagentStatuses, [], "non-root notices must be dropped");
-      assert.isTrue(yield* hasPendingBackgroundWork);
+        // A nested subagent reports to its own parent session, not the root.
+        yield* finishSubagent!({
+          sessionId: "some-other-session",
+          childSessionId,
+          status: "completed",
+          result: "WRONG_PARENT",
+        });
+        assert.deepEqual(yield* subagentStatuses, [], "non-root notices must be dropped");
+        assert.isTrue(yield* hasPendingBackgroundWork);
 
-      yield* finishSubagent!({
-        sessionId: "mock-session-1",
-        childSessionId,
-        status: "failed",
-        result: "tool crashed",
-      });
-      assert.deepEqual(
-        yield* subagentStatuses,
-        [["failed", "tool crashed"]],
-        "the completed root still owns the run, so the carryover end projects at once",
-      );
-      assert.isFalse(
-        yield* hasPendingBackgroundWork,
-        "a finished carryover subagent stops pinning",
-      );
-    }).pipe(Effect.provide(layerTest), Effect.scoped),
+        yield* finishSubagent!({
+          sessionId: "mock-session-1",
+          childSessionId,
+          status,
+          result,
+        });
+        assert.deepEqual(
+          yield* subagentStatuses,
+          [[status, result]],
+          "the completed root still owns the run, so the carryover end projects at once",
+        );
+        const settled = subagentRows.at(-1);
+        assert.equal(settled?.status, status);
+        assert.equal(settled?.origin, "provider_native");
+        if (status === "failed") {
+          assert.deepEqual(settled?.failure, {
+            class: "unknown",
+            message: "tool crashed. token=[REDACTED]",
+            code: null,
+            retryable: null,
+          });
+        } else {
+          assert.isUndefined(settled?.failure);
+        }
+        assert.isFalse(
+          yield* hasPendingBackgroundWork,
+          "a finished carryover subagent stops pinning",
+        );
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("projects completed-root carryover eagerly and drain cannot resurrect it", () =>

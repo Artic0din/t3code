@@ -91,6 +91,53 @@ const noSpawn = ChildProcessSpawner.make(() =>
 const encodeCredentials = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(layerTest)("CodexDriver", (it) => {
+  it.effect(
+    "groups native quota ownership by the launched auth home rather than conversation storage",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const sharedHome = NodePath.join(config.stateDir, "quota-shared-home");
+        const shadowHome = NodePath.join(config.stateDir, "quota-shadow-home");
+        yield* fs.makeDirectory(sharedHome, { recursive: true });
+        const create = (
+          name: string,
+          homePath: string,
+          shadowHomePath = "",
+          inheritedHome?: string,
+        ) =>
+          CodexDriver.create({
+            instanceId: ProviderInstanceId.make(name),
+            displayName: name,
+            enabled: false,
+            environment:
+              inheritedHome === undefined
+                ? []
+                : [{ name: "CODEX_HOME", value: inheritedHome, sensitive: false }],
+            config: {
+              ...CodexDriver.defaultConfig(),
+              setupMode: "existing",
+              homePath,
+              shadowHomePath,
+            },
+          });
+        const direct = yield* create("quota-direct", sharedHome);
+        const alias = yield* create("quota-alias", sharedHome, "", shadowHome);
+        const shadow = yield* create("quota-shadow", sharedHome, shadowHome);
+        const inherited = yield* create("quota-inherited", "", "", sharedHome);
+        const relative = yield* create("quota-relative", "", "", "relative-home");
+        expect(direct.quotaOwnerKey).toBe(`codex:auth-home:${sharedHome}`);
+        expect(alias.quotaOwnerKey).toBe(direct.quotaOwnerKey);
+        expect(inherited.quotaOwnerKey).toBe(direct.quotaOwnerKey);
+        expect(shadow.quotaOwnerKey).toBe(`codex:auth-home:${shadowHome}`);
+        expect(shadow.continuationIdentity).toEqual(direct.continuationIdentity);
+        expect(relative.quotaOwnerKey).toBeUndefined();
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
+        Effect.scoped,
+      ),
+  );
+
   it.effect("disconnect refreshes a restored managed account while its auth flow is idle", () =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("restored-managed-account");

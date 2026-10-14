@@ -36,6 +36,7 @@ import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
+  OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
@@ -70,6 +71,8 @@ const decodeOrchestrationV2Checkpoint = Schema.decodeUnknownSync(OrchestrationV2
 const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
 const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
+const encodeOrchestrationV2SubagentJson = Schema.encodeSync(OrchestrationV2SubagentJson);
+const decodeOrchestrationV2SubagentJson = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
 const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
   OrchestrationV2ThreadProjection,
 );
@@ -841,6 +844,20 @@ describe("orchestration V2 contracts", () => {
     expect(subagent.origin).toBe("provider_native");
     expect(subagent.progress).toBe("Inspecting package metadata");
     expect(subagent.childThreadId).toBeNull();
+    expect(subagent.failure).toBeUndefined();
+    const failedSubagent = decodeOrchestrationV2Subagent({
+      ...subagent,
+      status: "failed",
+      failure: {
+        class: "usage_limit",
+        message: "Child quota exhausted.",
+        code: "usageLimitExceeded",
+        retryable: null,
+      },
+    });
+    const encoded = encodeOrchestrationV2SubagentJson(failedSubagent);
+    const restored = decodeOrchestrationV2SubagentJson(encoded);
+    expect(restored.failure).toEqual(failedSubagent.failure);
     expect(turnItem.type).toBe("subagent");
     if (turnItem.type !== "subagent") throw new Error("expected subagent item");
     expect(turnItem.progress).toBe("Inspecting package metadata");

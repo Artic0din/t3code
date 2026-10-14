@@ -55,12 +55,13 @@ import {
   type TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
-import { resolveProviderInstanceEnabled } from "@t3tools/contracts";
+import { isModelSelectionProviderEnabled } from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   decideFromProjection,
-  MODEL_FALLBACK_NOTE_PREFIX,
+  isModelFallbackNoteCommand,
   nextModelFallbackCommand,
+  modelFallbackRetry,
   presentedDelegatedStatus,
 } from "./modelFallback.ts";
 import {
@@ -276,14 +277,12 @@ export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
   /** Startup pass that settles delegated-task results and deliveries runs left behind. */
   readonly recoverDelegatedTasks: Effect.Effect<void>;
+  readonly recoverModelFallbacks: Effect.Effect<void>;
   /** Settles a delegated child whose restart continuation of `sourceRunId` declined or failed. */
   readonly recoverDelegatedTask: (threadId: ThreadId, sourceRunId: RunId) => Effect.Effect<void>;
-  /**
-   * Whether a delegated child's apparent result is not final yet: a restart
-   * continuation is pending, or the child is working again.
-   */
   readonly delegatedTaskResultPending: (
     childThreadId: ThreadId,
+    observedResultRunId?: RunId,
   ) => Effect.Effect<boolean, OrchestratorProjectionError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
@@ -354,6 +353,24 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
 
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
   return projection.runs.length + 1;
+}
+
+function modelFallbackSourceIsCurrent(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "turnItems" | "contextTransfers">,
+  run: OrchestrationV2Run,
+): boolean {
+  return (
+    modelSelectionsEqual(projection.thread.modelSelection, run.modelSelection) &&
+    !projection.turnItems.some(
+      (item) => item.runId === run.id && item.type === "run_interrupt_request",
+    ) &&
+    !projection.contextTransfers.some(
+      (transfer) =>
+        transfer.type === "subagent_result" &&
+        transfer.sourceThreadId === projection.thread.id &&
+        (transfer.sourcePoint.runId === undefined || transfer.sourcePoint.runId === run.id),
+    )
+  );
 }
 
 /**
@@ -4451,12 +4468,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-      // createdBy is overwritten to "user" on the WS path, so clients cannot forge this notice.
       if (
         command.createdBy === "system" &&
         command.creationSource === "server" &&
-        String(command.commandId).startsWith(MODEL_FALLBACK_NOTE_PREFIX)
+        isModelFallbackNoteCommand(command.commandId)
       ) {
+        const preferences = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
         if (command.modelFallbackOfRunId === undefined) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
@@ -4472,6 +4489,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           source.status !== "failed" ||
           limited?.class !== "usage_limit" ||
           latestExecutedRun(projection.runs)?.id !== source.id ||
+          !modelFallbackSourceIsCurrent(projection, source) ||
+          (yield* stopReachedRun(command, command.threadId, source.id)) ||
+          !preferences.modelFallback.enabled ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
           projection.thread.settledOverride === "settled" ||
@@ -4482,6 +4502,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             commandType: command.type,
             cause: "This thread can no longer record a fallback notice for that run.",
+          });
+        }
+        const currentDecision = yield* planFallbackDecision(projection, preferences);
+        if (currentDecision.type !== "pause" || currentDecision.detail !== command.text) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The model fallback pause decision is no longer current.",
           });
         }
         const run = source;
@@ -4559,11 +4587,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
       if (command.modelFallbackOfRunId !== undefined) {
+        const preferences = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
+        const target = command.modelSelection;
         const source = projection.runs.find((run) => run.id === command.modelFallbackOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
         const now = yield* DateTime.now;
         if (
           command.dispatchMode.type !== "start_immediately" ||
+          !preferences.modelFallback.enabled ||
+          target === undefined ||
+          !preferences.modelFallback.models.some((model) => modelSelectionsEqual(model, target)) ||
+          !isModelSelectionProviderEnabled(preferences, target) ||
           source === undefined ||
           source.status !== "failed" ||
           limited?.class !== "usage_limit" ||
@@ -4571,6 +4605,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
           projection.thread.settledOverride === "settled" ||
+          !modelFallbackSourceIsCurrent(projection, source) ||
+          (yield* stopReachedRun(command, command.threadId, source.id)) ||
           projection.runtimeRequests.some((request) => request.status === "pending") ||
           (projection.thread.snoozedUntil != null &&
             DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
@@ -4579,6 +4615,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             commandType: command.type,
             cause: "This thread can no longer fall back from that run.",
+          });
+        }
+        const currentDecision = yield* planFallbackDecision(projection, preferences);
+        if (
+          currentDecision.type !== "switch" ||
+          !modelSelectionsEqual(currentDecision.to, target)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The model fallback selection is no longer current.",
           });
         }
       }
@@ -8522,7 +8569,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly now: DateTime.Utc;
   }) {
     const { command, events, thread, run, now } = input;
-    if (run.rootNodeId === null || run.providerThreadId === null) return;
     const pendingItems = (yield* Ref.get(events)).flatMap((event) =>
       event.type === "turn-item.updated" ? [event.payload] : [],
     );
@@ -8539,7 +8585,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       type: "turn-item.updated",
       threadId: thread.id,
       runId: run.id,
-      nodeId: run.rootNodeId,
+      ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
       providerInstanceId: run.providerInstanceId,
       occurredAt: now,
       payload: {
@@ -9666,17 +9712,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     };
   });
 
-  /**
-   * Transfers a terminal child's result into its parent and offers the parent
-   * wake. Every mutation here targets the PARENT thread, so callers must hold
-   * the parent thread's dispatch lock rather than the child's: the
-   * delegated_task.wake-policy handler rewrites the same subagent row under
-   * that lock with a full-row payload, and unserialized writers clobber each
-   * other (stale policy on the terminal row, or a terminal row regressed to
-   * running). `settledContinuationOf` names the restart continuation that just
-   * declined or failed, so its own still-running effect does not hold the child.
-   */
-  const finalizeAppOwnedSubagent = (
+  const withParentAndChild = <A, E, R>(
+    parentThreadId: ThreadId,
+    childThreadId: ThreadId,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    threadDispatch.withLock(parentThreadId, threadDispatch.withLock(childThreadId, effect));
+
+  const finalizeAppOwnedSubagentLocked = (
     childThreadId: ThreadId,
     options?: { readonly settledContinuationOf?: RunId; readonly pauseDetail?: string | null },
   ) =>
@@ -9986,6 +10029,17 @@ ${result.text}`;
         yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
       }
     });
+
+  const finalizeAppOwnedSubagent = (
+    parentThreadId: ThreadId,
+    childThreadId: ThreadId,
+    options?: Parameters<typeof finalizeAppOwnedSubagentLocked>[1],
+  ) =>
+    withParentAndChild(
+      parentThreadId,
+      childThreadId,
+      finalizeAppOwnedSubagentLocked(childThreadId, options),
+    );
 
   const finalizeDelegatedCompletionDelivery = (threadId: ThreadId, runId: RunId) =>
     Effect.gen(function* () {
@@ -10537,6 +10591,7 @@ ${result.text}`;
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
+    const retry = command.type === "message.dispatch" ? modelFallbackRetry(command) : undefined;
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
       "orchestration_v2.command_type": command.type,
@@ -10638,6 +10693,7 @@ ${result.text}`;
               threadId: commandThreadId(command),
               commandType: command.type,
               rejectedAt,
+              ...(retry === undefined ? {} : { retry }),
               error: cause instanceof Error ? cause.message : String(cause),
             })
             .pipe(
@@ -10700,6 +10756,7 @@ ${result.text}`;
         threadId: commandThreadId(command),
         commandType: command.type,
         acceptedAt,
+        ...(retry === undefined ? {} : { retry }),
         events: plan.events,
         effects: plan.effects,
         ...(plan.cancelUnsettledEffects === undefined
@@ -10741,7 +10798,109 @@ ${result.text}`;
   });
 
   const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
-    threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+    Effect.gen(function* () {
+      const threadId = commandThreadId(command);
+      if (command.type !== "message.dispatch" || command.modelFallbackOfRunId === undefined)
+        return yield* threadDispatch.withLock(threadId, dispatchWithReceiptEffect(command));
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId).pipe(
+        Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+      );
+      const guarded = serverSettings
+        .withSettingsSnapshot(() => dispatchWithReceiptEffect(command))
+        .pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ServerSettingsError"
+              ? new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                })
+              : cause,
+          ),
+        );
+      return yield* parentThreadId === undefined
+        ? threadDispatch.withLock(threadId, guarded)
+        : withParentAndChild(parentThreadId, threadId, guarded);
+    });
+
+  const projectedFallbackDecision = (
+    projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems">,
+    preferences: Parameters<typeof isModelSelectionProviderEnabled>[0],
+    skipped: readonly ModelSelection[] = [],
+    continuation: "supported" | "unsupported" = "supported",
+    quotaOwnerKeys?: ReadonlyMap<string, string>,
+  ) =>
+    decideFromProjection({
+      enabled: preferences.modelFallback.enabled,
+      models: preferences.modelFallback.models,
+      unavailableInstanceIds: preferences.modelFallback.models
+        .filter((selection) => !isModelSelectionProviderEnabled(preferences, selection))
+        .map((selection) => selection.instanceId),
+      continuation,
+      current: projection.thread.modelSelection,
+      skipped,
+      ...(quotaOwnerKeys === undefined ? {} : { quotaOwnerKeys }),
+      runs: projection.runs.map((run) => {
+        const failure = latestRootProviderFailure(run, projection.turnItems);
+        return {
+          modelSelection: run.modelSelection,
+          ordinal: run.ordinal,
+          status: run.status,
+          startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
+          completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
+          failureClass: failure?.class ?? null,
+          message: failure?.message ?? "",
+          code: failure?.code ?? null,
+          resetAt: failure?.resetAt ?? null,
+        };
+      }),
+    });
+
+  const planFallbackDecision = (
+    projection: Pick<
+      OrchestrationV2ThreadProjection,
+      "thread" | "runs" | "turnItems" | "providerSessions" | "providerThreads"
+    >,
+    preferences: Parameters<typeof isModelSelectionProviderEnabled>[0],
+  ) =>
+    Effect.gen(function* () {
+      const quotaOwnerKeys = yield* (
+        providerAdapters.getQuotaOwnerKeys?.() ?? Effect.succeed(undefined)
+      );
+      const skipped: ModelSelection[] = [];
+      let decision = projectedFallbackDecision(
+        projection,
+        preferences,
+        skipped,
+        "supported",
+        quotaOwnerKeys,
+      );
+      while (decision.type === "switch") {
+        const planned = yield* providerSwitchService
+          .plan({ projection, targetModelSelection: decision.to })
+          .pipe(Effect.exit);
+        if (Exit.isSuccess(planned)) break;
+        skipped.push(decision.to);
+        decision = projectedFallbackDecision(
+          projection,
+          preferences,
+          skipped,
+          "supported",
+          quotaOwnerKeys,
+        );
+      }
+      if (decision.type === "pause" && decision.reason === "exhausted" && skipped.length > 0) {
+        const unsupported = projectedFallbackDecision(
+          projection,
+          preferences,
+          [],
+          "unsupported",
+          quotaOwnerKeys,
+        );
+        if (unsupported.type === "pause") decision = unsupported;
+      }
+      return decision;
+    });
 
   const considerModelFallback = (threadId: ThreadId) =>
     Effect.gen(function* () {
@@ -10762,74 +10921,38 @@ ${result.text}`;
             ),
           ),
         );
-      if (projection === null || projection.thread.settledOverride === "settled") {
+      if (
+        projection === null ||
+        projection.thread.settledOverride === "settled" ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null
+      ) {
         return { switched: false, dispatchPending: false, pauseDetail: null };
       }
-      const evidence = projection.runs.map((run) => {
-        const failure = latestRootProviderFailure(run, projection.turnItems);
-        return {
-          modelSelection: run.modelSelection,
-          ordinal: run.ordinal,
-          status: run.status,
-          startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
-          completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
-          failureClass: failure?.class ?? null,
-          message: failure?.message ?? "",
-          code: failure?.code ?? null,
-          resetAt: failure?.resetAt ?? null,
-        };
-      });
-      const unavailableInstanceIds = [
-        ...new Set(preferences.modelFallback.models.map((model) => model.instanceId)),
-      ].filter((instanceId) => {
-        const instance = preferences.providerInstances[instanceId];
-        return instance === undefined || !resolveProviderInstanceEnabled(instance);
-      });
-      const skipped: ModelSelection[] = [];
-      let decision = decideFromProjection({
-        enabled: true,
-        models: preferences.modelFallback.models,
-        unavailableInstanceIds,
-        continuation: "supported",
-        current: projection.thread.modelSelection,
-        runs: evidence,
-        skipped,
-      });
-      while (decision.type === "switch") {
-        const planned = yield* providerSwitchService
-          .plan({ projection, targetModelSelection: decision.to })
-          .pipe(Effect.exit);
-        if (Exit.isSuccess(planned)) break;
-        skipped.push(decision.to);
-        decision = decideFromProjection({
-          enabled: true,
-          models: preferences.modelFallback.models,
-          unavailableInstanceIds,
-          continuation: "supported",
-          current: projection.thread.modelSelection,
-          runs: evidence,
-          skipped,
-        });
-      }
-      if (decision.type === "pause" && decision.reason === "exhausted" && skipped.length > 0) {
-        const unsupported = decideFromProjection({
-          enabled: true,
-          models: preferences.modelFallback.models,
-          unavailableInstanceIds,
-          continuation: "unsupported",
-          current: projection.thread.modelSelection,
-          runs: evidence,
-          skipped: [],
-        });
-        if (unsupported.type === "pause") decision = unsupported;
-      }
       const run = latestExecutedRun(projection.runs);
-      if (run === null || decision.type === "leave-paused") {
+      if (
+        run?.status !== "failed" ||
+        latestRootProviderFailure(run, projection.turnItems)?.class !== "usage_limit" ||
+        !modelFallbackSourceIsCurrent(projection, run)
+      ) {
+        return { switched: false, dispatchPending: false, pauseDetail: null };
+      }
+      const decision = yield* planFallbackDecision(projection, preferences);
+      const now = yield* DateTime.now;
+      if (
+        decision.type === "switch" &&
+        (projection.runtimeRequests.some((request) => request.status === "pending") ||
+          (projection.thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now)))
+      ) {
+        return { switched: false, dispatchPending: true, pauseDetail: null };
+      }
+      if (decision.type === "leave-paused") {
         return { switched: false, dispatchPending: false, pauseDetail: null };
       }
       const command = yield* nextModelFallbackCommand(
         { threadId, runId: run.id, decision },
-        commandReceipts.getByCommandId,
+        commandReceipts.getLatestRetry,
       );
       if (command === null) {
         return { switched: false, dispatchPending: false, pauseDetail: null };
@@ -10842,21 +10965,47 @@ ${result.text}`;
           ),
         ),
       );
-      const dispatchPending =
-        !dispatched && decision.type === "switch"
-          ? yield* projectionStore.getThread(threadId).pipe(
-              Effect.map((thread) => thread.settledOverride !== "settled"),
-              Effect.catchCause((cause) =>
-                Effect.logWarning("model-fallback.recheck-failed", { threadId, cause }).pipe(
-                  Effect.as(true),
-                ),
-              ),
+      if (dispatched && decision.type === "switch") {
+        yield* threadDispatch.withLock(
+          threadId,
+          finalizeDelegatedCompletionDelivery(threadId, run.id),
+        );
+      }
+      const dispatchPending = !dispatched
+        ? yield* Effect.gen(function* () {
+            const currentSettings = yield* serverSettings.getSettings;
+            const current = yield* projectionStore.getThreadProjection(threadId);
+            if (
+              !currentSettings.modelFallback.enabled ||
+              current.thread.settledOverride === "settled" ||
+              current.thread.archivedAt !== null ||
+              current.thread.deletedAt !== null ||
+              !modelFallbackSourceIsCurrent(current, run)
             )
-          : false;
+              return false;
+            const eligible =
+              decision.type === "switch"
+                ? projectedFallbackDecision(
+                    current,
+                    currentSettings,
+                    [],
+                    "supported",
+                    yield* providerAdapters.getQuotaOwnerKeys?.() ?? Effect.succeed(undefined),
+                  )
+                : yield* planFallbackDecision(current, currentSettings);
+            return eligible.type === "switch";
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("model-fallback.recheck-failed", { threadId, cause }).pipe(
+                Effect.as(true),
+              ),
+            ),
+          )
+        : false;
       return {
         switched: dispatched && decision.type === "switch",
         dispatchPending,
-        pauseDetail: decision.type === "pause" ? decision.detail : null,
+        pauseDetail: dispatched && decision.type === "pause" ? decision.detail : null,
       };
     });
 
@@ -10869,18 +11018,11 @@ ${result.text}`;
         ? yield* considerModelFallback(threadId)
         : { switched: false, dispatchPending: false, pauseDetail: null as string | null };
       if (fallback.switched || fallback.dispatchPending) return;
-      // finalize writes the parent thread and startNextQueuedRun writes this
-      // thread, so each takes its own thread's lock, sequentially and never
-      // nested: dispatchDelegatedTaskRequest already writes child events
-      // while holding the parent lock, so nesting the parent lock inside the
-      // child lock here would invert that order, and the keyed executor's
-      // semaphores are neither reentrant nor deadlock-aware.
       const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
       if (parentThreadId !== undefined) {
-        yield* threadDispatch.withLock(
-          parentThreadId,
-          finalizeAppOwnedSubagent(threadId, { pauseDetail: fallback.pauseDetail }),
-        );
+        yield* finalizeAppOwnedSubagent(parentThreadId, threadId, {
+          pauseDetail: fallback.pauseDetail,
+        });
       }
       if (stored.event.type === "run.updated") {
         yield* threadDispatch.withLock(
@@ -10935,22 +11077,28 @@ ${result.text}`;
   // it skips. Startup runs this after reconciliation and before the effect
   // worker. Queue recovery instead holds unstarted runs until an explicit
   // queue.resume command arrives.
-  const recoverDelegatedTasks = Effect.gen(function* () {
-    yield* projectionStore.getRecoveryThreadIds("subagent-results").pipe(
+  const recoverSubagentResults = Effect.gen(function* () {
+    const inspected = yield* projectionStore.getRecoveryThreadIds("subagent-results").pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to inspect app-owned subagents during recovery", {
+          cause,
+        }).pipe(Effect.as([])),
+      ),
+    );
+    yield* Effect.succeed(inspected).pipe(
       Effect.flatMap((threadIds) =>
         Effect.forEach(
           threadIds,
           (threadId) =>
             Effect.gen(function* () {
-              const thread = yield* projectionStore.getThreadShell(threadId);
-              const parentThreadId = thread?.lineage.parentThreadId;
+              const thread = yield* projectionStore.getThread(threadId);
+              const parentThreadId = thread.lineage.parentThreadId;
               if (parentThreadId === undefined || parentThreadId === null) return;
               const fallback = yield* considerModelFallback(threadId);
               if (fallback.switched || fallback.dispatchPending) return;
-              yield* threadDispatch.withLock(
-                parentThreadId,
-                finalizeAppOwnedSubagent(threadId, { pauseDetail: fallback.pauseDetail }),
-              );
+              yield* finalizeAppOwnedSubagent(parentThreadId, threadId, {
+                pauseDetail: fallback.pauseDetail,
+              });
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to recover terminal app-owned subagent", {
@@ -10968,79 +11116,134 @@ ${result.text}`;
         }),
       ),
     );
-    yield* projectionStore.getRecoveryThreadIds("delegated-completions").pipe(
-      Effect.flatMap((threadIds) =>
-        Effect.forEach(
-          threadIds,
-          (threadId) =>
-            threadDispatch
-              .withLock(
-                threadId,
-                Effect.gen(function* () {
-                  const projection = yield* projectionStore.getThreadRecords(threadId, [
-                    "runs",
-                    "messages",
-                  ]);
-                  const terminalDeliveryRunIds = projection.runs
-                    .filter((run) => delegatedTaskTerminalStatus(run.status) !== null)
-                    .filter((run) =>
-                      projection.messages.some(
-                        (message) =>
-                          message.id === run.userMessageId &&
-                          message.delegatedCompletion !== undefined,
-                      ),
-                    )
-                    .map((run) => run.id);
-                  for (const runId of terminalDeliveryRunIds) {
-                    yield* finalizeDelegatedCompletionDelivery(threadId, runId);
-                  }
-                  const refreshed =
-                    terminalDeliveryRunIds.length === 0
-                      ? projection
-                      : yield* projectionStore.getThreadRecords(threadId, ["runs", "messages"], {
-                          messageRoles: ["user"],
-                        });
-                  for (const run of refreshed.runs) {
-                    if (
-                      run.delegatedCompletion?.delivery !== null &&
-                      run.delegatedCompletion !== undefined
-                    ) {
-                      yield* offerDelegatedCompletionDelivery(threadId, run.id);
-                    }
-                  }
-                }),
-              )
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("Failed to recover delegated completion delivery", {
-                    threadId,
-                    cause,
-                  }),
-                ),
-              ),
-          { concurrency: 8, discard: true },
-        ),
-      ),
+    return inspected;
+  });
+
+  const recoverDelegatedCompletions = Effect.gen(function* () {
+    const inspected = yield* projectionStore.getRecoveryThreadIds("delegated-completions").pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to inspect delegated completion delivery during recovery", {
           cause,
-        }),
+        }).pipe(Effect.as<readonly ThreadId[]>([])),
       ),
     );
+    yield* Effect.forEach(
+      inspected,
+      (threadId) =>
+        Effect.gen(function* () {
+          const fallback = yield* considerModelFallback(threadId);
+          if (fallback.dispatchPending) return;
+          yield* threadDispatch.withLock(
+            threadId,
+            Effect.gen(function* () {
+              const projection = yield* projectionStore.getThreadRecords(threadId, [
+                "runs",
+                "messages",
+              ]);
+              const terminalDeliveryRunIds = projection.runs
+                .filter((run) => delegatedTaskTerminalStatus(run.status) !== null)
+                .filter((run) =>
+                  projection.messages.some(
+                    (message) =>
+                      message.id === run.userMessageId && message.delegatedCompletion !== undefined,
+                  ),
+                )
+                .map((run) => run.id);
+              for (const runId of terminalDeliveryRunIds) {
+                yield* finalizeDelegatedCompletionDelivery(threadId, runId);
+              }
+              const refreshed =
+                terminalDeliveryRunIds.length === 0
+                  ? projection
+                  : yield* projectionStore.getThreadRecords(threadId, ["runs", "messages"], {
+                      messageRoles: ["user"],
+                    });
+              for (const run of refreshed.runs) {
+                if (
+                  run.delegatedCompletion?.delivery !== null &&
+                  run.delegatedCompletion !== undefined
+                ) {
+                  yield* offerDelegatedCompletionDelivery(threadId, run.id);
+                }
+              }
+            }),
+          );
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to recover delegated completion delivery", {
+              threadId,
+              cause,
+            }),
+          ),
+        ),
+      { concurrency: 8, discard: true },
+    );
+    return inspected;
   });
 
-  const delegatedTaskResultPending = (childThreadId: ThreadId) =>
+  const recoverModelFallbacks = Effect.gen(function* () {
+    const inspected = new Set(yield* recoverSubagentResults);
+    for (const threadId of yield* recoverDelegatedCompletions) inspected.add(threadId);
+    const preferences = yield* serverSettings.getSettings;
+    if (!preferences.modelFallback.enabled) return;
+    const candidates = yield* projectionStore.getLimitRecoveryCandidates({
+      now: yield* DateTime.now,
+      autoResume: false,
+      snooze: false,
+      fallback: true,
+    });
+    for (const candidate of candidates) {
+      if (inspected.has(candidate.id)) continue;
+      yield* considerModelFallback(candidate.id);
+    }
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("Failed to recover model fallbacks", { cause })),
+  );
+
+  const recoverDelegatedTasks = Effect.gen(function* () {
+    yield* recoverSubagentResults;
+    yield* recoverDelegatedCompletions;
+  });
+
+  const delegatedTaskResultPending = (childThreadId: ThreadId, observedResultRunId?: RunId) =>
     Effect.gen(function* () {
       const child = yield* projectionStore.getThreadRecords(
         childThreadId,
-        ["runs", "messages", "subagents", "providerThreads", "providerTurns", "attempts"],
-        { messageRoles: ["user"] },
+        [
+          "runs",
+          "messages",
+          "subagents",
+          "providerThreads",
+          "providerTurns",
+          "attempts",
+          "turnItems",
+        ],
+        { messageRoles: ["user"], turnItemTypes: ["error"] },
       );
       const progress = delegatedTaskProgress(child);
       // A caller's older read saw a result; newer work since then means it is not final.
       if (progress.state !== "result_available") return true;
       if (progress.resultRun === undefined) return false;
-      return yield* childAwaitsRestartContinuation(child.runs, progress.resultRun);
+      if (observedResultRunId !== undefined && progress.resultRun.id !== observedResultRunId)
+        return true;
+      if (yield* childAwaitsRestartContinuation(child.runs, progress.resultRun)) return true;
+      const run = latestExecutedRun(child.runs);
+      if (
+        run?.status !== "failed" ||
+        latestRootProviderFailure(run, child.turnItems)?.class !== "usage_limit"
+      )
+        return false;
+      const parentThreadId = child.thread.lineage.parentThreadId;
+      const forkedFrom = child.thread.forkedFrom;
+      if (parentThreadId === null || forkedFrom?.type !== "node") return false;
+      const parent = yield* projectionStore.getThreadRecords(parentThreadId, ["subagents"]);
+      return parent.subagents.some(
+        (task) =>
+          task.id === forkedFrom.nodeId &&
+          task.origin === "app_owned" &&
+          task.childThreadId === childThreadId &&
+          task.result === null,
+      );
     }).pipe(
       Effect.mapError(
         (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
@@ -11053,13 +11256,10 @@ ${result.text}`;
       if (parentThreadId === undefined) return;
       const fallback = yield* considerModelFallback(threadId);
       if (fallback.switched || fallback.dispatchPending) return;
-      yield* threadDispatch.withLock(
-        parentThreadId,
-        finalizeAppOwnedSubagent(threadId, {
-          settledContinuationOf: sourceRunId,
-          pauseDetail: fallback.pauseDetail,
-        }),
-      );
+      yield* finalizeAppOwnedSubagent(parentThreadId, threadId, {
+        settledContinuationOf: sourceRunId,
+        pauseDetail: fallback.pauseDetail,
+      });
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to recover delegated task after restart", {
@@ -11072,6 +11272,7 @@ ${result.text}`;
   return OrchestratorV2.of({
     resumeQueuedRuns,
     recoverDelegatedTasks,
+    recoverModelFallbacks,
     recoverDelegatedTask,
     delegatedTaskResultPending,
     dispatch: dispatchWithReceipt,
@@ -11201,6 +11402,7 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
       }),
     ),
     recoverDelegatedTasks: Effect.void,
+    recoverModelFallbacks: Effect.void,
     recoverDelegatedTask: () => Effect.void,
     delegatedTaskResultPending: () => Effect.succeed(false),
     dispatch: (command) =>
