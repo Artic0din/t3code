@@ -127,6 +127,7 @@ function todoRegistry(
   firstCompleted: boolean,
   onCodexReplay: (driver: CodexReplay.CodexAppServerReplayDriver) => void,
   partialSecond = false,
+  updateFirst = false,
 ) {
   return Layer.unwrap(
     Effect.gen(function* () {
@@ -144,7 +145,7 @@ function todoRegistry(
           materializeReplayTranscriptWorkspace(
             {
               ...recorded,
-              entries: recorded.entries.flatMap((entry) => {
+              entries: recorded.entries.flatMap((entry): (typeof recorded.entries)[number][] => {
                 if (
                   entry.type === "expect_outbound" &&
                   Predicate.isObject(entry.frame) &&
@@ -167,26 +168,32 @@ function todoRegistry(
                 )
                   return [entry];
                 turn += 1;
+                const nativeThreadId = entry.frame.params.threadId;
+                const nativeTurnId = entry.frame.params.turn.id;
+                const steps =
+                  turn === 1 && updateFirst
+                    ? ["OLD_CHECKLIST", "FIRST_TURN_UPDATED_CHECKLIST"]
+                    : [turn === 1 ? "OLD_CHECKLIST" : "CURRENT_CHECKLIST"];
                 return [
                   entry,
-                  {
+                  ...steps.map((step) => ({
                     type: "emit_inbound" as const,
                     label: "turn/plan/updated",
                     frame: {
                       method: "turn/plan/updated",
                       params: {
-                        threadId: entry.frame.params.threadId,
-                        turnId: entry.frame.params.turn.id,
+                        threadId: nativeThreadId,
+                        turnId: nativeTurnId,
                         explanation: null,
                         plan: [
                           {
-                            step: turn === 1 ? "OLD_CHECKLIST" : "CURRENT_CHECKLIST",
+                            step,
                             status: turn === 1 && firstCompleted ? "completed" : "pending",
                           },
                         ],
                       },
                     },
-                  },
+                  })),
                 ];
               }),
             },
@@ -408,10 +415,12 @@ it.effect.each([
   { driver: "codex", firstCompleted: false },
   { driver: "codex", firstCompleted: true },
   { driver: "cursor", firstCompleted: false, partialSecond: true },
+  { driver: "codex", firstCompleted: false, updateFirst: true },
 ] as const)("persists replacement $driver checklists, prior completed=$firstCompleted", (input) =>
   Effect.gen(function* () {
     const { driver, firstCompleted } = input;
     const partialSecond = "partialSecond" in input && input.partialSecond;
+    const updateFirst = "updateFirst" in input && input.updateFirst;
     const name = `handoff-todo-${driver}`;
     let codexReplay: CodexReplay.CodexAppServerReplayDriver | undefined;
     const modelSelection = {
@@ -453,6 +462,7 @@ it.effect.each([
               codexReplay = replay;
             },
             partialSecond,
+            updateFirst,
           ),
         ),
       ),
@@ -477,6 +487,23 @@ it.effect.each([
     );
     assert.notEqual(items[0]!.runId, items[1]!.runId);
     assert.notEqual(items[0]!.planId, items[1]!.planId);
+    if (updateFirst) {
+      const versions = result.domainEvents.flatMap((event) =>
+        event.type === "turn-item.updated" &&
+        event.payload.type === "todo_list" &&
+        event.payload.runId === items[0]!.runId &&
+        event.payload.status !== "cancelled"
+          ? [event.payload]
+          : [],
+      );
+      assert.equal(versions.length, 2);
+      assert.equal(versions[0]!.id, versions[1]!.id);
+      assert.equal(versions[0]!.planId, versions[1]!.planId);
+      assert.deepEqual(
+        versions.map((item) => item.steps[0]!.text),
+        ["OLD_CHECKLIST", "FIRST_TURN_UPDATED_CHECKLIST"],
+      );
+    }
     assert.deepEqual(
       projection.plans.map((plan) => plan.status),
       [

@@ -27,6 +27,13 @@ import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
+  contextHandoffDeliveryState,
+  deliverySnapshot,
+  historyItemKey,
+  isPlanSnapshot,
+  planSnapshotCovered,
+} from "./ContextHandoffSnapshots.ts";
+import {
   DEFAULT_HANDOFF_TOKEN_CAP,
   handoffTokenCapConfig,
   handoffBudget,
@@ -732,7 +739,7 @@ export const layer: Layer.Layer<
           ),
           createdAt,
         });
-        effectiveHandoffs = [handoff, ...effectiveHandoffs];
+        effectiveHandoffs = [...effectiveHandoffs, handoff];
         yield* eventSink.write({
           events: [
             {
@@ -988,6 +995,7 @@ export const layer: Layer.Layer<
       const deliveredItemIds = new Set(
         settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
       );
+      const deliveredHistory = contextHandoffDeliveryState(settledHandoffs);
       const coveredItemIds = new Set([
         ...deliveredItemIds,
         ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
@@ -1033,34 +1041,50 @@ export const layer: Layer.Layer<
       // history, whose attachments were not replayed into the replacement thread.
       // Retiring a plan filters handoff replay, but its text remains in native history.
       const nativeContextEstimate = Effect.gen(function* () {
-        return sameNativeThread
-          ? (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
-              if (
-                item.runId === run.id ||
-                (item.runId !== null &&
-                  missedRunIds.has(item.runId) &&
-                  !deliveredItemIds.has(item.id)) ||
-                (item.providerThreadId !== providerThread.id && !deliveredItemIds.has(item.id))
-              )
-                return sum;
-              const historical = historicalMessage(item, { includeCancelledPlans: true });
-              const nativeAttachments =
-                item.type === "user_message" &&
-                item.providerThreadId === providerThread.id &&
-                item.runId !== null &&
-                (nativeInputRunIds.has(item.runId) ||
-                  (legacyInputRunIds.has(item.runId) &&
-                    !coveredItemIds.has(item.id) &&
-                    !legacyRecoveredRunIds.has(item.runId)))
-                  ? attachmentTokenAllowance(item.attachments)
-                  : 0;
-              return (
-                sum +
-                (historical === null ? 0 : Buffer.byteLength(historical.text)) +
-                nativeAttachments
-              );
-            }, 0)
-          : 0;
+        if (!sameNativeThread) return 0;
+        const countedImports = new Set<string>();
+        const nativeBytes = (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce(
+          (sum, item) => {
+            const key = historyItemKey({ threadId: item.threadId, itemId: item.id });
+            const importedBytes = deliveredHistory.occupiedBytes.get(key);
+            const delivered =
+              deliveredHistory.deliveredKeys.has(key) ||
+              (!deliveredHistory.knownItemIds.has(item.id) && deliveredItemIds.has(item.id));
+            const native =
+              item.providerThreadId === providerThread.id &&
+              item.runId !== null &&
+              (nativeInputRunIds.has(item.runId) ||
+                (legacyInputRunIds.has(item.runId) &&
+                  !coveredItemIds.has(item.id) &&
+                  !legacyRecoveredRunIds.has(item.runId)));
+            if (
+              item.runId === run.id ||
+              (item.runId !== null && missedRunIds.has(item.runId) && !delivered) ||
+              (!native && !delivered)
+            )
+              return sum;
+            if (importedBytes !== undefined) countedImports.add(key);
+            const historical = historicalMessage(item, { includeCancelledPlans: true });
+            const nativeAttachments =
+              item.type === "user_message" && native
+                ? attachmentTokenAllowance(item.attachments)
+                : 0;
+            return (
+              sum +
+              (importedBytes ?? (historical === null ? 0 : Buffer.byteLength(historical.text))) +
+              nativeAttachments
+            );
+          },
+          0,
+        );
+        return (
+          nativeBytes +
+          deliveredHistory.contextBytes +
+          [...deliveredHistory.occupiedBytes].reduce(
+            (sum, [key, bytes]) => sum + (countedImports.has(key) ? 0 : bytes),
+            0,
+          )
+        );
       });
       const modelContextWindow =
         knownModelWindow ??
@@ -1082,11 +1106,20 @@ export const layer: Layer.Layer<
         missedRunIds.size === 0
           ? []
           : (yield* projectionStore.getTurnStartHistory(input.threadId, [...missedRunIds])).filter(
-              (item) =>
-                item.runId !== null &&
-                missedRunIds.has(item.runId) &&
-                !coveredItemIds.has(item.id) &&
-                historicalMessage(item) !== null,
+              (item) => {
+                const message = historicalMessage(item);
+                return (
+                  item.runId !== null &&
+                  missedRunIds.has(item.runId) &&
+                  message !== null &&
+                  (isPlanSnapshot(message)
+                    ? !planSnapshotCovered(
+                        deliverySnapshot(message, 0),
+                        deliveredHistory.coveredPlans.get(historyItemKey(message)),
+                      )
+                    : !coveredItemIds.has(item.id))
+                );
+              },
             );
       const startWithHandoffs = (
         turnInput: Parameters<typeof session.startTurn>[0],
@@ -1142,6 +1175,7 @@ export const layer: Layer.Layer<
               });
             }),
             alreadyDeliveredItemIds: deliveredItemIds,
+            alreadyDeliveredHandoffs: settledHandoffs,
             ...(session.injectHistory === undefined
               ? {}
               : {

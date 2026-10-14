@@ -6,6 +6,7 @@ import {
   type ChatAttachment,
   EventId,
   MessageId,
+  PlanId,
   type ModelSelection,
   type OrchestrationV2Command,
   type OrchestrationV2ProviderCapabilities,
@@ -1186,6 +1187,196 @@ describe("orchestration v2 provider switching", () => {
           );
         }),
       ),
+  );
+
+  it.live.each([
+    { replaceNative: true, legacy: false },
+    { replaceNative: true, legacy: true },
+    { replaceNative: false, legacy: false },
+  ])("counts only resident todo text after native recovery, %j", ({ replaceNative, legacy }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("todo-native-occupancy");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const failResumeOnce = yield* Ref.make(false);
+        const generation = yield* Ref.make(0);
+        const forkThreadId = ThreadId.make("thread:todo-native-occupancy:fork");
+        const todoId = TurnItemId.make("item:todo-native-occupancy");
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CURSOR_MODEL_SELECTION.instanceId,
+            driver: CURSOR_DRIVER,
+            capabilities: CursorProviderCapabilitiesV2,
+            modelSelection: CURSOR_MODEL_SELECTION,
+            responseByRunOrdinal: {},
+            capturedTurns,
+            failResumeOnce,
+            nativeThreadGeneration: generation,
+          }),
+        ]);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const dispatch = Effect.fn("TodoOccupancyTest.dispatch")(function* (
+            targetThreadId: ThreadId,
+            ordinal: number,
+            text: string,
+          ) {
+            const key = `${targetThreadId}:${ordinal}`;
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(key),
+              threadId: targetThreadId,
+              messageId: MessageId.make(key),
+              createdBy: "user",
+              creationSource: "web",
+              text,
+              attachments: [],
+              modelSelection: CURSOR_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.threadId === targetThreadId &&
+                  event.type === "run.updated" &&
+                  event.payload.ordinal === ordinal &&
+                  (event.payload.status === "completed" || event.payload.status === "failed"),
+              ),
+              Stream.runHead,
+            );
+            yield* worker.drain();
+            return yield* orchestrator.getThreadProjection(targetThreadId);
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("todo-native-occupancy:create"),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Todo native occupancy",
+            modelSelection: CURSOR_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          const original = yield* dispatch(threadId, 1, "Create a large checklist");
+          const assistant = original.turnItems.find((item) => item.type === "assistant_message");
+          if (assistant === undefined) return yield* Effect.die("Expected the first response.");
+          const {
+            type: _type,
+            text: _text,
+            messageId: _messageId,
+            streaming: _streaming,
+            ...base
+          } = assistant;
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make("todo-native-occupancy:plan"),
+                type: "turn-item.updated",
+                threadId,
+                occurredAt: assistant.updatedAt,
+                payload: {
+                  ...base,
+                  id: todoId,
+                  ordinal: assistant.ordinal + 1,
+                  type: "todo_list",
+                  status: replaceNative ? "completed" : "cancelled",
+                  planId: PlanId.make("plan:todo-native-occupancy"),
+                  steps: [{ id: "large-step", text: "x".repeat(100_000), status: "completed" }],
+                },
+              },
+            ],
+          });
+          if (legacy) {
+            yield* eventSink.write({
+              events: original.attempts.map(
+                ({ nativeThreadId: _nativeThreadId, ...attempt }, index) => ({
+                  id: EventId.make(`todo-native-occupancy:legacy:${index}`),
+                  type: "run-attempt.updated" as const,
+                  threadId,
+                  occurredAt: original.thread.createdAt,
+                  payload: attempt,
+                }),
+              ),
+            });
+          }
+          if (replaceNative) {
+            yield* orchestrator.dispatch({
+              type: "provider-session.detach",
+              commandId: CommandId.make("todo-native-occupancy:detach"),
+              threadId,
+              providerSessionId: original.providerThreads[0]!.providerSessionId!,
+            });
+            yield* worker.drain();
+            yield* Ref.set(failResumeOnce, true);
+          }
+          const recovered = yield* dispatch(threadId, 2, "Continue in the current native thread");
+          assert.equal(recovered.runs.at(-1)?.status, "completed");
+          assert.equal(recovered.providerThreads[0]!.id, original.providerThreads[0]!.id);
+          if (replaceNative) {
+            assert.notEqual(
+              recovered.providerThreads[0]!.nativeThreadRef?.nativeId,
+              original.providerThreads[0]!.nativeThreadRef?.nativeId,
+            );
+            assert.include(
+              recovered.contextHandoffs.at(-1)?.delivery?.omittedItemIds ?? [],
+              todoId,
+            );
+            assert.notInclude(recovered.contextHandoffs.at(-1)?.delivery?.itemIds ?? [], todoId);
+          }
+          yield* orchestrator.dispatch({
+            type: "thread.fork",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("todo-native-occupancy:fork"),
+            sourceThreadId: threadId,
+            targetThreadId: forkThreadId,
+            sourcePoint: { type: "latest_stable" },
+            title: "Todo occupancy fork",
+          });
+          const fork = yield* dispatch(forkThreadId, 1, "FORK_DELTA_MARKER");
+          assert.equal(fork.runs.at(-1)?.status, "completed");
+          yield* orchestrator.dispatch({
+            type: "thread.merge_back",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("todo-native-occupancy:merge"),
+            sourceThreadId: forkThreadId,
+            targetThreadId: threadId,
+            sourcePoint: { type: "latest_stable" },
+          });
+          const merged = yield* dispatch(threadId, 3, "Consume the fork outcome");
+          assert.equal(merged.runs.at(-1)?.status, replaceNative ? "completed" : "failed");
+          const latest = (yield* Ref.get(capturedTurns)).findLast(
+            (turn) => turn.threadId === threadId,
+          )!;
+          assert.equal(latest.providerThreadId, original.providerThreads[0]!.id);
+          if (replaceNative) {
+            assert.include(latest.text, "FORK_DELTA_MARKER");
+            assert.notInclude(latest.text, "x".repeat(100_000));
+          } else assert.equal(latest.text, "Continue in the current native thread");
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "todo-native-occupancy",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
   );
 
   it.live.each(

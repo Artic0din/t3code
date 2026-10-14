@@ -24,6 +24,7 @@ import {
 } from "./ContextHandoffBudget.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { omittedPlanSnapshots } from "./ContextHandoffSnapshots.ts";
 
 export class ContextHandoffPrepareError extends Schema.TaggedError<ContextHandoffPrepareError>()(
   "ContextHandoffPrepareError",
@@ -310,6 +311,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             coverage,
             omittedItems: selected.omittedItems,
             omittedItemIds: selected.omittedItemIds,
+            omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
           },
           createdByProviderInstanceId: null,
           createdAt: input.createdAt,
@@ -428,6 +430,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             coverage,
             omittedItems: selected.omittedItems,
             omittedItemIds: selected.omittedItemIds,
+            omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
           },
           createdByProviderInstanceId: null,
           createdAt: input.createdAt,
@@ -509,6 +512,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
           coverage,
           omittedItems: selected.omittedItems,
           omittedItemIds: selected.omittedItemIds,
+          omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
         },
         createdByProviderInstanceId: null,
         createdAt: input.createdAt,

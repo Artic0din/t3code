@@ -13,6 +13,7 @@ import type {
 } from "@t3tools/contracts";
 
 import * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type { ProjectionStoreV2Shape } from "./ProjectionStore.ts";
 
@@ -250,13 +251,15 @@ export function historicalMessage(
     providerThreadId: item.providerThreadId,
     status: item.status,
     kind: item.type,
+    sourceUpdatedAtMs: DateTime.toEpochMillis(item.updatedAt),
+    sourceOrdinal: item.ordinal,
     ...(planId === undefined ? {} : { planId }),
   };
 }
 
 function planReplayKey(message: OrchestrationV2HistoricalMessage): string | null {
   if (message.kind !== "todo_list" && message.kind !== "proposed_plan") return null;
-  return `${message.kind}:${message.planId ?? message.itemId}`;
+  return JSON.stringify([message.threadId, message.kind, message.planId ?? message.itemId]);
 }
 
 function latestPlanStates(

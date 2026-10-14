@@ -917,6 +917,8 @@ export const OrchestrationV2HistoricalMessage = Schema.Struct({
   status: Schema.String,
   kind: Schema.String,
   planId: Schema.optional(PlanId),
+  sourceUpdatedAtMs: Schema.optional(NonNegativeInt),
+  sourceOrdinal: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2HistoricalMessage = typeof OrchestrationV2HistoricalMessage.Type;
 
@@ -949,6 +951,17 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
       omittedItems: NonNegativeInt,
       // IDs omitted during preparation, before the target's delivery budget is known.
       omittedItemIds: Schema.optional(Schema.Array(TurnItemId)),
+      omittedPlanSnapshots: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            threadId: ThreadId,
+            itemId: TurnItemId,
+            kind: Schema.String,
+            contentHash: Schema.String,
+            sourceUpdatedAtMs: Schema.optional(NonNegativeInt),
+          }),
+        ),
+      ),
     }),
   ),
   delivery: Schema.optional(
@@ -956,6 +969,25 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
       nativeThreadId: Schema.String,
       status: Schema.Literals(["pending", "injected", "inline"]),
       itemIds: Schema.Array(TurnItemId),
+      order: Schema.optional(NonNegativeInt),
+      contexts: Schema.optional(
+        Schema.Array(Schema.Struct({ order: NonNegativeInt, bytes: NonNegativeInt })),
+      ),
+      snapshots: Schema.optional(
+        Schema.Array(
+          Schema.Struct({
+            threadId: ThreadId,
+            itemId: TurnItemId,
+            kind: Schema.String,
+            contentHash: Schema.String,
+            sourceUpdatedAtMs: Schema.optional(NonNegativeInt),
+            textBytes: NonNegativeInt,
+            capturedAtMs: Schema.optional(NonNegativeInt),
+            order: NonNegativeInt,
+            delivered: Schema.Boolean,
+          }),
+        ),
+      ),
       // Covered by recovery instructions, but not present in native model history.
       omittedItemIds: Schema.optional(Schema.Array(TurnItemId)),
     }),
