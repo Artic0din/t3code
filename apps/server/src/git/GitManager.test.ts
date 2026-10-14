@@ -51,11 +51,7 @@ import {
   ForgejoPullRequestSchema,
   toForgejoChangeRequest,
 } from "../sourceControl/forgejoPullRequests.ts";
-import type {
-  SourceControlProvider,
-  SourceControlProviderContext,
-} from "../sourceControl/SourceControlProvider.ts";
-import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import type { SourceControlProvider } from "../sourceControl/SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -84,11 +80,6 @@ interface FakeGhScenario {
   prListSequenceByHeadSelector?: Record<string, string[]>;
   createdPrUrl?: string;
   defaultBranch?: string;
-  defaultRepository?: string;
-  defaultBranchesByRepository?: Record<string, string>;
-  defaultBranchFailureCalls?: ReadonlySet<number>;
-  repositoryForkNetworks?: Record<string, string>;
-  forkLookupFailure?: boolean;
   pullRequest?: {
     number: number;
     title: string;
@@ -418,7 +409,6 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     ]),
   );
   const ghCalls: string[] = [];
-  let defaultBranchReads = 0;
 
   // The fake still speaks in gh's command shapes; the service methods below translate to them.
   const execute = (input: {
@@ -568,20 +558,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
           ),
         );
       }
-      defaultBranchReads += 1;
-      if (scenario.defaultBranchFailureCalls?.has(defaultBranchReads))
-        return Effect.fail(
-          new GitHubCli.GitHubCliCommandError({
-            command: "gh",
-            cwd: input.cwd,
-            cause: new Error("Repository lookup temporarily unavailable"),
-          }),
-        );
-      return Effect.succeed(
-        fakeGhOutput(
-          `${scenario.defaultBranchesByRepository?.[repository ?? ""] ?? scenario.defaultBranch ?? "main"}\n`,
-        ),
-      );
+      return Effect.succeed(fakeGhOutput(`${scenario.defaultBranch ?? "main"}\n`));
     }
 
     return Effect.fail(
@@ -595,14 +572,6 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
 
   return {
     service: {
-      resolveRepository: (input) => {
-        const [host, owner, name] = (
-          input.repository ??
-          scenario.defaultRepository ??
-          "github.com/fake/r"
-        ).split("/");
-        return Effect.succeed({ host: host!, owner: owner!, name: name! });
-      },
       // The fake answers the CLI shape, so batched lookups read it the way the fallback does.
       listPullRequestsByHead: (input) =>
         execute({
@@ -618,7 +587,6 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             String(input.limit),
             "--json",
             "number,title,url,baseRefName,headRefName,state,isDraft,mergedAt,closedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner",
-            ...(input.repository === undefined ? [] : ["--repo", input.repository]),
           ],
         }).pipe(
           Effect.map((result) => {
@@ -642,7 +610,6 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             String(input.limit ?? 1),
             "--json",
             "number,title,url,baseRefName,headRefName,state,isDraft,mergedAt,closedAt,isCrossRepository,headRepository,headRepositoryOwner",
-            ...(input.repository === undefined ? [] : ["--repo", input.repository]),
           ],
         }).pipe(
           Effect.map((result) => JSON.parse(result.stdout) as unknown[]),
@@ -666,23 +633,12 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             input.title,
             "--body-file",
             input.bodyFile,
-            ...(input.repository === undefined ? [] : ["--repo", input.repository]),
           ],
         }).pipe(Effect.asVoid),
       getDefaultBranch: (input) =>
         execute({
           cwd: input.cwd,
-          args: [
-            "repo",
-            "view",
-            ...("repository" in input && typeof input.repository === "string"
-              ? [input.repository]
-              : []),
-            "--json",
-            "defaultBranchRef",
-            "--jq",
-            ".defaultBranchRef.name",
-          ],
+          args: ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
         }).pipe(
           Effect.map((result) => {
             const value = result.stdout.trim();
@@ -694,21 +650,6 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
           cwd: input.cwd,
           args: ["issue", "view", input.reference, "--json", "number,title,body,state,url"],
         }).pipe(Effect.map((result) => JSON.parse(result.stdout) as GitHubCli.GitHubIssueSummary)),
-      isForkOfRepository: (input) =>
-        scenario.forkLookupFailure
-          ? Effect.fail(
-              new GitHubCli.GitHubCliCommandError({
-                command: "gh",
-                cwd: input.cwd,
-                cause: new Error("Fork lookup unavailable"),
-              }),
-            )
-          : Effect.succeed(
-              scenario.repositoryForkNetworks?.[input.repository] !== undefined &&
-                scenario.repositoryForkNetworks[input.repository] ===
-                  (scenario.repositoryForkNetworks[input.targetRepository] ??
-                    input.targetRepository),
-            ),
       getPullRequest: (input) =>
         execute({
           cwd: input.cwd,
@@ -797,7 +738,6 @@ function preparePullRequestThread(
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
-  sourceControlContext?: SourceControlProviderContext;
   textGeneration?: Partial<FakeGitTextGeneration>;
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -824,11 +764,6 @@ function makeManager(input?: {
           Effect.map((service) =>
             GitVcsDriver.GitVcsDriver.of({
               ...service,
-              execute: (command) =>
-                Effect.sync(() => {
-                  if (command.args[0] === "config" && command.args[1] === "--get-all")
-                    input.gitConfigReads?.push(command.args[2]!);
-                }).pipe(Effect.andThen(service.execute(command))),
               readConfigValue: (cwd, key) =>
                 Effect.sync(() => input.gitConfigReads?.push(key)).pipe(
                   Effect.andThen(service.readConfigValue(cwd, key)),
@@ -852,62 +787,19 @@ function makeManager(input?: {
       ? GitHubSourceControlProvider.make
       : Effect.succeed(input.sourceControlProvider)
     ).pipe(
-      Effect.map((provider) => {
-        if (
-          input?.sourceControlProvider !== undefined ||
-          input?.ghScenario?.defaultRepository !== undefined
-        )
-          return provider;
-        const { resolveRepository: _resolveRepository, ...withoutRepositoryResolution } = provider;
-        return withoutRepositoryResolution;
-      }),
-      Effect.flatMap((provider) =>
-        input?.sourceControlContext === undefined
-          ? Effect.succeed(
-              SourceControlProviderRegistry.SourceControlProviderRegistry.of({
-                resolveLink: (input) => provider.resolveLink?.(input),
-                get: () => Effect.succeed(provider),
-                resolveHandle: () => Effect.succeed({ provider, context: null }),
-                resolve: () => Effect.succeed(provider),
-                discover: Effect.succeed([]),
-              }),
-            )
-          : SourceControlProviderRegistry.makeWithProviders([
-              {
-                kind: provider.kind,
-                provider,
-                discovery: {
-                  type: "api",
-                  kind: provider.kind,
-                  label: "GitHub",
-                  installHint: "",
-                  probeAuth: Effect.die("Discovery is not used by this test"),
-                },
-              },
-            ]).pipe(
-              Effect.map((registry) =>
-                SourceControlProviderRegistry.SourceControlProviderRegistry.of({
-                  ...registry,
-                  resolveHandle: (request) =>
-                    registry.resolveHandle({
-                      ...request,
-                      context: request.context ?? input.sourceControlContext!,
-                    }),
-                  resolve: (request) =>
-                    registry
-                      .resolveHandle({ ...request, context: input.sourceControlContext! })
-                      .pipe(Effect.map((handle) => handle.provider)),
-                }),
-              ),
-            ),
+      Effect.map((provider) =>
+        SourceControlProviderRegistry.SourceControlProviderRegistry.of({
+          resolveLink: (input) => provider.resolveLink?.(input),
+          get: () => Effect.succeed(provider),
+          resolveHandle: () => Effect.succeed({ provider, context: null }),
+          resolve: () => Effect.succeed(provider),
+          discover: Effect.succeed([]),
+        }),
       ),
       Effect.provide(
-        Layer.mergeAll(
+        Layer.merge(
           Layer.succeed(GitHubCli.GitHubCli, gitHubCli),
           Layer.mock(GitHubApi.GitHubApi)({}),
-          Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({}),
-          VcsProcess.layer.pipe(Layer.provide(NodeServices.layer)),
-          layerServerConfig,
         ),
       ),
     ),
@@ -5067,18 +4959,17 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
-      const alphaIssue = {
-        number: 31,
-        title: "Alpha work",
-        body: "From alpha",
-        url: "https://github.com/alpha/one/issues/31",
-        state: "OPEN" as const,
-      };
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
           issues: [
-            alphaIssue,
+            {
+              number: 31,
+              title: "Alpha work",
+              body: "From alpha",
+              url: "https://github.com/alpha/one/issues/31",
+              state: "OPEN",
+            },
             {
               number: 31,
               title: "Beta work",
@@ -5094,1295 +4985,203 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         cwd: repoDir,
         reference: "https://github.com/alpha/one/issues/31",
       });
-      alphaIssue.title = "Alpha work renamed";
-      const renamed = yield* prepareIssueThread(manager, {
-        cwd: repoDir,
-        reference: "https://github.com/alpha/one/issues/31",
-      });
       const beta = yield* prepareIssueThread(manager, {
         cwd: repoDir,
         reference: "https://github.com/beta/two/issues/31",
       });
 
       expect(alpha.branch).toBe("issue/31-alpha-work");
-      expect(renamed.branch).toBe("issue/31-alpha-work");
-      expect(NodeFS.realpathSync(renamed.worktreePath)).toBe(
-        NodeFS.realpathSync(alpha.worktreePath),
-      );
-      expect(beta.branch).toBe("issue/31-beta-work");
+      expect(alpha.issue.url).toBe("https://github.com/alpha/one/issues/31");
       expect(beta.issue.title).toBe("Beta work");
       expect(beta.issue.url).toBe("https://github.com/beta/two/issues/31");
+      expect(beta.branch).not.toBe(alpha.branch);
       expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
         NodeFS.realpathSync(alpha.worktreePath),
       );
     }),
   );
 
-  it.effect(
-    "continues a remote issue branch whose name matches a local branch from another repository",
-    () =>
+  it.effect.each([
+    { url: "https://github/alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "ssh://git@github/alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "git@github:alpha/one.git", repository: "github/beta/two", reuse: false },
+    { url: "https://github/alpha/one.git", repository: "github/alpha/one", reuse: true },
+    { url: "ssh://git@github/alpha/one.git", repository: "github/alpha/one", reuse: true },
+    { url: "git@github-work:alpha/one.git", repository: "github.com/alpha/one", reuse: true },
+    { url: "github.com:alpha/one.git", repository: "github.com/beta/two", reuse: false },
+    { url: "github.com:alpha/one.git", repository: "github.com/alpha/one", reuse: true },
+    { url: null, repository: "github.com/alpha/one", reuse: false },
+    { url: "https://github.com/fork/r.git", repository: "github.com/upstream/r", reuse: false },
+    {
+      url: "https://github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:9443/o/r",
+      reuse: false,
+    },
+    {
+      url: "https://github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:8443/o/r",
+      reuse: true,
+    },
+    {
+      url: "ssh://git@github.enterprise.test:8443/o/r.git",
+      repository: "github.enterprise.test:8443/o/r",
+      reuse: false,
+    },
+    {
+      url: "ssh://git@github.enterprise.test:2222/o/r.git",
+      repository: "github.enterprise.test/o/r",
+      reuse: true,
+    },
+    {
+      url: "https://github.com/other/r.git",
+      additionalUrl: "https://github.com/alpha/one.git",
+      repository: "github.com/alpha/one",
+      reuse: false,
+    },
+    {
+      url: "https://github.com/alpha/one.git",
+      additionalUrl: "https://github.com/other/r.git",
+      repository: "github.com/alpha/one",
+      reuse: true,
+    },
+  ])(
+    "matches remote-only issue identity for $url against $repository",
+    ({ url, additionalUrl, repository, reuse }) =>
       Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const alphaRemote = yield* createBareRemote();
-        const betaRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
-        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
-        yield* runGit(repoDir, ["push", "alpha", "main"]);
-        yield* runGit(repoDir, ["push", "beta", "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "alpha",
-          "https://github.com/alpha/one.git",
-          alphaRemote,
-        );
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "beta",
-          "https://github.com/beta/two.git",
-          betaRemote,
-        );
-
+        const cwd = yield* makeTempDir("t3code-narrow-identity-");
+        yield* initRepo(cwd);
+        const remote = yield* createBareRemote();
+        yield* runGit(cwd, ["remote", "add", "origin", remote]);
+        yield* runGit(cwd, ["push", "origin", "main"]);
+        yield* runGit(cwd, ["checkout", "-b", "issue/31-old-title"]);
+        NodeFS.writeFileSync(NodePath.join(cwd, "old-work.txt"), "old issue work\n");
+        yield* runGit(cwd, ["add", "old-work.txt"]);
+        yield* runGit(cwd, ["commit", "-m", "Old issue work"]);
+        yield* runGit(cwd, ["push", "origin", "issue/31-old-title"]);
+        const oldSha = (yield* runGit(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(cwd, ["checkout", "main"]);
+        const mainSha = (yield* runGit(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* runGit(cwd, ["branch", "-D", "issue/31-old-title"]);
+        if (url !== null)
+          yield* configureVisibleRemoteUrlWithLocalRewrite(cwd, "origin", url, remote);
+        if (additionalUrl !== undefined)
+          yield* runGit(cwd, ["config", "--add", "remote.origin.url", additionalUrl]);
         const { manager } = yield* makeManager({
           ghScenario: {
             defaultBranch: "main",
-            issues: [
-              {
-                number: 31,
-                title: "Shared title",
-                body: "From alpha",
-                url: "https://github.com/alpha/one/issues/31",
-                state: "OPEN",
-              },
-              {
-                number: 31,
-                title: "Shared title",
-                body: "From beta",
-                url: "https://github.com/beta/two/issues/31",
-                state: "OPEN",
-              },
-            ],
+            issue: {
+              number: 31,
+              title: "Current title",
+              body: null,
+              url: `https://${repository}/issues/31`,
+              state: "OPEN",
+            },
           },
         });
-
-        const alpha = yield* prepareIssueThread(manager, {
-          cwd: repoDir,
-          reference: "https://github.com/alpha/one/issues/31",
-        });
-        expect(alpha.branch).toBe("issue/31-shared-title");
-        NodeFS.writeFileSync(NodePath.join(alpha.worktreePath, "alpha.txt"), "alpha\n");
-        yield* runGit(alpha.worktreePath, ["add", "alpha.txt"]);
-        yield* runGit(alpha.worktreePath, ["commit", "-m", "Alpha issue work"]);
-
-        yield* runGit(repoDir, ["checkout", "-b", "issue/31-shared-title-beta"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "beta.txt"), "beta\n");
-        yield* runGit(repoDir, ["add", "beta.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Beta remote issue work"]);
-        const betaSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, [
-          "push",
-          "beta",
-          "issue/31-shared-title-beta:issue/31-shared-title",
-        ]);
-        yield* runGit(repoDir, ["checkout", "main"]);
-        yield* runGit(repoDir, ["branch", "-D", "issue/31-shared-title-beta"]);
-
-        const beta = yield* prepareIssueThread(manager, {
-          cwd: repoDir,
-          reference: "https://github.com/beta/two/issues/31",
-        });
-
-        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
-        expect(beta.branch).not.toBe(alpha.branch);
-        expect(NodeFS.realpathSync(beta.worktreePath)).not.toBe(
-          NodeFS.realpathSync(alpha.worktreePath),
+        const prepared = yield* prepareIssueThread(manager, { cwd, reference: "31" });
+        expect(prepared.branch).toBe(reuse ? "issue/31-old-title" : "issue/31-current-title");
+        expect((yield* runGit(prepared.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
+          reuse ? oldSha : mainSha,
         );
-        const worktreeSha = (yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-        expect(worktreeSha).toBe(betaSha);
-        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "beta.txt"))).toBe(true);
+        expect(
+          (yield* runGit(remote, ["rev-parse", "refs/heads/issue/31-old-title"])).stdout.trim(),
+        ).toBe(oldSha);
       }),
   );
 
-  it.effect("uses distinct fallback branch names when sanitized repository keys collide", () =>
+  it.effect(
+    "keeps same-title issue branches separate and resumes a recorded issue after a rename",
+    () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir("t3code-narrow-collision-");
+        yield* initRepo(cwd);
+        const scenarios: FakeIssue[] = [
+          {
+            number: 31,
+            title: "Same title",
+            body: null,
+            url: "https://github.com/alpha/r/issues/31",
+            state: "OPEN",
+          },
+          {
+            number: 31,
+            title: "Same title",
+            body: null,
+            url: "https://github.com/beta/r/issues/31",
+            state: "OPEN",
+          },
+        ];
+        const { manager } = yield* makeManager({
+          ghScenario: { defaultBranch: "main", issues: scenarios },
+        });
+        const alpha = yield* prepareIssueThread(manager, { cwd, reference: scenarios[0]!.url });
+        const beta = yield* prepareIssueThread(manager, { cwd, reference: scenarios[1]!.url });
+        expect(alpha.branch).toBe("issue/31-same-title");
+        expect(beta.branch).not.toBe(alpha.branch);
+        expect(
+          (yield* runGit(cwd, [
+            "config",
+            "--get",
+            `branch.${beta.branch}.t3code-issue-repository`,
+          ])).stdout.trim(),
+        ).toBe("github.com/beta/r");
+        scenarios[1]!.title = "Renamed title";
+        const resumed = yield* prepareIssueThread(manager, { cwd, reference: scenarios[1]!.url });
+        expect(resumed.branch).toBe(beta.branch);
+        expect(NodeFS.realpathSync(resumed.worktreePath)).toBe(
+          NodeFS.realpathSync(beta.worktreePath),
+        );
+        expect(
+          (yield* runGit(cwd, [
+            "config",
+            "--get",
+            `branch.${alpha.branch}.t3code-issue-repository`,
+          ])).stdout.trim(),
+        ).toBe("github.com/alpha/r");
+      }),
+  );
+
+  it.effect("keeps legacy local issue branches reusable without assigning a repository", () =>
     Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      const blockerPath = NodePath.join(yield* makeTempDir("t3code-issue-wt-"), "wt");
-      yield* runGit(repoDir, ["worktree", "add", "-b", "issue/31-shared", blockerPath]);
-      yield* runGit(repoDir, [
-        "config",
-        "--local",
-        "branch.issue/31-shared.t3code-issue-repository",
-        "github.com/other/x",
-      ]);
+      const cwd = yield* makeTempDir("t3code-narrow-legacy-");
+      yield* initRepo(cwd);
+      yield* runGit(cwd, ["branch", "issue/31-legacy"]);
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
           issues: [
             {
               number: 31,
-              title: "Shared",
-              body: "From a-b/c",
-              url: "https://github.com/a-b/c/issues/31",
+              title: "Alpha",
+              body: null,
+              url: "https://github.com/alpha/r/issues/31",
               state: "OPEN",
             },
             {
               number: 31,
-              title: "Shared",
-              body: "From a/b-c",
-              url: "https://github.com/a/b-c/issues/31",
+              title: "Beta",
+              body: null,
+              url: "https://github.com/beta/r/issues/31",
               state: "OPEN",
             },
           ],
         },
       });
-
-      const first = yield* prepareIssueThread(manager, {
-        cwd: repoDir,
-        reference: "https://github.com/a-b/c/issues/31",
-      });
-      const second = yield* prepareIssueThread(manager, {
-        cwd: repoDir,
-        reference: "https://github.com/a/b-c/issues/31",
-      });
-
-      expect(first.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
-      expect(second.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
-      expect(second.branch).not.toBe(first.branch);
-      expect(NodeFS.realpathSync(second.worktreePath)).not.toBe(
-        NodeFS.realpathSync(first.worktreePath),
-      );
-    }),
-  );
-
-  it.effect.each([
-    { transport: "HTTP", prefix: "https://github/" },
-    { transport: "SSH", prefix: "ssh://git@github/" },
-    { transport: "scp-style SSH", prefix: "git@github:" },
-    { transport: "absolute-path scp-style SSH", prefix: "git@github:/" },
-  ])(
-    "does not continue a single-label $transport remote from a different repository",
-    ({ prefix }) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const alphaRemote = yield* createBareRemote();
-        const betaRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
-        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
-        yield* runGit(repoDir, ["push", "alpha", "main"]);
-        yield* runGit(repoDir, ["push", "beta", "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "alpha",
-          `${prefix}alpha/one.git`,
-          alphaRemote,
-        );
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "beta",
-          `${prefix}beta/two.git`,
-          betaRemote,
-        );
-
-        const { manager: alphaManager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Shared title",
-              body: "From alpha",
-              url: "https://github/alpha/one/issues/31",
-              state: "OPEN",
-            },
-          },
-        });
-
-        const alpha = yield* prepareIssueThread(alphaManager, {
-          cwd: repoDir,
-          reference: "31",
-        });
-        expect(alpha.branch).toBe("issue/31-shared-title");
-        NodeFS.writeFileSync(NodePath.join(alpha.worktreePath, "alpha.txt"), "alpha\n");
-        yield* runGit(alpha.worktreePath, ["add", "alpha.txt"]);
-        yield* runGit(alpha.worktreePath, ["commit", "-m", "Alpha issue work"]);
-        yield* runGit(alpha.worktreePath, ["push", "alpha", "issue/31-shared-title"]);
-        const alphaSha = (yield* runGit(alpha.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-        const cloneDir = NodePath.join(yield* makeTempDir("t3code-issue-clone-"), "repo");
-        yield* runGit(repoDir, ["clone", "--origin", "alpha", alphaRemote, cloneDir]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          cloneDir,
-          "alpha",
-          `${prefix}alpha/one.git`,
-          alphaRemote,
-        );
-        const continued = yield* prepareIssueThread(alphaManager, {
-          cwd: cloneDir,
-          reference: "31",
-        });
-        expect((yield* runGit(continued.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          alphaSha,
-        );
-        expect(
-          NodeFS.readFileSync(NodePath.join(continued.worktreePath, "alpha.txt"), "utf8"),
-        ).toBe("alpha\n");
-
-        const { manager: betaManager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Shared title",
-              body: "From beta",
-              url: "https://github/beta/two/issues/31",
-              state: "OPEN",
-            },
-          },
-        });
-        const beta = yield* prepareIssueThread(betaManager, {
-          cwd: repoDir,
-          reference: "31",
-        });
-
-        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
-        expect(beta.branch).not.toBe(alpha.branch);
-        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "alpha.txt"))).toBe(false);
-        const baseSha = (yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim();
-        expect((yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          baseSha,
-        );
-      }),
-  );
-
-  it.effect.each(["unpublished", "plain-push", "explicit-alias", "checkout-alias"])(
-    "keeps an origin fork's default upstream separate from the feature PR (%s)",
-    (mode) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const forkRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", forkRemote]);
-        yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
-        yield* runGit(repoDir, ["remote", "set-head", "origin", "main"]);
-        const alias = mode.endsWith("alias");
-        const branch =
-          mode === "explicit-alias" ? "resume-main" : alias ? "fork/main" : "feature/topic";
-        yield* runGit(repoDir, ["checkout", "-b", branch, "origin/main"]);
-        if (mode === "explicit-alias")
-          yield* runGit(repoDir, [
-            "config",
-            `branch.${branch}.${GitVcsDriver.PUBLISH_BRANCH_CONFIG}`,
-            "main",
-          ]);
-        if (mode === "plain-push") yield* runGit(repoDir, ["push", "origin", branch]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          "https://github.com/fork/r.git",
-          forkRemote,
-        );
-        const pr = (number: number, headRefName: string) =>
-          JSON.stringify([
-            {
-              number,
-              headRefName,
-              title: "Fork PR",
-              url: `https://github.com/upstream/r/pull/${number}`,
-              baseRefName: "main",
-              state: "MERGED",
-              mergedAt: "2026-01-02T00:00:00Z",
-              isCrossRepository: true,
-              headRepository: { nameWithOwner: "fork/r" },
-              headRepositoryOwner: { login: "fork" },
-            },
-          ]);
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultRepository: "github.com/upstream/r",
-            prListByHeadSelector: {
-              main: pr(91, "main"),
-              "feature/topic": pr(92, "feature/topic"),
-            },
-          },
-        });
-        const found = yield* manager.branchPullRequest({ cwd: repoDir, branch });
-        expect(found?.number ?? null).toBe(alias ? 91 : mode === "plain-push" ? 92 : null);
-        if (!alias) expect(ghCalls.some((call) => call.includes("--head main"))).toBe(false);
-      }),
-  );
-
-  it.effect("matches a same-repository PR through a Git fetch URL rewrite", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      const remote = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", remote]);
-      yield* runGit(repoDir, ["checkout", "-b", "topic"]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "topic"]);
-      yield* runGit(repoDir, ["remote", "set-url", "origin", "gh:acme/web.git"]);
-      yield* runGit(repoDir, ["config", "url.https://github.com/.insteadOf", "gh:"]);
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          defaultRepository: "github.com/acme/web",
-          prListByHeadSelector: {
-            topic: JSON.stringify([
-              {
-                number: 93,
-                title: "Same repository",
-                url: "https://github.com/acme/web/pull/93",
-                baseRefName: "main",
-                headRefName: "topic",
-                state: "OPEN",
-                isCrossRepository: false,
-                headRepository: { nameWithOwner: "acme/web" },
-                headRepositoryOwner: { login: "acme" },
-              },
-            ]),
-          },
-        },
-      });
-      expect((yield* manager.branchPullRequest({ cwd: repoDir, branch: "topic" }))?.number).toBe(
-        93,
-      );
-    }),
-  );
-
-  it.effect.each([false, true])(
-    "uses the remote-only base for a mixed-case GitHub repository target (rewritten: %s)",
-    (rewritten) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const remote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", remote]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["checkout", "-b", "topic"]);
-        yield* runGit(repoDir, ["branch", "-D", "main"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "topic.txt"), "topic\n");
-        yield* runGit(repoDir, ["add", "topic.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Topic changes"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          "https://github.com/acme/web.git",
-          remote,
-        );
-        if (rewritten) {
-          yield* runGit(repoDir, ["remote", "set-url", "origin", "gh:acme/web.git"]);
-          yield* runGit(repoDir, ["config", "url.https://github.com/.insteadOf", "gh:"]);
-          yield* runGit(repoDir, ["remote", "set-url", "--push", "origin", remote]);
-        }
-        const { manager } = yield* makeManager({
-          ghScenario: { defaultRepository: "github.com/Acme/Web", defaultBranch: "main" },
-        });
-        expect(
-          (yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" })).pr.status,
-        ).toBe("created");
-      }),
-  );
-
-  it.effect.each([
-    { upstreamName: "upstream", marked: false },
-    { upstreamName: "my-org/upstream", marked: false },
-    { upstreamName: "upstream", marked: true },
-  ])(
-    "creates an ordinary fork PR after publishing a branch tracked through $upstreamName (marked: $marked)",
-    ({ upstreamName, marked }) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const forkRemote = yield* createBareRemote();
-        const upstreamRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", forkRemote]);
-        yield* runGit(repoDir, ["remote", "add", upstreamName, upstreamRemote]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["push", upstreamName, "main"]);
-        yield* runGit(repoDir, ["checkout", "-b", "topic"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "topic.txt"), "upstream topic\n");
-        yield* runGit(repoDir, ["add", "topic.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Upstream topic"]);
-        const upstreamSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, ["push", upstreamName, "HEAD:topic"]);
-        yield* runGit(repoDir, ["checkout", "main"]);
-        yield* runGit(repoDir, ["branch", "-D", "topic"]);
-        yield* runGit(repoDir, ["fetch", upstreamName]);
-        yield* runGit(repoDir, ["checkout", "--track", `${upstreamName}/topic`]);
-        yield* runGit(repoDir, ["config", "remote.pushDefault", "origin"]);
-        for (const [name, remote, repository] of [
-          ["origin", forkRemote, "fork/r"],
-          [upstreamName, upstreamRemote, "upstream/r"],
-        ] as const)
-          yield* configureVisibleRemoteUrlWithLocalRewrite(
-            repoDir,
-            name,
-            `https://github.com/${repository}.git`,
-            remote,
-          );
-        NodeFS.writeFileSync(NodePath.join(repoDir, "fork.txt"), "fork changes\n");
-        yield* runGit(repoDir, ["add", "fork.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Fork changes"]);
-        const forkSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        const localBranch = (yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim();
-        if (marked)
-          yield* runGit(repoDir, [
-            "config",
-            `branch.${localBranch}.t3code-issue-repository`,
-            "github.com/upstream/r",
-          ]);
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            defaultRepository: marked ? "github.com/unrelated/r" : "github.com/upstream/r",
-          },
-          sourceControlContext: {
-            provider: { kind: "github", name: "GitHub", baseUrl: "https://github.com" },
-            remoteName: "origin",
-            remoteUrl: "https://github.com/fork/r.git",
-          },
-        });
-        const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
-        expect(result.push.status).toBe("pushed");
-        expect((yield* runGit(forkRemote, ["rev-parse", "refs/heads/topic"])).stdout.trim()).toBe(
-          forkSha,
-        );
-        expect(
-          (yield* runGit(upstreamRemote, ["rev-parse", "refs/heads/topic"])).stdout.trim(),
-        ).toBe(upstreamSha);
-        expect(ghCalls.filter((call) => call.startsWith("pr create"))).toContainEqual(
-          expect.stringContaining("pr create --base main --head fork:topic"),
-        );
-        expect(ghCalls.filter((call) => call.startsWith("pr create"))).toContainEqual(
-          expect.stringContaining("--repo github.com/upstream/r"),
-        );
-      }),
-  );
-
-  it.effect("refreshes a cached branch PR when the API target changes without a head change", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      const forkRemote = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", forkRemote]);
-      yield* runGit(repoDir, ["push", "origin", "main"]);
-      yield* runGit(repoDir, ["checkout", "-b", "topic"]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "topic"]);
-      yield* configureVisibleRemoteUrlWithLocalRewrite(
-        repoDir,
-        "origin",
-        "https://github.com/fork/r.git",
-        forkRemote,
-      );
-      const scenario: FakeGhScenario = {
-        defaultRepository: "github.com/upstream/r",
-        prListSequence: ["upstream", "another"].map((owner, index) =>
-          JSON.stringify([
-            {
-              number: index + 1,
-              title: "Fork topic",
-              url: `https://github.com/${owner}/r/pull/${index + 1}`,
-              baseRefName: "main",
-              headRefName: "topic",
-              state: "OPEN",
-              isCrossRepository: true,
-              headRepository: { nameWithOwner: "fork/r" },
-              headRepositoryOwner: { login: "fork" },
-            },
-          ]),
-        ),
-      };
-      const { manager, ghCalls } = yield* makeManager({ ghScenario: scenario });
-      expect((yield* manager.branchPullRequest({ cwd: repoDir, branch: "topic" }))?.number).toBe(1);
-      scenario.defaultRepository = "github.com/another/r";
-      expect((yield* manager.branchPullRequest({ cwd: repoDir, branch: "topic" }))?.number).toBe(2);
-      const lookups = ghCalls.filter((call) => call.startsWith("pr list"));
-      expect(lookups).toHaveLength(2);
-      expect(lookups[0]).toContain("--repo github.com/upstream/r");
-      expect(lookups[1]).toContain("--repo github.com/another/r");
-    }),
-  );
-
-  it.effect.each([false, true])(
-    "continues an origin issue branch hidden by a local branch from another repository (default lookup fails: %s)",
-    (defaultLookupFails) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const alphaRemote = yield* createBareRemote();
-        const originRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "alpha", alphaRemote]);
-        yield* runGit(repoDir, ["remote", "add", "origin", originRemote]);
-        yield* runGit(repoDir, ["push", "alpha", "main"]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "alpha",
-          "https://github.com/alpha/one.git",
-          alphaRemote,
-        );
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          "https://github.com/beta/two.git",
-          originRemote,
-        );
-
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            ...(defaultLookupFails ? { defaultBranchFailureCalls: new Set([2]) } : {}),
-            issues: [
-              {
-                number: 31,
-                title: "Shared title",
-                body: "From alpha",
-                url: "https://github.com/alpha/one/issues/31",
-                state: "OPEN",
-              },
-              {
-                number: 31,
-                title: "Shared title",
-                body: "From beta",
-                url: "https://github.com/beta/two/issues/31",
-                state: "OPEN",
-              },
-            ],
-          },
-        });
-
-        const alpha = yield* prepareIssueThread(manager, {
-          cwd: repoDir,
-          reference: "https://github.com/alpha/one/issues/31",
-        });
-        expect(alpha.branch).toBe("issue/31-shared-title");
-
-        yield* runGit(repoDir, ["checkout", "-b", "issue/31-shared-title-origin"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "origin.txt"), "origin\n");
-        yield* runGit(repoDir, ["add", "origin.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Origin issue work"]);
-        const originSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, [
-          "push",
-          "origin",
-          "issue/31-shared-title-origin:issue/31-shared-title",
-        ]);
-        yield* runGit(repoDir, ["checkout", "main"]);
-        yield* runGit(repoDir, ["branch", "-D", "issue/31-shared-title-origin"]);
-
-        const beta = yield* prepareIssueThread(manager, {
-          cwd: repoDir,
-          reference: "https://github.com/beta/two/issues/31",
-        });
-
-        expect(beta.branch).toMatch(/^issue\/31-[0-9a-f]{12}$/);
-        expect(beta.branch).not.toBe(alpha.branch);
-        const worktreeSha = (yield* runGit(beta.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-        expect(worktreeSha).toBe(originSha);
-        expect(NodeFS.existsSync(NodePath.join(beta.worktreePath, "origin.txt"))).toBe(true);
-        NodeFS.writeFileSync(NodePath.join(beta.worktreePath, "continued.txt"), "continued\n");
-        yield* runGit(beta.worktreePath, ["add", "continued.txt"]);
-        yield* runGit(beta.worktreePath, ["commit", "-m", "Continue beta issue"]);
-        const continuedSha = (yield* runGit(beta.worktreePath, [
-          "rev-parse",
-          "HEAD",
-        ])).stdout.trim();
-        yield* runStackedAction(manager, { cwd: beta.worktreePath, action: "push" });
-        expect(
-          (yield* runGit(originRemote, [
-            "rev-parse",
-            "refs/heads/issue/31-shared-title",
-          ])).stdout.trim(),
-        ).toBe(continuedSha);
-        expect(
-          (yield* runGit(alphaRemote, ["rev-parse", "refs/heads/main"])).stdout.trim(),
-        ).not.toBe(continuedSha);
-        expect((yield* runGit(alphaRemote, ["branch", "--list", "issue/*"])).stdout.trim()).toBe(
-          "",
-        );
-        yield* runStackedAction(manager, { cwd: beta.worktreePath, action: "create_pr" });
-        expect(ghCalls).toContainEqual(
-          expect.stringContaining("pr create --base main --head issue/31-shared-title"),
-        );
-      }),
-  );
-
-  it.effect.each([
-    {
-      description: "relative SSH alias",
-      remoteUrl: "git@github-work:o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "SSH URL alias",
-      remoteUrl: "ssh://git@github-work/o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "absolute SSH alias",
-      remoteUrl: "git@github-work:/o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "unclassified SSH path",
-      remoteUrl: "ssh://example.invalid/repo.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "matching first fetch URL",
-      remoteUrl: "https://github.com/o/r.git",
-      extraUrl: "https://github.com/other/r.git",
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "different first fetch URL",
-      remoteUrl: "https://github.com/o/r.git",
-      extraUrl: "https://github.com/other/r.git",
-      repository: "other/r",
-      continuesRemote: false,
-    },
-    {
-      description: "userless SCP from another repository",
-      remoteUrl: "github.com:alpha/one.git",
-      extraUrl: null,
-      repository: "beta/two",
-      continuesRemote: false,
-    },
-    {
-      description: "userless SCP matching repository",
-      remoteUrl: "github.com:o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "userless absolute SSH alias",
-      remoteUrl: "github-work:/o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "matching enterprise HTTPS port",
-      remoteUrl: "https://github.enterprise.test:8443/o/r.git",
-      extraUrl: null,
-      repository: "https://github.enterprise.test:8443/o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "different enterprise HTTPS port",
-      remoteUrl: "https://github.enterprise.test:8443/o/r.git",
-      extraUrl: null,
-      repository: "https://github.enterprise.test:9443/o/r",
-      continuesRemote: false,
-    },
-    {
-      description: "SSH transport port with default HTTPS authority",
-      remoteUrl: "ssh://git@github.enterprise.test:8443/o/r.git",
-      extraUrl: null,
-      repository: "https://github.enterprise.test/o/r",
-      continuesRemote: true,
-    },
-    {
-      description: "SSH transport port is not an HTTPS server port",
-      remoteUrl: "ssh://git@github.enterprise.test:8443/o/r.git",
-      extraUrl: null,
-      repository: "https://github.enterprise.test:8443/o/r",
-      continuesRemote: false,
-    },
-    {
-      description: "local path containing a colon",
-      remoteUrl: "../github.com:o/r.git",
-      extraUrl: null,
-      repository: "o/r",
-      continuesRemote: true,
-    },
-  ])(
-    "selects the correct issue repository for $description",
-    ({ remoteUrl, extraUrl, repository, continuesRemote }) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const baseSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        const remoteDir = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["checkout", "-b", "issue/31-add-dark-mode"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "dark.txt"), "dark\n");
-        yield* runGit(repoDir, ["add", "dark.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Remote issue work"]);
-        yield* runGit(repoDir, ["push", "origin", "issue/31-add-dark-mode"]);
-        const remoteSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, ["checkout", "main"]);
-        yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(repoDir, "origin", remoteUrl, remoteDir);
-        if (extraUrl !== null)
-          yield* runGit(repoDir, ["remote", "set-url", "--add", "origin", extraUrl]);
-        const { manager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Add dark mode",
-              body: "Please",
-              url: `${repository.startsWith("https://") ? repository : `https://github.com/${repository}`}/issues/31`,
-              state: "OPEN",
-            },
-          },
-        });
-
-        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
-
-        expect(result.branch).toBe("issue/31-add-dark-mode");
-        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          continuesRemote ? remoteSha : baseSha,
-        );
-        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "dark.txt"))).toBe(
-          continuesRemote,
-        );
-      }),
-  );
-
-  it.effect("isolates issue worktrees across enterprise HTTPS ports", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      const managers = [];
-      for (const port of [8443, 9443]) {
-        const { manager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Shared title",
-              body: "Please",
-              url: `https://github.enterprise.test:${port}/o/r/issues/31`,
-              state: "OPEN",
-            },
-          },
-        });
-        managers.push(manager);
-      }
-      const first = yield* prepareIssueThread(managers[0]!, { cwd: repoDir, reference: "31" });
-      NodeFS.writeFileSync(NodePath.join(first.worktreePath, "first.txt"), "first server\n");
-      yield* runGit(first.worktreePath, ["add", "first.txt"]);
-      yield* runGit(first.worktreePath, ["commit", "-m", "First enterprise server work"]);
-      const second = yield* prepareIssueThread(managers[1]!, { cwd: repoDir, reference: "31" });
-      expect(second.branch).not.toBe(first.branch);
-      expect(NodeFS.realpathSync(second.worktreePath)).not.toBe(
-        NodeFS.realpathSync(first.worktreePath),
-      );
-      expect(NodeFS.existsSync(NodePath.join(second.worktreePath, "first.txt"))).toBe(false);
-      const repeated = yield* prepareIssueThread(managers[0]!, { cwd: repoDir, reference: "31" });
-      expect(NodeFS.realpathSync(repeated.worktreePath)).toBe(
-        NodeFS.realpathSync(first.worktreePath),
-      );
-    }),
-  );
-
-  it.effect.each([
-    { host: "github.com", defaultBranch: "main", available: true },
-    { host: "github.com", defaultBranch: "master", available: true },
-    { host: "enterprise.test", defaultBranch: "trunk", available: true },
-    { host: "enterprise.test:8443", defaultBranch: "trunk", available: true },
-    { host: "github.com", defaultBranch: "main", available: false },
-  ])(
-    "uses the issue repository default $host/$defaultBranch instead of origin/main (available: $available)",
-    ({ host, defaultBranch, available }) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const localMainSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        const alphaRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", alphaRemote]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          "https://github.com/alpha/one.git",
-          alphaRemote,
-        );
-        const betaDir = yield* makeTempDir("t3code-git-manager-beta-");
-        yield* initRepo(betaDir);
-        if (defaultBranch !== "main") yield* runGit(betaDir, ["branch", "-m", defaultBranch]);
-        NodeFS.writeFileSync(NodePath.join(betaDir, "beta.txt"), "beta main\n");
-        yield* runGit(betaDir, ["add", "beta.txt"]);
-        yield* runGit(betaDir, ["commit", "-m", "Beta default branch"]);
-        const betaMainSha = (yield* runGit(betaDir, ["rev-parse", "HEAD"])).stdout.trim();
-        const betaRemote = yield* createBareRemote();
-        yield* runGit(betaDir, ["remote", "add", "origin", betaRemote]);
-        yield* runGit(betaDir, ["push", "origin", defaultBranch]);
-        yield* runGit(repoDir, ["remote", "add", "beta", betaRemote]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "beta",
-          `https://${host}/beta/two.git`,
-          betaRemote,
-        );
-        yield* runGit(repoDir, ["fetch", "beta"]);
-        if (!available)
-          yield* runGit(repoDir, ["update-ref", "-d", `refs/remotes/beta/${defaultBranch}`]);
-        const prListByHeadSelector: Record<string, string> = {};
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            prListByHeadSelector,
-            defaultBranchesByRepository: { [`${host}/beta/two`]: defaultBranch },
-            issue: {
-              number: 31,
-              title: "Add dark mode",
-              body: "Please",
-              url: `https://${host}/beta/two/issues/31`,
-              state: "OPEN",
-            },
-          },
-        });
-
+      for (const repository of ["alpha", "beta"]) {
         const prepared = yield* prepareIssueThread(manager, {
-          cwd: repoDir,
-          reference: "31",
-        }).pipe(Effect.result);
-        if (!available) {
-          expect(Result.isFailure(prepared)).toBe(true);
-          if (Result.isFailure(prepared)) expect(prepared.failure.message).toContain("Fetch it");
-          expect((yield* runGit(repoDir, ["branch", "--list", "issue/*"])).stdout.trim()).toBe("");
-          return;
-        }
-        expect(Result.isSuccess(prepared)).toBe(true);
-        if (Result.isFailure(prepared)) return;
-        const result = prepared.success;
-
-        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          betaMainSha,
-        );
-        expect(NodeFS.readFileSync(NodePath.join(result.worktreePath, "beta.txt"), "utf8")).toBe(
-          "beta main\n",
-        );
-        expect((yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim()).toBe(localMainSha);
-        NodeFS.writeFileSync(NodePath.join(result.worktreePath, "issue.txt"), "issue work\n");
-        yield* runGit(result.worktreePath, ["add", "issue.txt"]);
-        yield* runGit(result.worktreePath, ["commit", "-m", "Fresh beta issue work"]);
-        const issueSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runStackedAction(manager, { cwd: result.worktreePath, action: "push" });
-        expect(
-          (yield* runGit(betaRemote, ["rev-parse", `refs/heads/${result.branch}`])).stdout.trim(),
-        ).toBe(issueSha);
-        expect((yield* runGit(alphaRemote, ["branch", "--list", "issue/*"])).stdout.trim()).toBe(
-          "",
-        );
-        yield* runStackedAction(manager, { cwd: result.worktreePath, action: "create_pr" });
-        expect(ghCalls).toContainEqual(
-          expect.stringContaining(`pr create --base ${defaultBranch} --head ${result.branch}`),
-        );
-        expect(ghCalls.filter((call) => call.startsWith("pr create"))).toContainEqual(
-          expect.stringContaining(`--repo ${host}/beta/two`),
-        );
-        const prUrl = `https://${host}/beta/two/pull/123`;
-        prListByHeadSelector[result.branch] = JSON.stringify([
-          {
-            number: 123,
-            title: "Beta issue work",
-            url: prUrl,
-            baseRefName: defaultBranch,
-            headRefName: result.branch,
-            state: "OPEN",
-            isCrossRepository: false,
-            headRepository: { nameWithOwner: "beta/two" },
-            headRepositoryOwner: { login: "beta" },
-          },
-        ]);
-        const found = yield* manager.branchPullRequest(
-          { cwd: result.worktreePath, branch: result.branch },
-          { refresh: true },
-        );
-        expect(found?.url).toBe(prUrl);
-        yield* runGit(repoDir, ["remote", "remove", "origin"]);
-        const withoutOrigin = yield* manager.branchPullRequest(
-          { cwd: result.worktreePath, branch: result.branch },
-          { refresh: true },
-        );
-        expect(withoutOrigin?.url).toBe(prUrl);
-      }),
-  );
-
-  it.effect("does not create an issue branch when fork verification fails", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      for (const [remote, repository] of [
-        ["origin", "fork/r"],
-        ["upstream", "upstream/r"],
-      ] as const) {
-        const remoteDir = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", remote, remoteDir]);
-        yield* runGit(repoDir, ["push", remote, "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          remote,
-          `https://github.com/${repository}.git`,
-          remoteDir,
-        );
+          cwd,
+          reference: `https://github.com/${repository}/r/issues/31`,
+        });
+        expect(prepared.branch).toBe("issue/31-legacy");
       }
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          forkLookupFailure: true,
-          issue: {
-            number: 31,
-            title: "Add dark mode",
-            body: "Please",
-            url: "https://github.com/upstream/r/issues/31",
-            state: "OPEN",
-          },
-        },
-        sourceControlContext: {
-          provider: { kind: "github", name: "GitHub", baseUrl: "https://github.com" },
-          remoteName: "origin",
-          remoteUrl: "https://github.com/fork/r.git",
-        },
-      });
-      const prepared = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
-        Effect.result,
-      );
-      expect(Result.isFailure(prepared)).toBe(true);
-      if (Result.isFailure(prepared))
-        expect(prepared.failure.message).toContain("publishing repository");
-      expect((yield* runGit(repoDir, ["branch", "--list", "issue/*"])).stdout.trim()).toBe("");
+      expect(
+        (yield* runGit(
+          cwd,
+          ["config", "--get", "branch.issue/31-legacy.t3code-issue-repository"],
+          true,
+        )).stdout.trim(),
+      ).toBe("");
     }),
-  );
-
-  it.effect.each([false, true])(
-    "prepares an upstream continuation for fork publication with default lookup failure: %s",
-    (defaultLookupFails) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const forkRemote = yield* createBareRemote();
-        const upstreamRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", forkRemote]);
-        yield* runGit(repoDir, ["remote", "add", "upstream", upstreamRemote]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["push", "upstream", "main"]);
-        yield* runGit(repoDir, ["checkout", "-b", "issue/31-existing-work"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "issue.txt"), "existing issue work\n");
-        yield* runGit(repoDir, ["add", "issue.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Existing issue work"]);
-        const issueSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, ["push", "upstream", "HEAD:issue/31-existing-work"]);
-        yield* runGit(repoDir, ["checkout", "main"]);
-        yield* runGit(repoDir, ["branch", "-D", "issue/31-existing-work"]);
-        for (const [name, remote, repository] of [
-          ["origin", forkRemote, "fork/r"],
-          ["upstream", upstreamRemote, "upstream/r"],
-        ] as const) {
-          yield* configureVisibleRemoteUrlWithLocalRewrite(
-            repoDir,
-            name,
-            `https://github.com/${repository}.git`,
-            remote,
-          );
-        }
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            defaultBranchFailureCalls: defaultLookupFails ? new Set([1]) : new Set(),
-            repositoryForkNetworks: { "github.com/fork/r": "github.com/upstream/r" },
-            issue: {
-              number: 31,
-              title: "Existing work",
-              body: "Please",
-              url: "https://github.com/upstream/r/issues/31",
-              state: "OPEN",
-            },
-          },
-        });
-        const prepared = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" }).pipe(
-          Effect.result,
-        );
-        if (defaultLookupFails) {
-          expect(Result.isFailure(prepared)).toBe(true);
-          if (Result.isFailure(prepared))
-            expect(prepared.failure.message).toContain("default branch");
-          expect((yield* runGit(repoDir, ["branch", "--list", "issue/*"])).stdout.trim()).toBe("");
-        } else {
-          expect(Result.isSuccess(prepared)).toBe(true);
-          if (Result.isFailure(prepared)) return yield* prepared.failure;
-          const worktree = prepared.success;
-          expect(worktree.branch).toMatch(/^issue\/31-repo-[a-f0-9]{12}$/u);
-          const result = yield* runStackedAction(manager, {
-            cwd: worktree.worktreePath,
-            action: "create_pr",
-          });
-          expect(result.push.status).toBe("pushed");
-          expect(result.pr).toMatchObject({
-            status: "created",
-            baseBranch: "main",
-            headBranch: worktree.branch,
-          });
-          expect(
-            (yield* runGit(forkRemote, [
-              "rev-parse",
-              `refs/heads/${worktree.branch}`,
-            ])).stdout.trim(),
-          ).toBe(issueSha);
-          expect(ghCalls.filter((call) => call.startsWith("pr create"))).toContainEqual(
-            expect.stringContaining(`pr create --base main --head fork:${worktree.branch}`),
-          );
-        }
-        expect(
-          (yield* runGit(upstreamRemote, [
-            "rev-parse",
-            "refs/heads/issue/31-existing-work",
-          ])).stdout.trim(),
-        ).toBe(issueSha);
-      }),
-  );
-
-  it.effect.each(["configured", "verified", "userless", "fork-only", "unrelated"])(
-    "publishes an upstream issue with a %s origin",
-    (mode) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const forkRemote = yield* createBareRemote();
-        const upstreamRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", forkRemote]);
-        yield* runGit(repoDir, ["remote", "add", "upstream", upstreamRemote]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["push", "upstream", "main"]);
-        const originalSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        if (mode !== "unrelated")
-          yield* runGit(repoDir, ["push", "origin", "HEAD:issue/31-own-ticket"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          mode === "userless" ? "github.com:fork/r.git" : "https://github.com/fork/r.git",
-          forkRemote,
-        );
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "upstream",
-          "https://github.com/upstream/r.git",
-          upstreamRemote,
-        );
-        if (mode === "fork-only") yield* runGit(repoDir, ["remote", "remove", "upstream"]);
-        if (mode !== "verified") yield* runGit(repoDir, ["config", "remote.pushDefault", "origin"]);
-        const { manager, ghCalls } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            ...(mode !== "unrelated"
-              ? { repositoryForkNetworks: { "github.com/fork/r": "github.com/upstream/r" } }
-              : {}),
-            issue: {
-              number: 31,
-              title: "Add dark mode",
-              body: "Please",
-              url: "https://github.com/upstream/r/issues/31",
-              state: "OPEN",
-            },
-          },
-          sourceControlContext: {
-            provider: { kind: "github", name: "GitHub", baseUrl: "https://github.com" },
-            remoteName: "origin",
-            remoteUrl: "https://github.com/fork/r.git",
-          },
-        });
-        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
-        if (mode === "fork-only") expect(result.branch).toMatch(/^issue\/31-repo-[a-f0-9]{12}$/u);
-        NodeFS.writeFileSync(NodePath.join(result.worktreePath, "issue.txt"), "fork issue work\n");
-        yield* runGit(result.worktreePath, ["add", "issue.txt"]);
-        yield* runGit(result.worktreePath, ["commit", "-m", "Fork issue work"]);
-        const issueSha = (yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runStackedAction(manager, { cwd: result.worktreePath, action: "push" });
-        const publishRemote = mode === "unrelated" ? upstreamRemote : forkRemote;
-        const otherRemote = mode === "unrelated" ? forkRemote : upstreamRemote;
-        expect(
-          (yield* runGit(publishRemote, [
-            "rev-parse",
-            `refs/heads/${result.branch}`,
-          ])).stdout.trim(),
-        ).toBe(issueSha);
-        expect((yield* runGit(otherRemote, ["branch", "--list", "issue/*"])).stdout.trim()).toBe(
-          "",
-        );
-        if (mode === "userless")
-          yield* runGit(repoDir, [
-            "config",
-            "--add",
-            "remote.origin.url",
-            "https://github.com/other/r.git",
-          ]);
-        yield* runStackedAction(manager, { cwd: result.worktreePath, action: "create_pr" });
-        expect(ghCalls).toContainEqual(
-          expect.stringContaining(
-            `pr create --base main --head ${mode === "unrelated" ? "" : "fork:"}${result.branch}`,
-          ),
-        );
-        expect(ghCalls.filter((call) => call.startsWith("pr create"))).toContainEqual(
-          expect.stringContaining("--repo github.com/upstream/r"),
-        );
-        const cloneDir = yield* makeTempDir("t3code-issue-fork-clone-");
-        yield* runGit(cloneDir, ["clone", publishRemote, "."]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          cloneDir,
-          "origin",
-          mode === "unrelated" ? "https://github.com/upstream/r.git" : "github.com:fork/r.git",
-          publishRemote,
-        );
-        if (mode !== "unrelated" && mode !== "fork-only") {
-          yield* runGit(cloneDir, ["remote", "add", "upstream", upstreamRemote]);
-          yield* runGit(cloneDir, ["fetch", "upstream"]);
-          yield* configureVisibleRemoteUrlWithLocalRewrite(
-            cloneDir,
-            "upstream",
-            "https://github.com/upstream/r.git",
-            upstreamRemote,
-          );
-        }
-        if (mode === "verified") yield* runGit(cloneDir, ["remote", "remove", "upstream"]);
-        const continued = yield* prepareIssueThread(manager, {
-          cwd: cloneDir,
-          reference: "https://github.com/upstream/r/issues/31",
-        });
-        expect((yield* runGit(continued.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          issueSha,
-        );
-        expect(
-          NodeFS.readFileSync(NodePath.join(continued.worktreePath, "issue.txt"), "utf8"),
-        ).toBe("fork issue work\n");
-        if (mode === "verified") {
-          yield* runStackedAction(manager, { cwd: continued.worktreePath, action: "create_pr" });
-          expect(ghCalls.filter((call) => call.startsWith("pr create"))).toHaveLength(2);
-        }
-        if (mode !== "unrelated") {
-          expect(result.branch).toMatch(/^issue\/31-repo-[a-f0-9]{12}$/u);
-          expect(
-            (yield* runGit(forkRemote, [
-              "rev-parse",
-              "refs/heads/issue/31-own-ticket",
-            ])).stdout.trim(),
-          ).toBe(originalSha);
-          const { manager: forkIssueManager } = yield* makeManager({
-            ghScenario: {
-              issue: {
-                number: 31,
-                title: "Fork's own ticket",
-                body: "Please",
-                url: "https://github.com/fork/r/issues/31",
-                state: "OPEN",
-              },
-            },
-          });
-          const ownTicket = yield* prepareIssueThread(forkIssueManager, {
-            cwd: cloneDir,
-            reference: "https://github.com/fork/r/issues/31",
-          });
-          expect(ownTicket.branch).toBe("issue/31-own-ticket");
-          expect((yield* runGit(ownTicket.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-            originalSha,
-          );
-        }
-      }),
-  );
-
-  it.effect.each([true, false])(
-    "prefers origin for issue default refs when remotes match the target: %s",
-    (matching) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const aaaRemote = yield* createBareRemote();
-        const originRemote = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "aaa", aaaRemote]);
-        yield* runGit(repoDir, ["remote", "add", "origin", originRemote]);
-        yield* runGit(repoDir, ["push", "aaa", "main"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "origin.txt"), "latest origin\n");
-        yield* runGit(repoDir, ["add", "origin.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Origin default branch"]);
-        const originSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* runGit(repoDir, ["checkout", "-b", "feature/local"]);
-        yield* runGit(repoDir, ["branch", "-D", "main"]);
-        for (const [remote, directory] of [
-          ["aaa", aaaRemote],
-          ["origin", originRemote],
-        ] as const)
-          yield* configureVisibleRemoteUrlWithLocalRewrite(
-            repoDir,
-            remote,
-            "https://github.com/o/r.git",
-            directory,
-          );
-        const { manager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Add dark mode",
-              body: "Please",
-              url: `https://github.com/${matching ? "o/r" : "other/r"}/issues/31`,
-              state: "OPEN",
-            },
-          },
-        });
-        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
-        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          originSha,
-        );
-        expect(NodeFS.readFileSync(NodePath.join(result.worktreePath, "origin.txt"), "utf8")).toBe(
-          "latest origin\n",
-        );
-      }),
-  );
-
-  it.effect.each(["branch", "tag"])(
-    "uses the fully qualified issue base despite a same-named %s",
-    (shadowKind) =>
-      Effect.gen(function* () {
-        const repoDir = yield* makeTempDir("t3code-git-manager-");
-        yield* initRepo(repoDir);
-        const mainSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-        const remoteDir = yield* createBareRemote();
-        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-        yield* runGit(repoDir, ["push", "origin", "main"]);
-        yield* configureVisibleRemoteUrlWithLocalRewrite(
-          repoDir,
-          "origin",
-          "https://github.com/o/r.git",
-          remoteDir,
-        );
-        yield* runGit(repoDir, ["checkout", "-b", "feature/unrelated"]);
-        NodeFS.writeFileSync(NodePath.join(repoDir, "unrelated.txt"), "unrelated\n");
-        yield* runGit(repoDir, ["add", "unrelated.txt"]);
-        yield* runGit(repoDir, ["commit", "-m", "Unrelated work"]);
-        yield* runGit(repoDir, [shadowKind, "origin/main"]);
-        yield* runGit(repoDir, ["checkout", "main"]);
-        const { manager } = yield* makeManager({
-          ghScenario: {
-            defaultBranch: "main",
-            issue: {
-              number: 31,
-              title: "Add dark mode",
-              body: "Please",
-              url: "https://github.com/o/r/issues/31",
-              state: "OPEN",
-            },
-          },
-        });
-
-        const result = yield* prepareIssueThread(manager, { cwd: repoDir, reference: "31" });
-
-        expect((yield* runGit(result.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(
-          mainSha,
-        );
-        expect(NodeFS.existsSync(NodePath.join(result.worktreePath, "unrelated.txt"))).toBe(false);
-      }),
   );
 
   it.effect("finds an issue worktree among more than 100 branches", () =>
@@ -6520,6 +5319,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",
@@ -6591,6 +5396,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const pushedSha = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
       yield* runGit(repoDir, ["checkout", "main"]);
       yield* runGit(repoDir, ["branch", "-D", "issue/31-add-dark-mode"]);
+      yield* configureVisibleRemoteUrlWithLocalRewrite(
+        repoDir,
+        "team/origin",
+        "https://github.com/o/r.git",
+        remoteDir,
+      );
       const { manager } = yield* makeManager({
         ghScenario: {
           defaultBranch: "main",

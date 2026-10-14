@@ -134,60 +134,6 @@ it.effect("keeps the issue capability on a resolved GitHub provider", () =>
   }),
 );
 
-it.effect("keeps repository resolution bound to the discovered provider context", () =>
-  Effect.gen(function* () {
-    const inputs: Parameters<GitHubCli.GitHubCli["Service"]["resolveRepository"]>[0][] = [];
-    const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "https://enterprise.test:8443/fork/r.git" }],
-      github: {
-        resolveRepository: (input) =>
-          Effect.sync(() => {
-            inputs.push(input);
-            return { host: input.host ?? "github.com", owner: "upstream", name: "r" };
-          }),
-      },
-    });
-    const handle = yield* registry.resolveHandle({
-      cwd: "/repo",
-      context: {
-        provider: { kind: "github", name: "GitHub", baseUrl: "https://enterprise.test:8443" },
-        remoteName: "origin",
-        remoteUrl: "https://enterprise.test:8443/fork/r.git",
-      },
-    });
-    const locator = yield* handle.provider.resolveRepository!({ cwd: "/repo" });
-    assert.deepStrictEqual(locator, { host: "enterprise.test:8443", owner: "upstream", name: "r" });
-    assert.deepStrictEqual(inputs, [{ cwd: "/repo", host: "enterprise.test:8443" }]);
-  }),
-);
-
-it.effect("resolves a userless SCP checkout without a provider context override", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "github.com:acme/web.git" }],
-      github: { getDefaultBranch: () => Effect.succeed("master") },
-    });
-    const provider = yield* registry.resolve({ cwd: "/repo" });
-    assert.strictEqual(provider.kind, "github");
-    assert.strictEqual(yield* provider.getDefaultBranch({ cwd: "/repo" }), "master");
-  }),
-);
-
-it.effect("ignores a drive-relative Windows origin when discovering a hosted provider", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry({
-      remotes: [
-        { name: "origin", url: "C:repos/project.git" },
-        { name: "upstream", url: "github.com:acme/web.git" },
-      ],
-      github: { getDefaultBranch: () => Effect.succeed("master") },
-    });
-    const provider = yield* registry.resolve({ cwd: "/repo" });
-    assert.strictEqual(provider.kind, "github");
-    assert.strictEqual(yield* provider.getDefaultBranch({ cwd: "/repo" }), "master");
-  }),
-);
-
 it.effect("routes directly by provider kind for remote-first workflows", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
