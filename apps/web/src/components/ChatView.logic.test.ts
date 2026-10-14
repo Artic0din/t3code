@@ -210,6 +210,42 @@ describe("background draft issue ownership", () => {
     expect(issueForNextSend()).toEqual(unlink ? null : newerIssue);
   });
 
+  it.each(["runtime", "interaction", "project mapping"] as const)(
+    "restores the consumed issue after a %s mode edit during a failed batch",
+    async (edit) => {
+      prepareDraft();
+      const first = pendingLaunch();
+      const last = pendingLaunch();
+      const starts = Promise.allSettled([first.promise, last.promise]);
+      const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+      const store = useComposerDraftStore.getState();
+      const consumedDraft = store.getDraftSession(draftId)!;
+      const options =
+        edit === "interaction"
+          ? { interactionMode: "plan" as const }
+          : {
+              runtimeMode:
+                consumedDraft.runtimeMode === "full-access"
+                  ? ("approval-required" as const)
+                  : ("full-access" as const),
+            };
+      if (edit === "project mapping") {
+        store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, options);
+      } else {
+        store.setDraftThreadContext(draftId, options);
+      }
+      first.resolve();
+      await first.promise;
+      expect(issueForNextSend()).toEqual(null);
+      last.reject(new Error("Launch failed"));
+      const results = await starts;
+      if (results.some((result) => result.status === "rejected")) restoreIssue();
+      store.setPrompt(draftId, "Retry login");
+      expect(issueForNextSend()).toEqual(linkedIssue);
+      expect(store.getDraftSession(draftId)).toMatchObject(options);
+    },
+  );
+
   it("restores the retry issue with delayed recovery after newer prompt work is cleared", async () => {
     prepareDraft();
     const launch = pendingLaunch();

@@ -561,10 +561,13 @@ export function consumeBackgroundDraftIssue(input: {
   const store = useComposerDraftStore.getState();
   if (store.getDraftSession(draftId)?.linkedIssue !== linkedIssue) return () => undefined;
   store.setDraftLinkedIssue(draftId, null);
-  const consumedDraft = store.getDraftSession(draftId);
+  const consumedIssueEditToken = store.getDraftSession(draftId)?.linkedIssueEditToken;
   return () => {
     const currentStore = useComposerDraftStore.getState();
-    if (consumedDraft !== null && currentStore.getDraftSession(draftId) === consumedDraft) {
+    if (
+      consumedIssueEditToken !== undefined &&
+      currentStore.getDraftSession(draftId)?.linkedIssueEditToken === consumedIssueEditToken
+    ) {
       currentStore.setDraftLinkedIssue(draftId, linkedIssue);
     }
   };

@@ -62,10 +62,10 @@ export function ThreadIssueBanner(props: {
         <Text className="text-sm text-primary">{issueLabel(issue)}</Text>
       </Pressable>
       {archived.isLoading ? (
-        <Text className="text-sm text-muted-foreground">Loading related threads.</Text>
+        <Text className="text-sm text-foreground-muted">Loading related threads.</Text>
       ) : null}
       {archived.error === null ? null : (
-        <Text className="text-sm text-muted-foreground">{archived.error}</Text>
+        <Text className="text-sm text-foreground-muted">{archived.error}</Text>
       )}
       {related.length > 0 ? (
         <ScrollView

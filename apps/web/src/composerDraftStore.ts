@@ -464,6 +464,7 @@ export interface DraftSessionState {
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
   linkedIssue?: ThreadLinkedIssue | null;
+  linkedIssueEditToken?: symbol;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -1650,6 +1651,9 @@ function createDraftThreadState(
     startFromOrigin: nextStartFromOrigin,
     ...(existingThread?.linkedIssue !== undefined && !logicalProjectChanged
       ? { linkedIssue: existingThread.linkedIssue }
+      : {}),
+    ...(!logicalProjectChanged && existingThread?.linkedIssueEditToken !== undefined
+      ? { linkedIssueEditToken: existingThread.linkedIssueEditToken }
       : {}),
     promotedTo: null,
   };
@@ -2919,6 +2923,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
               ...(existing.linkedIssue !== undefined ? { linkedIssue: existing.linkedIssue } : {}),
+              ...(existing.linkedIssueEditToken !== undefined
+                ? { linkedIssueEditToken: existing.linkedIssueEditToken }
+                : {}),
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2960,7 +2967,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return {
               draftThreadsByThreadKey: {
                 ...state.draftThreadsByThreadKey,
-                [threadKey]: { ...existing, linkedIssue: next },
+                [threadKey]: {
+                  ...existing,
+                  linkedIssue: next,
+                  linkedIssueEditToken: Symbol(),
+                },
               },
             };
           });
