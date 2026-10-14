@@ -369,6 +369,10 @@ describe("parseIssueReference", () => {
     "abc",
     "https://github.com/pingdotgg/t3code/pull/42",
     "https://gitlab.com/a/b/-/issues/3",
+    "https://www.github.com/acme/web/issues/12",
+    "https://WWW.GITHUB.COM/acme/web/issues/12",
+    "https://github.example.com/acme/web/issues/12",
+    "https://attacker.example/acme/web/issues/12",
   ])("rejects %s", (input) => {
     expect(parseIssueReference(input)).toBeNull();
   });

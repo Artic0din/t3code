@@ -1,6 +1,7 @@
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
-  type ThreadLinkedPullRequest,
+  type ThreadLinkedIssue,
+  ThreadLinkedPullRequest,
   CommandId,
   CheckpointId,
   CheckpointScopeId,
@@ -151,6 +152,7 @@ interface StartThreadBootstrap {
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
+    readonly linkedIssue?: ThreadLinkedIssue;
   };
   readonly prepareWorktree?: {
     /** V2 worktree launches always fail rather than falling back to the project checkout. */
@@ -677,6 +679,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy,
+      ...(bootstrap?.linkedIssue === undefined ? {} : { linkedIssue: bootstrap.linkedIssue }),
       initialMessage: {
         messageId: input.message.messageId,
         text: input.message.text,
@@ -1087,3 +1090,32 @@ export const unlinkThreadPullRequest = Effect.fn("EnvironmentCommands.unlinkThre
     });
   },
 );
+
+export type LinkThreadIssueInput = Omit<
+  Extract<OrchestrationV2Command, { type: "thread.issue.link" }>,
+  "type" | "commandId"
+> &
+  CommandMetadata;
+export type UnlinkThreadIssueInput = Omit<
+  Extract<OrchestrationV2Command, { type: "thread.issue.unlink"; host: string }>,
+  "type" | "commandId"
+> &
+  CommandMetadata;
+export const linkThreadIssue = Effect.fn("EnvironmentCommands.linkThreadIssue")(function* (
+  input: LinkThreadIssueInput,
+) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.issue.link",
+    commandId: yield* allocateCommandId(input),
+  });
+});
+export const unlinkThreadIssue = Effect.fn("EnvironmentCommands.unlinkThreadIssue")(function* (
+  input: UnlinkThreadIssueInput,
+) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.issue.unlink",
+    commandId: yield* allocateCommandId(input),
+  });
+});

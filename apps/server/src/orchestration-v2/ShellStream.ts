@@ -244,17 +244,30 @@ export function skipUnchangedThreadShells<A extends OrchestrationV2ShellStreamIt
   });
 }
 
-/** Keep only the newest stored event per thread within a coalescing window. */
+function isArchiveRemoval(event: OrchestrationV2StoredEvent["event"]): boolean {
+  return (
+    event.type === "thread.unarchived" ||
+    (event.type === "thread.deleted" && event.payload.archivedAt !== null)
+  );
+}
+
+/** Keep the newest event per thread and its latest archive-removal transition. */
 export function coalesceStoredThreadEvents(
   events: ReadonlyArray<OrchestrationV2StoredEvent>,
 ): ReadonlyArray<OrchestrationV2StoredEvent> {
   const latestByThreadId = new Map<string, OrchestrationV2StoredEvent>();
+  const latestArchiveRemovalByThreadId = new Map<string, OrchestrationV2StoredEvent>();
   for (const stored of events) {
     latestByThreadId.set(stored.event.threadId, stored);
+    if (isArchiveRemoval(stored.event)) {
+      latestArchiveRemovalByThreadId.set(stored.event.threadId, stored);
+    }
   }
-  return Array.from(latestByThreadId.values()).sort(
-    (left, right) => left.sequence - right.sequence,
-  );
+  const retained = Array.from(latestByThreadId.values());
+  for (const stored of latestArchiveRemovalByThreadId.values()) {
+    if (latestByThreadId.get(stored.event.threadId) !== stored) retained.push(stored);
+  }
+  return retained.sort((left, right) => left.sequence - right.sequence);
 }
 
 /**
@@ -302,10 +315,7 @@ export function archivedShellStreamItemFromThreadShell(input: {
       thread: input.shell,
     };
   }
-  if (
-    input.stored.event.type === "thread.unarchived" ||
-    (input.stored.event.type === "thread.deleted" && input.stored.event.payload.archivedAt !== null)
-  ) {
+  if (isArchiveRemoval(input.stored.event)) {
     return {
       kind: "thread.removed",
       sequence: input.stored.sequence,

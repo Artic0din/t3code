@@ -1,6 +1,7 @@
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
+  consumeBackgroundDraftIssue,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
@@ -434,7 +435,8 @@ import {
   IssueThreadDialog,
   useIssueThreadDialogRequest,
 } from "./IssueThreadDialog";
-import { applyIssuePrefill } from "./issueThread.logic";
+import { durableIssueForSend } from "@t3tools/contracts";
+import { applyIssuePrefill, draftIssueAfterStart } from "./issueThread.logic";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
@@ -1764,6 +1766,7 @@ export default function ChatView(props: ChatViewProps) {
     return draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false;
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const setDraftLinkedIssue = useComposerDraftStore((store) => store.setDraftLinkedIssue);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
@@ -2911,8 +2914,17 @@ export default function ChatView(props: ChatViewProps) {
       if (next.prefill === undefined) issuePrefillByDraftRef.current.delete(preparedDraftId);
       else issuePrefillByDraftRef.current.set(preparedDraftId, next.prefill);
       setComposerDraftPrompt(preparedDraftId, next.prompt);
+      const supportsThreadIssueLinks =
+        appAtomRegistry.get(environmentServerConfigsAtom).get(input.environmentId)?.environment
+          .capabilities.threadIssueLinks === true;
+      if (!supportsThreadIssueLinks) return;
+      const currentIssue = useComposerDraftStore
+        .getState()
+        .getDraftSession(preparedDraftId)?.linkedIssue;
+      const linkedIssue = draftIssueAfterStart(currentIssue, input.issue);
+      if (linkedIssue !== undefined) setDraftLinkedIssue(preparedDraftId, linkedIssue);
     },
-    [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt],
+    [getComposerDraft, openOrReuseProjectDraftThread, setComposerDraftPrompt, setDraftLinkedIssue],
   );
 
   const handlePreparedPullRequestThread = useCallback(
@@ -9236,11 +9248,24 @@ export default function ChatView(props: ChatViewProps) {
         };
       }),
     );
+    const issueLaunchFields = (() => {
+      const supportsThreadIssueLinks =
+        appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+          .capabilities.threadIssueLinks === true;
+      if (!supportsThreadIssueLinks) return {};
+      const linkedIssue = durableIssueForSend({
+        linkedIssue: isLocalDraftThread ? localDraftThread?.linkedIssue : null,
+        cancelled: false,
+        belongsToDraft: isLocalDraftThread,
+      });
+      return linkedIssue === null ? {} : { linkedIssue };
+    })();
     if (multipleModelSelections !== null) {
       const failedSelections: ModelSelection[] = [];
       let clearedDraft = false;
       let releasedComposer = false;
       let canRestoreDraft = () => false;
+      let restoreDraftIssue = () => {};
       let startedCount = 0;
       try {
         const attachments = await turnAttachmentsPromise;
@@ -9260,6 +9285,10 @@ export default function ChatView(props: ChatViewProps) {
         );
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
+        restoreDraftIssue = consumeBackgroundDraftIssue({
+          draftId,
+          linkedIssue: issueLaunchFields.linkedIssue,
+        });
         composerRef.current?.resetCursorState();
         clearedDraft = true;
         const clearedDraftSnapshot = useComposerDraftStore
@@ -9324,6 +9353,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: null,
                       createdAt: messageCreatedAt,
+                      ...issueLaunchFields,
                     },
                     prepareWorktree: {
                       projectCwd: activeProject.workspaceRoot,
@@ -9400,8 +9430,6 @@ export default function ChatView(props: ChatViewProps) {
             }
           }),
         );
-        // Each request now owns its background thread. The original draft is
-        // ready for another prompt while checkout and setup scripts finish.
         sendInFlightRef.current = false;
         resetLocalDispatch();
         releasedComposer = true;
@@ -9425,6 +9453,7 @@ export default function ChatView(props: ChatViewProps) {
         );
       } finally {
         const restoreFailedDraft = () => {
+          restoreDraftIssue();
           setMultipleModelSelections(failedSelections);
           if (clearedDraft) {
             setComposerDraftPrompt(composerDraftTarget, messageTextForSend);
@@ -9648,6 +9677,7 @@ export default function ChatView(props: ChatViewProps) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...issueLaunchFields,
                     },
                   }
                 : {}),

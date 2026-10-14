@@ -1,8 +1,13 @@
 import {
+  buildLocalDraftThread,
+  consumeBackgroundDraftIssue,
   findRecordedWorktreeSetup,
   resolvePreparedWorktreeDraft,
   resolveVisibleWorktreeSetup,
 } from "./ChatView.logic";
+import { durableIssueForSend } from "@t3tools/contracts";
+import { DraftId, useComposerDraftStore, type DraftThreadState } from "../composerDraftStore";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   recallCheckoutIsRepo,
   rememberCheckoutIsRepo,
@@ -95,6 +100,236 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("background draft issue ownership", () => {
+  const draftId = DraftId.make("issue-background-draft");
+  const linkedIssue = {
+    host: "github.com",
+    repository: "acme/issues",
+    number: 14,
+    url: "https://github.com/acme/issues/issues/14",
+    title: "Fix login",
+    availability: "open" as const,
+  };
+
+  function prepareDraft() {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, { threadId });
+    store.setDraftLinkedIssue(draftId, linkedIssue);
+    store.setPrompt(draftId, "Fix login");
+    store.clearComposerContent(draftId);
+  }
+
+  function pendingLaunch() {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((finish, fail) => {
+      resolve = finish;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function issueForNextSend() {
+    const draft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    const thread = buildLocalDraftThread(threadId, draft, NO_PROVIDER_MODEL_SELECTION);
+    return durableIssueForSend({
+      linkedIssue: thread.linkedIssue,
+      cancelled: false,
+      belongsToDraft: true,
+    });
+  }
+
+  afterEach(() => useComposerDraftStore.getState().clearDraftThread(draftId));
+
+  it("does not attach the first batch's issue to a second send before launches settle", async () => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    const firstSendIssue = issueForNextSend();
+    consumeBackgroundDraftIssue({ draftId, linkedIssue: firstSendIssue });
+    useComposerDraftStore.getState().setPrompt(draftId, "Unrelated work");
+    const secondSendIssue = issueForNextSend();
+    launch.resolve();
+    await launch.promise;
+    expect(firstSendIssue).toEqual(linkedIssue);
+    expect(secondSendIssue).toEqual(null);
+    expect(issueForNextSend()).toEqual(null);
+  });
+
+  it.each([0, 1, 2])(
+    "restores the consumed issue only for failed selections, failed launches = %s",
+    async (failedCount) => {
+      prepareDraft();
+      const first = pendingLaunch();
+      const last = pendingLaunch();
+      const failedSelections: Array<{ instanceId: ProviderInstanceId; model: string }> = [];
+      const selections = ["model-a", "model-b"].map((model) => ({
+        instanceId: ProviderInstanceId.make("codex"),
+        model,
+      }));
+      const starts = Promise.all(
+        [first.promise, last.promise].map((start, index) =>
+          start.catch(() => {
+            failedSelections.push(selections[index]!);
+          }),
+        ),
+      );
+      const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+      if (failedCount === 2) first.reject(new Error("Launch failed"));
+      else first.resolve();
+      await first.promise.catch(() => undefined);
+      expect(issueForNextSend()).toEqual(null);
+      if (failedCount > 0) last.reject(new Error("Launch failed"));
+      else last.resolve();
+      await starts;
+      if (failedSelections.length > 0) restoreIssue();
+      useComposerDraftStore
+        .getState()
+        .setPrompt(draftId, failedCount > 0 ? "Retry login" : "Unrelated work");
+      expect(issueForNextSend()).toEqual(failedCount > 0 ? linkedIssue : null);
+      expect(failedSelections).toEqual(
+        failedCount === 2 ? selections : failedCount === 1 ? [selections[1]] : [],
+      );
+    },
+  );
+
+  it.each([false, true])("preserves newer issue edits on failure, unlink = %s", async (unlink) => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    const newerIssue = {
+      ...linkedIssue,
+      number: 15,
+      url: "https://github.com/acme/issues/issues/15",
+    };
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, newerIssue);
+    if (unlink) useComposerDraftStore.getState().setDraftLinkedIssue(draftId, null);
+    launch.reject(new Error("Launch failed"));
+    await launch.promise.catch(() => undefined);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(unlink ? null : newerIssue);
+  });
+
+  it.each(["runtime", "interaction", "project mapping"] as const)(
+    "restores the consumed issue after a %s mode edit during a failed batch",
+    async (edit) => {
+      prepareDraft();
+      const first = pendingLaunch();
+      const last = pendingLaunch();
+      const starts = Promise.allSettled([first.promise, last.promise]);
+      const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+      const store = useComposerDraftStore.getState();
+      const consumedDraft = store.getDraftSession(draftId)!;
+      const options =
+        edit === "interaction"
+          ? { interactionMode: "plan" as const }
+          : {
+              runtimeMode:
+                consumedDraft.runtimeMode === "full-access"
+                  ? ("approval-required" as const)
+                  : ("full-access" as const),
+            };
+      if (edit === "project mapping") {
+        store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, options);
+      } else {
+        store.setDraftThreadContext(draftId, options);
+      }
+      first.resolve();
+      await first.promise;
+      expect(issueForNextSend()).toEqual(null);
+      last.reject(new Error("Launch failed"));
+      const results = await starts;
+      if (results.some((result) => result.status === "rejected")) restoreIssue();
+      store.setPrompt(draftId, "Retry login");
+      expect(issueForNextSend()).toEqual(linkedIssue);
+      expect(store.getDraftSession(draftId)).toMatchObject(options);
+    },
+  );
+
+  it("restores the retry issue with delayed recovery after newer prompt work is cleared", async () => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    useComposerDraftStore.getState().setPrompt(draftId, "Unrelated work");
+    launch.reject(new Error("Launch failed"));
+    await launch.promise.catch(() => undefined);
+    expect(issueForNextSend()).toEqual(null);
+    useComposerDraftStore.getState().clearComposerContent(draftId);
+    restoreIssue();
+    useComposerDraftStore.getState().setPrompt(draftId, "Retry login");
+    expect(issueForNextSend()).toEqual(linkedIssue);
+    expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toEqual(
+      "Retry login",
+    );
+  });
+
+  it("preserves an explicit unlink while the issue is consumed", () => {
+    prepareDraft();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, null);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(null);
+  });
+
+  it("does not restore into a deleted and recreated draft", () => {
+    prepareDraft();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    const store = useComposerDraftStore.getState();
+    store.clearDraftThread(draftId);
+    restoreIssue();
+    expect(store.getDraftSession(draftId)).toEqual(null);
+    store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, { threadId });
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(null);
+  });
+
+  it("does not consume or overwrite an issue changed before launches begin", () => {
+    prepareDraft();
+    const newerIssue = {
+      ...linkedIssue,
+      number: 15,
+      url: "https://github.com/acme/issues/issues/15",
+    };
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, newerIssue);
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    expect(issueForNextSend()).toEqual(newerIssue);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(newerIssue);
+  });
+});
+
+it("keeps the stored draft issue through conversion into launch fields", () => {
+  const linkedIssue = {
+    host: "github.com",
+    repository: "acme/issues",
+    number: 14,
+    url: "https://github.com/acme/issues/issues/14",
+    title: "Fix login",
+    availability: "open" as const,
+  };
+  const draft: DraftThreadState = {
+    threadId,
+    environmentId,
+    projectId,
+    logicalProjectKey: "acme/issues",
+    createdAt: now,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    envMode: "local",
+    startFromOrigin: false,
+    linkedIssue,
+  };
+  const thread = buildLocalDraftThread(threadId, draft, NO_PROVIDER_MODEL_SELECTION);
+  expect(
+    durableIssueForSend({
+      linkedIssue: thread.linkedIssue,
+      cancelled: false,
+      belongsToDraft: true,
+    }),
+  ).toEqual(linkedIssue);
+});
 const helloWorldTemplate: CodexArtifactTemplate = {
   artifactKind: "document",
   displayName: "Hello World",

@@ -170,6 +170,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadVisitedTracking: Schema.optionalKey(Schema.Boolean),
   /** Server persists a pull request reference on thread.meta.update. */
   threadPullRequestLinking: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.issue.link / thread.issue.unlink and linkedIssue on turn start.
+      Absent on older servers, which drop those fields and reject the commands. */
+  threadIssueLinks: Schema.optionalKey(Schema.Boolean),
   /** Server resolves message delivery and model-selection context and validates
       identified rollback readiness. Clients retain projection-based command
       shaping and validation when this is absent. */

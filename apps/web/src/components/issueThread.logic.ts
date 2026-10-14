@@ -1,4 +1,6 @@
-import type { GitResolvedIssue } from "@t3tools/contracts";
+import { draftIssueAfterStart, type GitResolvedIssue } from "@t3tools/contracts";
+
+export { draftIssueAfterStart };
 
 /** The composer text a thread started from an issue opens with. */
 export function buildIssuePrompt(issue: GitResolvedIssue): string {

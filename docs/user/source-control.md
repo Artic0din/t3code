@@ -116,6 +116,12 @@ it. Starting the same issue again reuses its worktree.
 A bare number resolves in the repository `gh` picks for the project. In a fork, paste the full issue
 URL to be sure you get the fork's issue. Only GitHub issues are supported.
 
+Sending the draft saves its issue link on the thread, so you can reopen the issue after a restart.
+Cancelling the draft discards that link.
+On web and desktop, you can also link or replace an issue on an existing thread.
+Web, desktop, and mobile show the linked issue and other active or archived threads for that issue in the same environment.
+Unlinking an issue removes the association from that thread without changing the issue on GitHub.
+
 ## Create a pull request
 
 Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit

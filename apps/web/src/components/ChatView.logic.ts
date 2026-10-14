@@ -22,6 +22,7 @@ import {
   type ThreadContextRecord,
   type ThreadId,
   type ThreadLinkedPullRequest,
+  type ThreadLinkedIssue,
   type RunId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -47,7 +48,12 @@ import {
   type Thread,
   type TurnDiffSummary,
 } from "../types";
-import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
+import {
+  type ComposerImageAttachment,
+  type DraftId,
+  type DraftThreadState,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadShells, environmentThreadDetails } from "../state/threads";
@@ -546,6 +552,27 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   };
 }
 
+export function consumeBackgroundDraftIssue(input: {
+  readonly draftId: DraftId | null;
+  readonly linkedIssue: ThreadLinkedIssue | null | undefined;
+}): () => void {
+  const { draftId, linkedIssue } = input;
+  if (draftId === null || linkedIssue == null) return () => undefined;
+  const store = useComposerDraftStore.getState();
+  if (store.getDraftSession(draftId)?.linkedIssue !== linkedIssue) return () => undefined;
+  store.setDraftLinkedIssue(draftId, null);
+  const consumedIssueEditToken = store.getDraftSession(draftId)?.linkedIssueEditToken;
+  return () => {
+    const currentStore = useComposerDraftStore.getState();
+    if (
+      consumedIssueEditToken !== undefined &&
+      currentStore.getDraftSession(draftId)?.linkedIssueEditToken === consumedIssueEditToken
+    ) {
+      currentStore.setDraftLinkedIssue(draftId, linkedIssue);
+    }
+  };
+}
+
 export function buildLocalDraftThread(
   threadId: ThreadId,
   draftThread: DraftThreadState,
@@ -562,6 +589,7 @@ export function buildLocalDraftThread(
     interactionMode: draftThread.interactionMode,
     branch: draftThread.branch,
     worktreePath: draftThread.worktreePath,
+    ...(draftThread.linkedIssue === undefined ? {} : { linkedIssue: draftThread.linkedIssue }),
     activeProviderThreadId: null,
     lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
     forkedFrom: null,

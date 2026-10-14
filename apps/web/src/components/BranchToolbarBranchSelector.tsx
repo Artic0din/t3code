@@ -40,6 +40,7 @@ import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
 } from "./chat/threadDetailsPanelStyles";
 import { ThreadDetailsPrRows } from "./chat/ThreadDetailsPrRows";
+import { ThreadIssueRow } from "./chat/ThreadIssueRow";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { openIssueThreadDialog } from "./IssueThreadDialog";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
@@ -278,8 +279,9 @@ export function BranchToolbarBranchSelector({
     prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
   const issueReference = parseExplicitIssueReference(trimmedBranchQuery);
   // Shown wherever PR checkout is: both need a git project the chat view can open a draft in.
-  const supportsIssueThreads =
-    useServerConfigs().get(environmentId)?.environment.capabilities.issueThreads === true;
+  const environmentCapabilities = useServerConfigs().get(environmentId)?.environment.capabilities;
+  const supportsIssueThreads = environmentCapabilities?.issueThreads === true;
+  const supportsThreadIssueLinks = environmentCapabilities?.threadIssueLinks === true;
   const startFromIssueItemValue =
     issueReference &&
     onCheckoutPullRequestRequest &&
@@ -816,6 +818,14 @@ export function BranchToolbarBranchSelector({
             openAriaLabel={prUrl ?? "Open pull request"}
             onOpen={(event) => openPrLink(event, prUrl)}
             onActed={() => branchStatusQuery.refresh()}
+          />
+        ) : null}
+        {displayMode === "panel" && serverThread && supportsThreadIssueLinks ? (
+          <ThreadIssueRow
+            environmentId={environmentId}
+            threadId={serverThread.id}
+            cwd={serverThread.worktreePath ?? activeProject?.workspaceRoot ?? null}
+            linkedIssue={serverThread.linkedIssue ?? null}
           />
         ) : null}
       </div>

@@ -83,6 +83,7 @@ function threadDetailToShell(
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     linkedPullRequest: thread.linkedPullRequest ?? null,
+    ...(thread.linkedIssue === undefined ? {} : { linkedIssue: thread.linkedIssue }),
     pullRequests: thread.pullRequests,
     branchPullRequest: thread.branchPullRequest ?? null,
     activeProviderThreadId: thread.activeProviderThreadId,

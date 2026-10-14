@@ -9,15 +9,17 @@ import { useCallback, useMemo } from "react";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import { orchestrationEnvironment } from "../../state/orchestration";
+import { environmentCatalog } from "../../connection/catalog";
 
 function archivedSnapshotAtom(environmentId: EnvironmentId) {
-  return orchestrationEnvironment.archivedShellSnapshot({
+  return orchestrationEnvironment.archivedShell({
     environmentId,
     input: {},
   });
 }
 
 const archivedSnapshotsAtom = createArchivedThreadSnapshotsAtomFamily({
+  getConnectionStateAtom: environmentCatalog.stateAtom,
   getSnapshotAtom: archivedSnapshotAtom,
   labelPrefix: "mobile:archived-thread-snapshots",
 });
