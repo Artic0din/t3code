@@ -340,6 +340,7 @@ async function withEphemeralMcpServer<A>(
 async function measureClaude(
   withT3CodeMcp: boolean,
   cliVersion: string,
+  workspaceDir: string,
   mcp?: McpEndpoint,
 ): Promise<LiveTokenMeasurement> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
@@ -382,13 +383,14 @@ async function measureClaude(
       args.push("--append-system-prompt", T3_CODE_ORCHESTRATION_INSTRUCTIONS);
     }
     const result = await runCommand("claude", args, {
-      cwd: tempDir,
+      cwd: workspaceDir,
       env: {
         ...process.env,
         CLAUDE_CONFIG_DIR: configDir,
-        // Both switch Claude to a reduced prompt and toolset, which would change what is measured.
+        // These change the prompt, toolset, or MCP schema loading, which would change what is measured.
         CLAUDE_CODE_SIMPLE: undefined,
         CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT: undefined,
+        ENABLE_TOOL_SEARCH: undefined,
       },
     });
     if (result.status !== 0) {
@@ -416,6 +418,7 @@ function redactSecrets(text: string): string {
 async function measureCodex(
   withT3CodeMcp: boolean,
   cliVersion: string,
+  workspaceDir: string,
   mcp?: McpEndpoint,
 ): Promise<LiveTokenMeasurement> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-codex-"));
@@ -455,7 +458,7 @@ async function measureCodex(
     }
     NodeFS.writeFileSync(NodePath.join(isolatedHome, "config.toml"), configLines.join("\n"));
     const result = await runCommand("codex", args, {
-      cwd: tempDir,
+      cwd: workspaceDir,
       env: { ...process.env, CODEX_HOME: isolatedHome },
     });
     if (result.status !== 0) {
@@ -544,35 +547,53 @@ async function readAvailableCliVersion(command: string): Promise<string | undefi
 const claudeVersion = wantClaude ? await readAvailableCliVersion("claude") : undefined;
 const codexVersion = wantCodex ? await readAvailableCliVersion("codex") : undefined;
 
-try {
-  if (claudeVersion !== undefined) {
-    await withEphemeralMcpServer("claude", async (mcp) => {
-      const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
-      recordMeasurement(await measureClaude(false, claudeVersion), toolNames);
-      recordMeasurement(await measureClaude(true, claudeVersion, mcp), toolNames);
-    });
-  } else if (!wantClaude) {
-    console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
+let measurementFailed = false;
+async function measureProvider(
+  provider: MeasuredProvider,
+  measurePair: (workspaceDir: string, mcp: McpEndpoint) => Promise<void>,
+) {
+  // Both runs of a pair share one cwd, because providers render it into the prompt.
+  const workspaceDir = NodeFS.mkdtempSync(
+    NodePath.join(NodeOS.tmpdir(), `t3-mcp-measure-${provider}-workspace-`),
+  );
+  try {
+    await withEphemeralMcpServer(provider, (mcp) => measurePair(workspaceDir, mcp));
+  } catch (error) {
+    measurementFailed = true;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${provider} live token measurement failed:\n${redactSecrets(message)}`);
+  } finally {
+    NodeFS.rmSync(workspaceDir, { recursive: true, force: true });
   }
-  if (codexVersion !== undefined) {
-    await withEphemeralMcpServer("codex", async (mcp) => {
-      const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
-      recordMeasurement(await measureCodex(false, codexVersion), toolNames);
-      recordMeasurement(await measureCodex(true, codexVersion, mcp), toolNames);
-    });
-  } else if (!wantCodex) {
-    console.error(
-      "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
-    );
-  }
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`Live token measurement failed:\n${redactSecrets(message)}`);
-  console.error("Refusing to invent live token numbers.");
-  process.exit(2);
 }
 
-if (rows.length === 0) {
-  console.error("No live token rows were recorded.");
+if (claudeVersion !== undefined) {
+  await measureProvider("claude", async (workspaceDir, mcp) => {
+    const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
+    recordMeasurement(await measureClaude(false, claudeVersion, workspaceDir), toolNames);
+    recordMeasurement(await measureClaude(true, claudeVersion, workspaceDir, mcp), toolNames);
+  });
+} else if (!wantClaude) {
+  console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
+}
+if (codexVersion !== undefined) {
+  await measureProvider("codex", async (workspaceDir, mcp) => {
+    const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
+    recordMeasurement(await measureCodex(false, codexVersion, workspaceDir), toolNames);
+    recordMeasurement(await measureCodex(true, codexVersion, workspaceDir, mcp), toolNames);
+  });
+} else if (!wantCodex) {
+  console.error(
+    "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
+  );
+}
+
+if (measurementFailed || rows.length === 0) {
+  console.error(
+    rows.length === 0
+      ? "No live token rows were recorded."
+      : "A provider measurement failed; the rows above are incomplete.",
+  );
+  console.error("Refusing to invent live token numbers.");
   process.exit(2);
 }
