@@ -1,11 +1,13 @@
 import {
   buildLocalDraftThread,
+  completeBackgroundIssueLaunches,
   findRecordedWorktreeSetup,
   resolvePreparedWorktreeDraft,
   resolveVisibleWorktreeSetup,
 } from "./ChatView.logic";
 import { durableIssueForSend } from "@t3tools/contracts";
-import type { DraftThreadState } from "../composerDraftStore";
+import { DraftId, useComposerDraftStore, type DraftThreadState } from "../composerDraftStore";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   recallCheckoutIsRepo,
   rememberCheckoutIsRepo,
@@ -98,6 +100,128 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("background issue launch completion", () => {
+  const draftId = DraftId.make("issue-background-draft");
+  const linkedIssue = {
+    host: "github.com",
+    repository: "acme/issues",
+    number: 14,
+    url: "https://github.com/acme/issues/issues/14",
+    title: "Fix login",
+    availability: "open" as const,
+  };
+
+  function prepareDraft() {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, { threadId });
+    store.setDraftLinkedIssue(draftId, linkedIssue);
+    store.setPrompt(draftId, "Fix login");
+    store.clearComposerContent(draftId);
+  }
+
+  function pendingLaunch() {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((finish, fail) => {
+      resolve = finish;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function issueForNextSend() {
+    const draft = useComposerDraftStore.getState().getDraftSession(draftId)!;
+    const thread = buildLocalDraftThread(threadId, draft, NO_PROVIDER_MODEL_SELECTION);
+    return durableIssueForSend({
+      linkedIssue: thread.linkedIssue,
+      cancelled: false,
+      belongsToDraft: true,
+    });
+  }
+
+  afterEach(() => useComposerDraftStore.getState().clearDraftThread(draftId));
+
+  it.each([0, 1, 2])(
+    "consumes the issue only when every launch succeeds, failed launches = %s",
+    async (failedCount) => {
+      prepareDraft();
+      const first = pendingLaunch();
+      const last = pendingLaunch();
+      const failedSelections: Array<{ instanceId: ProviderInstanceId; model: string }> = [];
+      const selections = ["model-a", "model-b"].map((model) => ({
+        instanceId: ProviderInstanceId.make("codex"),
+        model,
+      }));
+      const starts = Promise.all(
+        [first.promise, last.promise].map((start, index) =>
+          start.catch(() => {
+            failedSelections.push(selections[index]!);
+          }),
+        ),
+      );
+      const completion = completeBackgroundIssueLaunches({
+        starts,
+        failedSelections,
+        draftId,
+        linkedIssue,
+        isCurrentSend: () => true,
+      });
+      if (failedCount === 2) first.reject(new Error("Launch failed"));
+      else first.resolve();
+      await first.promise.catch(() => undefined);
+      expect(issueForNextSend()).toEqual(linkedIssue);
+      if (failedCount > 0) last.reject(new Error("Launch failed"));
+      else last.resolve();
+      await completion;
+      useComposerDraftStore
+        .getState()
+        .setPrompt(draftId, failedCount > 0 ? "Retry login" : "Unrelated work");
+      expect(issueForNextSend()).toEqual(failedCount > 0 ? linkedIssue : null);
+      expect(failedSelections).toEqual(
+        failedCount === 2 ? selections : failedCount === 1 ? [selections[1]] : [],
+      );
+    },
+  );
+
+  it("preserves a newer issue selected while launches are pending", async () => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    const completion = completeBackgroundIssueLaunches({
+      starts: launch.promise,
+      failedSelections: [],
+      draftId,
+      linkedIssue,
+      isCurrentSend: () => true,
+    });
+    const newerIssue = {
+      ...linkedIssue,
+      number: 15,
+      url: "https://github.com/acme/issues/issues/15",
+    };
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, newerIssue);
+    launch.resolve();
+    await completion;
+    expect(issueForNextSend()).toEqual(newerIssue);
+  });
+
+  it("keeps the retry issue when an older batch succeeds after a newer send begins", async () => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    let sendGeneration = 1;
+    const completion = completeBackgroundIssueLaunches({
+      starts: launch.promise,
+      failedSelections: [],
+      draftId,
+      linkedIssue,
+      isCurrentSend: () => sendGeneration === 1,
+    });
+    sendGeneration = 2;
+    launch.resolve();
+    await completion;
+    expect(issueForNextSend()).toEqual(linkedIssue);
+  });
+});
 
 it("keeps the stored draft issue through conversion into launch fields", () => {
   const linkedIssue = {

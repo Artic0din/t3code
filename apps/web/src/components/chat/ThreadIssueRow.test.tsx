@@ -9,6 +9,7 @@ type LinkResult = { readonly _tag: "Success" } | { readonly _tag: "Failure" };
 
 const state = vi.hoisted(() => ({
   resolution: { data: null as unknown, error: null as string | null, isPending: false },
+  issueRequests: [] as string[],
   archivedRequests: [] as EnvironmentId[],
   archivedState: "success" as "success" | "loading" | "failure",
   archivedThreads: [] as unknown[],
@@ -29,10 +30,19 @@ vi.mock("~/state/threads", async () => {
 vi.mock("~/state/use-atom-command", () => ({
   useAtomCommand: (command: string) => (command === "link" ? state.linkIssue : state.unlinkIssue),
 }));
-vi.mock("~/state/sourceControlActions", () => ({
-  useIssueResolution: (target: { reference: string | null }) =>
-    target.reference === null ? { data: null, error: null, isPending: false } : state.resolution,
-}));
+vi.mock("~/state/sourceControlActions", async () => {
+  const { useEffect } = await import("react");
+  return {
+    useIssueResolution: (target: { reference: string | null }) => {
+      useEffect(() => {
+        if (target.reference !== null) state.issueRequests.push(target.reference);
+      }, [target.reference]);
+      return target.reference === null
+        ? { data: null, error: null, isPending: false }
+        : state.resolution;
+    },
+  };
+});
 vi.mock("../../rpc/atomRegistry", () => ({ appAtomRegistry: { refresh: vi.fn() } }));
 vi.mock("../../connection/catalog", async () => {
   const { Atom, AsyncResult } = await import("effect/reactivity");
@@ -112,8 +122,13 @@ function input() {
   return renderer.root.findByType("input");
 }
 
-async function type(value: string) {
+async function changeReference(value: string) {
   await act(async () => input().props.onChange({ target: { value } }));
+}
+
+async function type(value: string) {
+  await changeReference(value);
+  await act(async () => vi.advanceTimersByTimeAsync(450));
 }
 
 async function submit() {
@@ -121,9 +136,11 @@ async function submit() {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers();
   registry = AtomRegistry.make();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.resolution = { data: null, error: null, isPending: false };
+  state.issueRequests = [];
   state.archivedRequests = [];
   state.archivedState = "success";
   state.archivedThreads = [];
@@ -137,10 +154,58 @@ beforeEach(() => {
 afterEach(() => {
   act(() => renderer.unmount());
   registry.dispose();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("ThreadIssueRow", () => {
+  it("resolves only the final issue number after typing pauses", async () => {
+    await act(async () => {
+      renderer = create(row("thread-a"));
+    });
+    for (const value of ["1", "12", "123", "1234"]) {
+      await changeReference(value);
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+    }
+    expect(state.issueRequests).toEqual([]);
+    await act(async () => vi.advanceTimersByTimeAsync(349));
+    expect(state.issueRequests).toEqual([]);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(state.issueRequests).toEqual(["1234"]);
+    await type("not an issue");
+    expect(state.issueRequests).toEqual(["1234"]);
+  });
+
+  it.each(["resolved", "unavailable"])(
+    "does not submit the previous %s issue while a new reference is debouncing",
+    async (kind) => {
+      state.resolution =
+        kind === "resolved"
+          ? {
+              data: {
+                issue: { number: 12, title: "Fix login", body: null, url: issueUrl, state: "open" },
+              },
+              error: null,
+              isPending: false,
+            }
+          : { data: null, error: "GitHub issue not found (HTTP 404)", isPending: false };
+      await act(async () => {
+        renderer = create(row("thread-a"));
+      });
+      await type(issueUrl);
+      await submit();
+      expect(state.linkIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ input: expect.objectContaining({ number: 12 }) }),
+      );
+      state.linkIssue.mockClear();
+      await type(issueUrl);
+      await changeReference("https://github.com/acme/web/issues/13");
+      expect(renderer.root.findByProps({ type: "submit" }).props.disabled).toBe(true);
+      await submit();
+      expect(state.linkIssue).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ["resolved", "Success"],
     ["resolved", "Failure"],

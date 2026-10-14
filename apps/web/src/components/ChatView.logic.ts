@@ -22,6 +22,7 @@ import {
   type ThreadContextRecord,
   type ThreadId,
   type ThreadLinkedPullRequest,
+  type ThreadLinkedIssue,
   type RunId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -47,7 +48,12 @@ import {
   type Thread,
   type TurnDiffSummary,
 } from "../types";
-import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
+import {
+  type ComposerImageAttachment,
+  type DraftId,
+  type DraftThreadState,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadShells, environmentThreadDetails } from "../state/threads";
@@ -544,6 +550,28 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
+}
+
+export async function completeBackgroundIssueLaunches(input: {
+  readonly starts: Promise<unknown>;
+  readonly failedSelections: ReadonlyArray<ModelSelection>;
+  readonly draftId: DraftId | null;
+  readonly linkedIssue: ThreadLinkedIssue | null | undefined;
+  readonly isCurrentSend: () => boolean;
+}): Promise<void> {
+  await input.starts;
+  if (
+    input.failedSelections.length > 0 ||
+    input.draftId === null ||
+    input.linkedIssue == null ||
+    !input.isCurrentSend()
+  ) {
+    return;
+  }
+  const store = useComposerDraftStore.getState();
+  if (store.getDraftSession(input.draftId)?.linkedIssue === input.linkedIssue) {
+    store.setDraftLinkedIssue(input.draftId, null);
+  }
 }
 
 export function buildLocalDraftThread(

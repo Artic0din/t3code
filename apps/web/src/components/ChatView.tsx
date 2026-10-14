@@ -1,6 +1,7 @@
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
+  completeBackgroundIssueLaunches,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
@@ -9429,7 +9430,13 @@ export default function ChatView(props: ChatViewProps) {
         sendInFlightRef.current = false;
         resetLocalDispatch();
         releasedComposer = true;
-        await starts;
+        await completeBackgroundIssueLaunches({
+          starts,
+          failedSelections,
+          draftId,
+          linkedIssue: issueLaunchFields.linkedIssue,
+          isCurrentSend: () => composerSendGenerationRef.current === sendGeneration,
+        });
         if (startedCount > 0) {
           toastManager.add(
             stackedThreadToast({

@@ -1,5 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
+import { useDebouncedValue } from "@tanstack/react-pacer";
+import { parseIssueReference } from "@t3tools/shared/git";
 import {
   linkedIssueFromResolved,
   issueAvailabilityFromFailure,
@@ -66,18 +68,26 @@ function ThreadIssueRowForTarget(props: ThreadIssueRowProps) {
   const [reference, setReference] = useState("");
   const referenceRevision = useRef(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [debouncedReference, referenceDebouncer] = useDebouncedValue(
+    reference,
+    { wait: 450 },
+    (debouncerState) => ({ isPending: debouncerState.isPending }),
+  );
+  const parsedReference = parseIssueReference(reference);
+  const parsedDebouncedReference = parseIssueReference(debouncedReference);
   const resolution = useIssueResolution({
     environmentId: props.environmentId,
     cwd: props.cwd,
-    reference: reference.trim().length > 0 ? reference.trim() : null,
+    reference: parsedDebouncedReference,
   });
   const related =
     props.linkedIssue === null
       ? []
       : relatedIssueThreads(threads, props.linkedIssue, props.threadId);
   const availability = props.linkedIssue === null ? null : availabilityLabel(props.linkedIssue);
-  const resolved = resolution.data?.issue ?? null;
-  const resolutionDetail = resolution.error;
+  const referenceMatches = parsedReference !== null && parsedReference === parsedDebouncedReference;
+  const resolved = referenceMatches ? (resolution.data?.issue ?? null) : null;
+  const resolutionDetail = referenceMatches ? resolution.error : null;
   const unavailable =
     resolved === null && resolutionDetail !== null
       ? issueAvailabilityFromFailure(resolutionDetail)
@@ -85,7 +95,8 @@ function ThreadIssueRowForTarget(props: ThreadIssueRowProps) {
   const parsedFailure = unavailable === null ? null : parseGitHubIssueUrl(reference);
   const canSubmit =
     props.cwd !== null &&
-    reference.trim().length > 0 &&
+    referenceMatches &&
+    !referenceDebouncer.state.isPending &&
     !resolution.isPending &&
     (resolved !== null || parsedFailure !== null);
 
