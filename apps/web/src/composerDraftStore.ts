@@ -2956,7 +2956,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const existing = state.draftThreadsByThreadKey[threadKey];
             if (!existing) return state;
             const next = linkedIssue === null ? null : linkedIssue;
-            if ((existing.linkedIssue ?? null) === next) return state;
+            if (next !== null && existing.linkedIssue === next) return state;
             return {
               draftThreadsByThreadKey: {
                 ...state.draftThreadsByThreadKey,

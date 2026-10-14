@@ -1,7 +1,12 @@
-import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
+import {
+  ORCHESTRATION_V2_WS_METHODS,
+  type OrchestrationV2ArchivedShellSnapshot,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
 import * as Stream from "effect/Stream";
 import { applyArchivedShellStreamItem } from "./archivedThreads.ts";
+import { request } from "../rpc/client.ts";
 
 import {
   createEnvironmentRpcCommand,
@@ -73,7 +78,30 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       idleTtlMs: 0,
       transform: (stream) =>
         stream.pipe(
-          Stream.scan(() => null, applyArchivedShellStreamItem),
+          Stream.scanEffect(
+            (): OrchestrationV2ArchivedShellSnapshot | null => null,
+            (snapshot, item) => {
+              if (
+                item.kind === "thread.updated" &&
+                snapshot !== null &&
+                item.sequence > snapshot.snapshotSequence &&
+                !snapshot.projects.some((project) => project.id === item.thread.projectId)
+              ) {
+                const waitForReconnect = (cause: unknown) =>
+                  Effect.logWarning(
+                    "Archived thread project refresh lost its connection. Waiting for reconnect.",
+                    { cause },
+                  ).pipe(Effect.as(snapshot));
+                return request(ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot, {}).pipe(
+                  Effect.catchTags({
+                    EnvironmentRpcUnavailableError: waitForReconnect,
+                    RpcClientError: waitForReconnect,
+                  }),
+                );
+              }
+              return Effect.succeed(applyArchivedShellStreamItem(snapshot, item));
+            },
+          ),
           Stream.filter((snapshot) => snapshot !== null),
         ),
     }),

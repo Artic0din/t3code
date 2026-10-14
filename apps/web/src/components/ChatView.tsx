@@ -1,7 +1,7 @@
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
-  completeBackgroundIssueLaunches,
+  consumeBackgroundDraftIssue,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
@@ -9265,6 +9265,7 @@ export default function ChatView(props: ChatViewProps) {
       let clearedDraft = false;
       let releasedComposer = false;
       let canRestoreDraft = () => false;
+      let restoreDraftIssue = () => {};
       let startedCount = 0;
       try {
         const attachments = await turnAttachmentsPromise;
@@ -9284,6 +9285,10 @@ export default function ChatView(props: ChatViewProps) {
         );
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
+        restoreDraftIssue = consumeBackgroundDraftIssue({
+          draftId,
+          linkedIssue: issueLaunchFields.linkedIssue,
+        });
         composerRef.current?.resetCursorState();
         clearedDraft = true;
         const clearedDraftSnapshot = useComposerDraftStore
@@ -9425,18 +9430,10 @@ export default function ChatView(props: ChatViewProps) {
             }
           }),
         );
-        // Each request now owns its background thread. The original draft is
-        // ready for another prompt while checkout and setup scripts finish.
         sendInFlightRef.current = false;
         resetLocalDispatch();
         releasedComposer = true;
-        await completeBackgroundIssueLaunches({
-          starts,
-          failedSelections,
-          draftId,
-          linkedIssue: issueLaunchFields.linkedIssue,
-          isCurrentSend: () => composerSendGenerationRef.current === sendGeneration,
-        });
+        await starts;
         if (startedCount > 0) {
           toastManager.add(
             stackedThreadToast({
@@ -9456,6 +9453,7 @@ export default function ChatView(props: ChatViewProps) {
         );
       } finally {
         const restoreFailedDraft = () => {
+          restoreDraftIssue();
           setMultipleModelSelections(failedSelections);
           if (clearedDraft) {
             setComposerDraftPrompt(composerDraftTarget, messageTextForSend);

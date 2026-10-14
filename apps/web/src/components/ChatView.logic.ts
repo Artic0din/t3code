@@ -552,26 +552,22 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   };
 }
 
-export async function completeBackgroundIssueLaunches(input: {
-  readonly starts: Promise<unknown>;
-  readonly failedSelections: ReadonlyArray<ModelSelection>;
+export function consumeBackgroundDraftIssue(input: {
   readonly draftId: DraftId | null;
   readonly linkedIssue: ThreadLinkedIssue | null | undefined;
-  readonly isCurrentSend: () => boolean;
-}): Promise<void> {
-  await input.starts;
-  if (
-    input.failedSelections.length > 0 ||
-    input.draftId === null ||
-    input.linkedIssue == null ||
-    !input.isCurrentSend()
-  ) {
-    return;
-  }
+}): () => void {
+  const { draftId, linkedIssue } = input;
+  if (draftId === null || linkedIssue == null) return () => undefined;
   const store = useComposerDraftStore.getState();
-  if (store.getDraftSession(input.draftId)?.linkedIssue === input.linkedIssue) {
-    store.setDraftLinkedIssue(input.draftId, null);
-  }
+  if (store.getDraftSession(draftId)?.linkedIssue !== linkedIssue) return () => undefined;
+  store.setDraftLinkedIssue(draftId, null);
+  const consumedDraft = store.getDraftSession(draftId);
+  return () => {
+    const currentStore = useComposerDraftStore.getState();
+    if (consumedDraft !== null && currentStore.getDraftSession(draftId) === consumedDraft) {
+      currentStore.setDraftLinkedIssue(draftId, linkedIssue);
+    }
+  };
 }
 
 export function buildLocalDraftThread(

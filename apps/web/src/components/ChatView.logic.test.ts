@@ -1,6 +1,6 @@
 import {
   buildLocalDraftThread,
-  completeBackgroundIssueLaunches,
+  consumeBackgroundDraftIssue,
   findRecordedWorktreeSetup,
   resolvePreparedWorktreeDraft,
   resolveVisibleWorktreeSetup,
@@ -101,7 +101,7 @@ const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
 
-describe("background issue launch completion", () => {
+describe("background draft issue ownership", () => {
   const draftId = DraftId.make("issue-background-draft");
   const linkedIssue = {
     host: "github.com",
@@ -142,8 +142,22 @@ describe("background issue launch completion", () => {
 
   afterEach(() => useComposerDraftStore.getState().clearDraftThread(draftId));
 
+  it("does not attach the first batch's issue to a second send before launches settle", async () => {
+    prepareDraft();
+    const launch = pendingLaunch();
+    const firstSendIssue = issueForNextSend();
+    consumeBackgroundDraftIssue({ draftId, linkedIssue: firstSendIssue });
+    useComposerDraftStore.getState().setPrompt(draftId, "Unrelated work");
+    const secondSendIssue = issueForNextSend();
+    launch.resolve();
+    await launch.promise;
+    expect(firstSendIssue).toEqual(linkedIssue);
+    expect(secondSendIssue).toEqual(null);
+    expect(issueForNextSend()).toEqual(null);
+  });
+
   it.each([0, 1, 2])(
-    "consumes the issue only when every launch succeeds, failed launches = %s",
+    "restores the consumed issue only for failed selections, failed launches = %s",
     async (failedCount) => {
       prepareDraft();
       const first = pendingLaunch();
@@ -160,20 +174,15 @@ describe("background issue launch completion", () => {
           }),
         ),
       );
-      const completion = completeBackgroundIssueLaunches({
-        starts,
-        failedSelections,
-        draftId,
-        linkedIssue,
-        isCurrentSend: () => true,
-      });
+      const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
       if (failedCount === 2) first.reject(new Error("Launch failed"));
       else first.resolve();
       await first.promise.catch(() => undefined);
-      expect(issueForNextSend()).toEqual(linkedIssue);
+      expect(issueForNextSend()).toEqual(null);
       if (failedCount > 0) last.reject(new Error("Launch failed"));
       else last.resolve();
-      await completion;
+      await starts;
+      if (failedSelections.length > 0) restoreIssue();
       useComposerDraftStore
         .getState()
         .setPrompt(draftId, failedCount > 0 ? "Retry login" : "Unrelated work");
@@ -184,42 +193,72 @@ describe("background issue launch completion", () => {
     },
   );
 
-  it("preserves a newer issue selected while launches are pending", async () => {
+  it.each([false, true])("preserves newer issue edits on failure, unlink = %s", async (unlink) => {
     prepareDraft();
     const launch = pendingLaunch();
-    const completion = completeBackgroundIssueLaunches({
-      starts: launch.promise,
-      failedSelections: [],
-      draftId,
-      linkedIssue,
-      isCurrentSend: () => true,
-    });
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
     const newerIssue = {
       ...linkedIssue,
       number: 15,
       url: "https://github.com/acme/issues/issues/15",
     };
     useComposerDraftStore.getState().setDraftLinkedIssue(draftId, newerIssue);
-    launch.resolve();
-    await completion;
-    expect(issueForNextSend()).toEqual(newerIssue);
+    if (unlink) useComposerDraftStore.getState().setDraftLinkedIssue(draftId, null);
+    launch.reject(new Error("Launch failed"));
+    await launch.promise.catch(() => undefined);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(unlink ? null : newerIssue);
   });
 
-  it("keeps the retry issue when an older batch succeeds after a newer send begins", async () => {
+  it("restores the retry issue with delayed recovery after newer prompt work is cleared", async () => {
     prepareDraft();
     const launch = pendingLaunch();
-    let sendGeneration = 1;
-    const completion = completeBackgroundIssueLaunches({
-      starts: launch.promise,
-      failedSelections: [],
-      draftId,
-      linkedIssue,
-      isCurrentSend: () => sendGeneration === 1,
-    });
-    sendGeneration = 2;
-    launch.resolve();
-    await completion;
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    useComposerDraftStore.getState().setPrompt(draftId, "Unrelated work");
+    launch.reject(new Error("Launch failed"));
+    await launch.promise.catch(() => undefined);
+    expect(issueForNextSend()).toEqual(null);
+    useComposerDraftStore.getState().clearComposerContent(draftId);
+    restoreIssue();
+    useComposerDraftStore.getState().setPrompt(draftId, "Retry login");
     expect(issueForNextSend()).toEqual(linkedIssue);
+    expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toEqual(
+      "Retry login",
+    );
+  });
+
+  it("preserves an explicit unlink while the issue is consumed", () => {
+    prepareDraft();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, null);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(null);
+  });
+
+  it("does not restore into a deleted and recreated draft", () => {
+    prepareDraft();
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    const store = useComposerDraftStore.getState();
+    store.clearDraftThread(draftId);
+    restoreIssue();
+    expect(store.getDraftSession(draftId)).toEqual(null);
+    store.setProjectDraftThreadId(scopeProjectRef(environmentId, projectId), draftId, { threadId });
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(null);
+  });
+
+  it("does not consume or overwrite an issue changed before launches begin", () => {
+    prepareDraft();
+    const newerIssue = {
+      ...linkedIssue,
+      number: 15,
+      url: "https://github.com/acme/issues/issues/15",
+    };
+    useComposerDraftStore.getState().setDraftLinkedIssue(draftId, newerIssue);
+    const restoreIssue = consumeBackgroundDraftIssue({ draftId, linkedIssue });
+    expect(issueForNextSend()).toEqual(newerIssue);
+    restoreIssue();
+    expect(issueForNextSend()).toEqual(newerIssue);
   });
 });
 
