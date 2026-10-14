@@ -53,17 +53,16 @@ const ToolsListPayload = Schema.fromJsonString(
 );
 const decodeToolsListPayload = Schema.decodeUnknownEffect(ToolsListPayload);
 
-it("records the static t3-code MCP context baseline from source", () => {
+it("records the current registered toolkit union and instruction sizes", () => {
   const baseline = measureT3CodeMcpContextBaseline();
-  expect(baseline.toolCount).toBe(80);
-  expect(baseline.toolNames).toHaveLength(80);
+  expect(baseline.toolNames).toHaveLength(baseline.toolCount);
   expect(baseline.toolNames).toContain("delegate_task");
   expect(baseline.toolNames).toContain("t3_thread_launch");
   expect(baseline.orchestrationInstructionsBytes).toBe(6615);
   expect(baseline.orchestrationInstructionsTrimmedBytes).toBe(6612);
 });
 
-it.effect("credential session tools/list matches the source toolkit baseline", () =>
+it.effect("credential session lists registered tools without requiring the entire union", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const baseline = measureT3CodeMcpContextBaseline();
@@ -120,8 +119,9 @@ it.effect("credential session tools/list matches the source toolkit baseline", (
       const bodyText = yield* listResponse.text;
       const payload = yield* decodeToolsListPayload(bodyText.match(/\{.*\}/s)![0]);
       const listedNames = payload.result.tools.map((tool) => tool.name).sort();
-      expect(listedNames).toEqual([...baseline.toolNames]);
-      expect(listedNames).toHaveLength(baseline.toolCount);
+      expect(baseline.toolNames).toEqual(expect.arrayContaining(listedNames));
+      expect(listedNames).toContain("delegate_task");
+      expect(listedNames).toContain("t3_thread_launch");
     }),
   ).pipe(
     Effect.provide(

@@ -11,8 +11,7 @@ import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../provider/T3OrchestrationInstructions.ts";
 
-/** Toolkits registered for every credential session on `McpHttpServer.layer`. */
-const T3_CODE_CREDENTIAL_SESSION_TOOLKITS = [
+const T3_CODE_REGISTERED_TOOLKITS = [
   OrchestratorToolkit,
   PreviewToolkit,
   WorktreeToolkit,
@@ -35,7 +34,7 @@ export type T3CodeMcpContextBaseline = {
 
 export function measureT3CodeMcpContextBaseline(): T3CodeMcpContextBaseline {
   const names = new Set<string>();
-  for (const toolkit of T3_CODE_CREDENTIAL_SESSION_TOOLKITS) {
+  for (const toolkit of T3_CODE_REGISTERED_TOOLKITS) {
     for (const tool of Object.values(toolkit.tools)) {
       names.add(tool.name);
     }

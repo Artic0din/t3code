@@ -13,6 +13,7 @@ import * as ServerConfig from "../src/config.ts";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpRouter } from "effect/http";
@@ -38,17 +39,16 @@ import {
   buildCodexDeveloperInstructions,
 } from "../src/provider/CodexDeveloperInstructions.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../src/provider/T3OrchestrationInstructions.ts";
+import { seedCodexAuth } from "./codexAuthSeed.ts";
+import {
+  formatLiveTokenRow,
+  readCredentialMcpToolNames,
+  type LiveTokenMeasurement,
+  type MeasuredProvider,
+} from "./mcpContextMeasurement.ts";
 
 const TRIVIAL_PROMPT = "Reply with exactly: ok";
 const CODEX_MEASURE_MODEL = process.env.T3_MCP_MEASURE_CODEX_MODEL?.trim() || "gpt-5.4";
-
-type LiveTokenRow = {
-  readonly provider: "claude" | "codex";
-  readonly withT3CodeMcp: boolean;
-  readonly inputTokens: number;
-  readonly model: string;
-  readonly cliVersion: string;
-};
 
 type McpEndpoint = {
   readonly url: string;
@@ -124,15 +124,18 @@ function reserveLoopbackPort(): Promise<number> {
   });
 }
 
-function runCommand(
+async function runCommand(
   command: string,
   args: ReadonlyArray<string>,
   options: { readonly env?: NodeJS.ProcessEnv; readonly cwd?: string } = {},
 ): Promise<{ readonly stdout: string; readonly stderr: string; readonly status: number | null }> {
+  const env = options.env ?? process.env;
+  const spawnCommand = await Effect.runPromise(resolveSpawnCommand(command, args, { env }));
   return new Promise((resolve, reject) => {
-    const child = NodeChildProcess.spawn(command, [...args], {
-      env: options.env ?? process.env,
+    const child = NodeChildProcess.spawn(spawnCommand.command, [...spawnCommand.args], {
+      env,
       cwd: options.cwd ?? process.cwd(),
+      shell: spawnCommand.shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -274,7 +277,10 @@ function buildCodexMeasureDeveloperInstructions(model: string): string {
   return [collaboration, ...additionalBlocks].join("\n\n");
 }
 
-async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>): Promise<A> {
+async function withEphemeralMcpServer<A>(
+  provider: MeasuredProvider,
+  use: (mcp: McpEndpoint) => Promise<A>,
+): Promise<A> {
   const port = await reserveLoopbackPort();
   return Effect.runPromise(
     Effect.scoped(
@@ -311,7 +317,11 @@ async function withEphemeralMcpServer<A>(use: (mcp: McpEndpoint) => Promise<A>):
 
         const credential = yield* McpSessionRegistry.issueActiveMcpCredential({
           threadId: ThreadId.make(`thread-mcp-measure-${NodeCrypto.randomUUID()}`),
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make(
+            provider === "claude" ? "claudeAgent" : "codex",
+          ),
+          browserToolsAvailable: true,
+          capabilities: new Set(["preview"]),
         });
         if (credential === undefined) {
           return yield* Effect.die("Failed to issue MCP credential");
@@ -331,11 +341,9 @@ async function measureClaude(
   withT3CodeMcp: boolean,
   cliVersion: string,
   mcp?: McpEndpoint,
-): Promise<LiveTokenRow> {
+): Promise<LiveTokenMeasurement> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-claude-"));
   try {
-    // Isolate via CLAUDE_CONFIG_DIR + --strict-mcp-config instead of --bare so
-    // the built-in claude_code tool surface matches production.
     const configDir = NodePath.join(tempDir, "claude-config");
     NodeFS.mkdirSync(configDir, { recursive: true });
     const mcpConfigPath = NodePath.join(tempDir, "mcp.json");
@@ -406,8 +414,9 @@ async function measureCodex(
   withT3CodeMcp: boolean,
   cliVersion: string,
   mcp?: McpEndpoint,
-): Promise<LiveTokenRow> {
+): Promise<LiveTokenMeasurement> {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-measure-codex-"));
+  let syncBackAuth = () => {};
   try {
     const args = [
       "exec",
@@ -419,17 +428,9 @@ async function measureCodex(
       CODEX_MEASURE_MODEL,
       TRIVIAL_PROMPT,
     ];
-    // Both sides use an isolated CODEX_HOME so the user's global MCP servers
-    // and developer instructions do not contaminate the delta. Seed auth from
-    // the ambient CODEX_HOME (or ~/.codex) captured before isolation.
-    const sourceAuthPath = NodePath.join(ambientCodexHome(), "auth.json");
     const isolatedHome = NodePath.join(tempDir, "codex-home");
     NodeFS.mkdirSync(isolatedHome, { recursive: true });
-    NodeFS.symlinkSync(sourceAuthPath, NodePath.join(isolatedHome, "auth.json"));
-    // Same developer_instructions on both sides so the live delta isolates MCP
-    // tool schemas. CLI config cannot replace Codex's built-in collaboration
-    // prompt the way the app-server path does; absolute totals are still not
-    // production-identical.
+    syncBackAuth = seedCodexAuth(NodePath.join(ambientCodexHome(), "auth.json"), isolatedHome);
     const configLines: string[] = [
       `developer_instructions = ${JSON.stringify(buildCodexMeasureDeveloperInstructions(CODEX_MEASURE_MODEL))}`,
       "",
@@ -476,14 +477,33 @@ async function measureCodex(
       );
     }
   } finally {
-    NodeFS.rmSync(tempDir, { recursive: true, force: true });
+    try {
+      syncBackAuth();
+    } finally {
+      NodeFS.rmSync(tempDir, { recursive: true, force: true });
+    }
   }
 }
 
 const baseline = measureT3CodeMcpContextBaseline();
+const sourceRoot = NodePath.resolve(import.meta.dirname, "../../..");
+const sourceHead = await runCommand("git", ["rev-parse", "HEAD"], { cwd: sourceRoot });
+const sourceStatus = await runCommand(
+  "git",
+  ["status", "--porcelain", "--untracked-files=normal"],
+  {
+    cwd: sourceRoot,
+  },
+);
+if (sourceHead.status !== 0 || sourceStatus.status !== 0) {
+  throw new Error("Could not determine measurement source provenance");
+}
 console.log(
   JSON.stringify({
-    kind: "static-baseline",
+    kind: "static-source-baseline",
+    toolListingScope: "registered-toolkit-union",
+    sourceHeadCommit: sourceHead.stdout.trim(),
+    sourceWorktreeDirty: sourceStatus.stdout.trim() !== "",
     toolCount: baseline.toolCount,
     orchestrationInstructionsBytes: baseline.orchestrationInstructionsBytes,
     orchestrationInstructionsTrimmedBytes: baseline.orchestrationInstructionsTrimmedBytes,
@@ -504,37 +524,41 @@ if (!wantClaude && !wantCodex) {
   process.exit(2);
 }
 
-const rows: LiveTokenRow[] = [];
+const rows: LiveTokenMeasurement[] = [];
+function recordMeasurement(measurement: LiveTokenMeasurement, toolNames: ReadonlyArray<string>) {
+  rows.push(measurement);
+  console.log(JSON.stringify(formatLiveTokenRow(measurement, toolNames)));
+}
 const claudeVersion = wantClaude ? await readCliVersion("claude") : undefined;
 const codexVersion = wantCodex ? await readCliVersion("codex") : undefined;
 
 try {
-  await withEphemeralMcpServer(async (mcp) => {
-    if (wantClaude) {
-      if (claudeVersion === undefined) {
-        throw new Error("Claude version missing after readCliVersion");
-      }
-      rows.push(await measureClaude(false, claudeVersion));
-      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(await measureClaude(true, claudeVersion, mcp));
-      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-    } else {
-      console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
+  if (wantClaude) {
+    if (claudeVersion === undefined) {
+      throw new Error("Claude version missing after readCliVersion");
     }
-    if (wantCodex) {
-      if (codexVersion === undefined) {
-        throw new Error("Codex version missing after readCliVersion");
-      }
-      rows.push(await measureCodex(false, codexVersion));
-      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-      rows.push(await measureCodex(true, codexVersion, mcp));
-      console.log(JSON.stringify({ kind: "live-first-turn-input-tokens", ...rows.at(-1)! }));
-    } else {
-      console.error(
-        "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
-      );
+    await withEphemeralMcpServer("claude", async (mcp) => {
+      const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
+      recordMeasurement(await measureClaude(false, claudeVersion), toolNames);
+      recordMeasurement(await measureClaude(true, claudeVersion, mcp), toolNames);
+    });
+  } else {
+    console.error("Claude live measurement skipped: ANTHROPIC_API_KEY is not set.");
+  }
+  if (wantCodex) {
+    if (codexVersion === undefined) {
+      throw new Error("Codex version missing after readCliVersion");
     }
-  });
+    await withEphemeralMcpServer("codex", async (mcp) => {
+      const toolNames = await readCredentialMcpToolNames(mcp.url, mcp.authorizationHeader);
+      recordMeasurement(await measureCodex(false, codexVersion), toolNames);
+      recordMeasurement(await measureCodex(true, codexVersion, mcp), toolNames);
+    });
+  } else {
+    console.error(
+      "Codex live measurement skipped: no credentials in $CODEX_HOME/auth.json (or ~/.codex), and no OPENAI_API_KEY.",
+    );
+  }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Live token measurement failed:\n${redactSecrets(message)}`);
