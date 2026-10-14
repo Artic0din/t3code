@@ -8,6 +8,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -81,6 +82,7 @@ import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { gitHubApiHostForRemote } from "../sourceControl/GitHubCli.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
@@ -266,6 +268,42 @@ export function pullRequestRepositoryKey(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+const issueBranchRepositoryConfig = "t3code-issue-repository";
+
+function issueRepositoryKey(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const match = /^(.*)\/issues\/\d+(?:\/.*)?$/iu.exec(url.pathname);
+    if (match?.[1] === undefined) return null;
+    url.pathname = match[1];
+    url.search = "";
+    url.hash = "";
+    const normalized = normalizeGitRemoteUrl(url.toString());
+    return `${url.host.toLowerCase()}/${normalized.split("/").slice(1).join("/")}`;
+  } catch {
+    return null;
+  }
+}
+
+function hostedIssueRepositoryKey(remoteUrl: string, expected: string): string | null {
+  const raw = remoteUrl.trim();
+  if (/^[a-zA-Z]:/u.test(raw)) return null;
+  const protocolUrl = /^(?:ssh|https?|git):\/\//iu.test(raw);
+  const scp = raw.includes("://") ? null : /^(?:[a-zA-Z0-9._-]+@)?([^:/\s]+):(.+)$/u.exec(raw);
+  if (!protocolUrl && scp === null) return null;
+  const url = protocolUrl ? raw : `git@${scp![1]}:${scp![2]!.replace(/^\/+/u, "")}`;
+  const normalized = normalizeGitRemoteUrl(url);
+  if (normalized.includes("://")) return null;
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length < 3) return null;
+  const httpUrl = /^https?:\/\//iu.test(url);
+  if (httpUrl) segments[0] = new URL(url).host.toLowerCase();
+  const repository = segments.join("/");
+  if (httpUrl || repository === expected) return repository;
+  const apiHost = gitHubApiHostForRemote(url);
+  return apiHost === null ? repository : [apiHost, ...segments.slice(1)].join("/");
 }
 
 function parseRepositoryNameFromPullRequestUrl(url: string): string | null {
@@ -2433,6 +2471,28 @@ export const make = Effect.gen(function* () {
   const prepareIssueThread: GitManager["Service"]["prepareIssueThread"] = Effect.fn(
     "prepareIssueThread",
   )(function* (input) {
+    const readIssueBranchRepository = (branchName: string) =>
+      gitCore
+        .execute({
+          operation: "GitManager.prepareIssueThread.issueRepository",
+          cwd: input.cwd,
+          args: ["config", "--get", `branch.${branchName}.${issueBranchRepositoryConfig}`],
+          allowNonZeroExit: true,
+        })
+        .pipe(Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : "")));
+    const rememberIssueRepository = (branchName: string, repository: string | null) =>
+      repository === null
+        ? Effect.void
+        : gitCore.execute({
+            operation: "GitManager.prepareIssueThread.recordIssueRepository",
+            cwd: input.cwd,
+            args: [
+              "config",
+              "--local",
+              `branch.${branchName}.${issueBranchRepositoryConfig}`,
+              repository,
+            ],
+          });
     const runSetupScript = (worktreePath: string) =>
       input.threadId === undefined
         ? Effect.void
@@ -2450,6 +2510,28 @@ export const make = Effect.gen(function* () {
     const prepared = yield* Effect.gen(function* () {
       const issue = yield* readIssue(input.cwd, input.reference, "prepareIssueThread");
       const branch = buildIssueBranchName(issue.number, issue.title);
+      const repositoryKey = issueRepositoryKey(issue.url);
+      const matchesIssueRepository = (branchName: string, remoteName?: string) =>
+        Effect.gen(function* () {
+          if (remoteName !== undefined) {
+            if (repositoryKey === null) return false;
+            const urls = yield* gitCore.execute({
+              operation: "GitManager.prepareIssueThread.remoteRepository",
+              cwd: input.cwd,
+              args: ["config", "--get-all", `remote.${remoteName}.url`],
+              allowNonZeroExit: true,
+            });
+            const firstUrl = urls.stdout.split("\n").find((line) => line.trim().length > 0);
+            return (
+              urls.exitCode === 0 &&
+              firstUrl !== undefined &&
+              hostedIssueRepositoryKey(firstUrl, repositoryKey) === repositoryKey
+            );
+          }
+          const recorded = yield* readIssueBranchRepository(branchName);
+          // Legacy local branches keep their original reuse behavior and are not relabeled.
+          return recorded.length === 0 || recorded === repositoryKey;
+        });
 
       // A worktree folder deleted by hand stays registered and blocks `git worktree add`.
       yield* gitCore.pruneWorktrees({ cwd: input.cwd });
@@ -2460,12 +2542,41 @@ export const make = Effect.gen(function* () {
         query: issueBranchPrefix,
         refKind: "all",
         refresh: true,
+        includeMatchingRemoteRefs: true,
       });
       const localRefs = refs.filter((ref) => !ref.isRemote);
+      const firstForThisIssue = (
+        candidates: ReadonlyArray<VcsRef>,
+        nameOf: (ref: VcsRef) => string,
+      ) =>
+        Effect.gen(function* () {
+          const ordered = [
+            ...candidates.filter((ref) => nameOf(ref) === branch),
+            ...candidates.filter(
+              (ref) => nameOf(ref) !== branch && nameOf(ref).startsWith(issueBranchPrefix),
+            ),
+          ];
+          for (const ref of ordered) {
+            if (ref.isRemote === true && ref.remoteName === undefined) continue;
+            if (yield* matchesIssueRepository(nameOf(ref), ref.remoteName)) return ref;
+          }
+          return undefined;
+        });
+      const availableBranchName = (name: string) =>
+        Effect.gen(function* () {
+          if (
+            repositoryKey === null ||
+            !localRefs.some((ref) => ref.name === name) ||
+            (yield* matchesIssueRepository(name))
+          )
+            return name;
+          const digest = yield* crypto
+            .digest("SHA-256", new TextEncoder().encode(repositoryKey))
+            .pipe(Effect.orDie);
+          return `${issueBranchPrefix}${Hex.encode(digest).slice(0, 12)}`;
+        });
       // The slug follows the title, so a renamed issue still finds its branch by number.
-      const existing =
-        localRefs.find((ref) => ref.name === branch) ??
-        localRefs.find((ref) => ref.name.startsWith(issueBranchPrefix));
+      const existing = yield* firstForThisIssue(localRefs, (ref) => ref.name);
       if (existing?.worktreePath) {
         const existingPath = yield* canonicalizeExistingPath(existing.worktreePath);
         const cwdPath = yield* canonicalizeExistingPath(input.cwd);
@@ -2481,6 +2592,7 @@ export const make = Effect.gen(function* () {
           branch: existing.name,
           worktreePath: existing.worktreePath,
           created: false,
+          recordRepository: false,
         };
       }
 
@@ -2488,11 +2600,12 @@ export const make = Effect.gen(function* () {
         Effect.map((settings) => settings.worktreeSubmodules),
         Effect.orElseSucceed(() => null),
       );
-      const finish = (worktree: VcsCreateWorktreeResult) => ({
+      const finish = (worktree: VcsCreateWorktreeResult, recordRepository = false) => ({
         issue,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
         created: true,
+        recordRepository,
       });
       const worktreesDirectory = yield* readWorktreesDirectory;
       if (existing) {
@@ -2510,8 +2623,9 @@ export const make = Effect.gen(function* () {
         ref.remoteName && ref.name.startsWith(`${ref.remoteName}/`)
           ? ref.name.slice(ref.remoteName.length + 1)
           : deriveLocalBranchNameFromRemoteRef(ref.name);
-      const remoteRef = refs.find(
-        (ref) => ref.isRemote === true && localNameOf(ref).startsWith(issueBranchPrefix),
+      const remoteRef = yield* firstForThisIssue(
+        refs.filter((ref) => ref.isRemote === true),
+        localNameOf,
       );
       if (remoteRef) {
         return finish(
@@ -2519,11 +2633,12 @@ export const make = Effect.gen(function* () {
             {
               cwd: input.cwd,
               refName: remoteRef.name,
-              newRefName: localNameOf(remoteRef),
+              newRefName: yield* availableBranchName(localNameOf(remoteRef)),
               path: null,
             },
             { submodules, worktreesDirectory },
           ),
+          true,
         );
       }
 
@@ -2600,16 +2715,22 @@ export const make = Effect.gen(function* () {
           {
             cwd: input.cwd,
             refName: startRef,
-            newRefName: branch,
+            newRefName: yield* availableBranchName(branch),
             baseRefName: baseBranch,
             path: null,
           },
           { submodules, worktreesDirectory },
         ),
+        true,
       );
     }).pipe(
       // Launching setup only opens its terminal, so it stays inside the lock: a second start of
       // the same issue must not return before the creator has launched setup.
+      Effect.tap((result) =>
+        result.recordRepository
+          ? rememberIssueRepository(result.branch, issueRepositoryKey(result.issue.url))
+          : Effect.void,
+      ),
       Effect.tap((result) => (result.created ? runSetupScript(result.worktreePath) : Effect.void)),
       (yield* issueThreadLockFor(input.cwd)).withPermits(1),
       Effect.ensuring(invalidateStatus(input.cwd)),
