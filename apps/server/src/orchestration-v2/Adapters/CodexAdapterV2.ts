@@ -3963,10 +3963,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               status: codexPlanStepStatus(step.status),
             }));
             const explanation = trimText(payload.explanation);
+            const completed =
+              steps.length > 0 && steps.every((step) => step.status === "completed");
             const artifacts = yield* buildTodoListArtifacts({
               context,
               nativeItemId: `turn-plan:${payload.turnId}`,
-              status: "active",
+              status: completed ? "completed" : "active",
+              completed,
               ...(explanation === undefined ? {} : { explanation }),
               steps,
             });

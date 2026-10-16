@@ -6,12 +6,15 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  MessageId,
+  PlanId,
   RunId,
   ThreadId,
   TurnItemId,
   OrchestrationV2ContextHandoff,
   type OrchestrationV2HistoricalMessage,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -71,6 +74,75 @@ const messages = [
   message("item:one", "user", "Preserve every line.\n\n  And this indentation.\n"),
   message("item:two", "assistant", "Partial work: 日本語 🧪 مرحبا\n" + "x".repeat(600)),
 ];
+const turnBase = {
+  threadId,
+  runId: RunId.make("run:source"),
+  nodeId: null,
+  providerThreadId: ProviderThreadId.make("provider-thread:source"),
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  status: "completed" as const,
+  title: null,
+  startedAt: now,
+  completedAt: now,
+  updatedAt: now,
+};
+function userTurn(id: string, text: string, ordinal: number): OrchestrationV2TurnItem {
+  return {
+    ...turnBase,
+    id: TurnItemId.make(id),
+    ordinal,
+    messageId: MessageId.make(`message:${id}`),
+    createdBy: "user",
+    creationSource: "server",
+    type: "user_message",
+    inputIntent: "turn_start",
+    text,
+    attachments: [],
+  };
+}
+function assistantTurn(id: string, text: string, ordinal: number): OrchestrationV2TurnItem {
+  return {
+    ...turnBase,
+    id: TurnItemId.make(id),
+    ordinal,
+    messageId: MessageId.make(`message:${id}`),
+    type: "assistant_message",
+    text,
+    streaming: false,
+  };
+}
+function todoTurn(input: {
+  readonly id: string;
+  readonly planId: string;
+  readonly ordinal: number;
+  readonly steps: ReadonlyArray<{
+    readonly text: string;
+    readonly status: "pending" | "running" | "completed";
+  }>;
+  readonly explanation?: string;
+}): Extract<OrchestrationV2TurnItem, { readonly type: "todo_list" }> {
+  return {
+    ...turnBase,
+    id: TurnItemId.make(input.id),
+    ordinal: input.ordinal,
+    type: "todo_list",
+    planId: PlanId.make(input.planId),
+    steps: input.steps.map((step, index) => ({
+      id: `step-${index}`,
+      text: step.text,
+      status: step.status,
+    })),
+    ...(input.explanation === undefined ? {} : { explanation: input.explanation }),
+  };
+}
+function historyFrom(items: ReadonlyArray<OrchestrationV2TurnItem>) {
+  return items.flatMap((item) => {
+    const historical = historicalMessage(item);
+    return historical === null ? [] : [historical];
+  });
+}
 const handoff: OrchestrationV2ContextHandoff = {
   id: ContextHandoffId.make("handoff:one"),
   threadId,
@@ -146,6 +218,223 @@ describe("handoff budget", () => {
       }),
     );
     assert.equal(historyResponseItems([command!], "Activity")[1]?.type, "message");
+  });
+
+  it("includes each todo step and its status for a user, todo list, and assistant", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:user", "Continue the migration", 1),
+        todoTurn({
+          id: "item:todo",
+          planId: "plan:migration",
+          ordinal: 2,
+          explanation: "Keep the live plan",
+          steps: [
+            { status: "completed", text: "Read the issue" },
+            { status: "running", text: "Map the todo list" },
+            { status: "pending", text: "Add the regression" },
+          ],
+        }),
+        assistantTurn("item:assistant", "DONE", 3),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "completed: Read the issue");
+    assert.include(text, "running: Map the todo list");
+    assert.include(text, "pending: Add the regression");
+    assert.include(text, "Explanation: Keep the live plan");
+    assert.include(text, "DONE");
+  });
+
+  it("keeps the latest todo list when large recent items fill a tight budget", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY_DECISION store checkpoints as git refs", 1),
+        {
+          ...turnBase,
+          id: TurnItemId.make("item:plan"),
+          ordinal: 2,
+          type: "proposed_plan",
+          planId: PlanId.make("plan:proposal"),
+          markdown: "PROPOSED_PLAN_KEEP",
+          streaming: false,
+        },
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:migration",
+          ordinal: 3,
+          steps: [{ status: "running", text: "LIVE_STEP keep this update" }],
+        }),
+        assistantTurn("item:filler-a", "b".repeat(3_000), 4),
+        assistantTurn("item:filler-b", "c".repeat(3_000), 5),
+        assistantTurn("item:latest-assistant", "DONE", 6),
+        userTurn("item:latest-user", "LATEST_REQUEST continue", 7),
+      ]),
+      coverage: "History",
+      budget: 8_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "running: LIVE_STEP keep this update");
+    assert.include(text, "PROPOSED_PLAN_KEEP");
+    assert.include(text, "EARLY_DECISION store checkpoints as git refs");
+    assert.include(text, "LATEST_REQUEST continue");
+  });
+
+  it("replays only the latest todo state for a plan", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:user", "Continue the migration", 1),
+        todoTurn({
+          id: "item:todo-old",
+          planId: "plan:migration",
+          ordinal: 2,
+          steps: [{ status: "pending", text: "STALE_STEP drop this update" }],
+        }),
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:migration",
+          ordinal: 3,
+          steps: [{ status: "running", text: "LIVE_STEP keep this update" }],
+        }),
+        assistantTurn("item:assistant", "DONE", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "running: LIVE_STEP keep this update");
+    assert.notInclude(text, "STALE_STEP drop this update");
+    assert.include(selected.omittedItemIds, TurnItemId.make("item:todo-old"));
+    assert.equal(selected.omittedItems, 1);
+  });
+
+  it("omits a removed todo plan while keeping a completed live plan", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        {
+          ...todoTurn({
+            id: "item:todo-removed",
+            planId: "plan:removed",
+            ordinal: 1,
+            steps: [{ status: "pending", text: "OBSOLETE_STEP" }],
+          }),
+          status: "cancelled",
+        },
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:live",
+          ordinal: 2,
+          steps: [{ status: "completed", text: "LIVE_STEP" }],
+        }),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.notInclude(text, "OBSOLETE_STEP");
+    assert.include(text, "completed: LIVE_STEP");
+    assert.deepEqual(
+      selected.messages.map((entry) => entry.itemId),
+      [TurnItemId.make("item:todo-live")],
+    );
+  });
+
+  it.each(["todo_list", "proposed_plan"] as const)(
+    "counts retired %s text only for native occupancy",
+    (kind) => {
+      const plan = {
+        ...todoTurn({
+          id: "item:retired-native",
+          planId: "plan:retired-native",
+          ordinal: 1,
+          steps: [{ status: "pending", text: "RETIRED_NATIVE_TEXT" }],
+        }),
+        status: "cancelled" as const,
+      };
+      const item =
+        kind === "todo_list"
+          ? plan
+          : {
+              ...plan,
+              type: "proposed_plan" as const,
+              markdown: "RETIRED_NATIVE_TEXT",
+              streaming: false,
+            };
+      assert.isNull(historicalMessage(item));
+      const native = historicalMessage(item, { includeCancelledPlans: true });
+      assert.equal(
+        native?.text,
+        kind === "todo_list" ? "pending: RETIRED_NATIVE_TEXT" : "RETIRED_NATIVE_TEXT",
+      );
+      assert.equal(Buffer.byteLength(native!.text), kind === "todo_list" ? 28 : 19);
+    },
+  );
+
+  it("keeps the newest distinct plan when older plans fill a tight budget", () => {
+    const selected = selectHistory({
+      messages: historyFrom([
+        userTurn("item:early", "EARLY", 1),
+        todoTurn({
+          id: "item:todo-old-plan",
+          planId: "plan:old",
+          ordinal: 2,
+          steps: [{ status: "completed", text: `OLD_PLAN ${"x".repeat(2_500)}` }],
+        }),
+        todoTurn({
+          id: "item:todo-new-plan",
+          planId: "plan:new",
+          ordinal: 3,
+          steps: [{ status: "running", text: `NEW_PLAN ${"y".repeat(2_500)}` }],
+        }),
+        userTurn("item:latest", "LATEST", 4),
+      ]),
+      coverage: "History",
+      budget: 4_500,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "NEW_PLAN");
+    assert.notInclude(text, "OLD_PLAN");
+    assert.include(text, "LATEST");
+  });
+
+  it("coalesces durable plan updates that still carry planId", () => {
+    const first = selectHistory({
+      messages: historyFrom([
+        userTurn("item:user", "Continue", 1),
+        todoTurn({
+          id: "item:todo-old",
+          planId: "plan:migration",
+          ordinal: 2,
+          steps: [{ status: "pending", text: "STALE_STEP" }],
+        }),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const second = selectHistory({
+      messages: historyFrom([
+        todoTurn({
+          id: "item:todo-live",
+          planId: "plan:migration",
+          ordinal: 3,
+          steps: [{ status: "running", text: "LIVE_STEP" }],
+        }),
+        assistantTurn("item:assistant", "DONE", 4),
+      ]),
+      coverage: "History",
+      budget: 16_000,
+    });
+    const selected = selectHistory({
+      messages: [...first.messages, ...second.messages],
+      coverage: "Combined",
+      budget: 16_000,
+    });
+    const text = selected.messages.map((entry) => entry.text).join("\n");
+    assert.include(text, "LIVE_STEP");
+    assert.notInclude(text, "STALE_STEP");
+    assert.ok(first.messages.some((entry) => entry.planId === PlanId.make("plan:migration")));
   });
 
   it("retains short conversations verbatim in role and order", () => {

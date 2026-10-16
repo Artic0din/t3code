@@ -3391,8 +3391,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           [...plans.values()]
             .filter((plan) => plan.kind === "todo_list")
             .map((plan) => plan.status),
-          ["superseded", "completed"],
+          ["active", "completed"],
         );
+        assert.deepEqual(todoItems.map((item) => item.status).toSorted(), [
+          "completed",
+          "completed",
+        ]);
         const proposedPlan = [...plans.values()].find((plan) => plan.kind === "proposed_plan");
         assert.equal(proposedPlan?.status, "active");
         // The second prompt reuses the live process, which is still in the

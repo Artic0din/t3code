@@ -1416,6 +1416,11 @@ describe("AcpAdapterV2", () => {
       const items = events.flatMap((event) =>
         event.type === "turn_item.updated" ? [event.turnItem] : [],
       );
+      assert.equal(
+        items.filter((item) => item.type === "proposed_plan" && item.planId === planA[1]?.id).at(-1)
+          ?.status,
+        "cancelled",
+      );
       assert.isFalse(
         items.some((item) => item.type === "user_message" && item.text === "stale user text"),
         "the active ACP prompt echo must not create a second user message",

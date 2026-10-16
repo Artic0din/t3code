@@ -129,6 +129,15 @@ export const ProviderAdapterV2Event = Schema.Union([
     plan: OrchestrationV2PlanArtifact,
   }),
   Schema.Struct({
+    type: Schema.Literal("plan.removed"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    runId: RunId,
+    providerThreadId: ProviderThreadId,
+    nativePlanId: Schema.String,
+    occurredAt: Schema.DateTimeUtc,
+  }),
+  Schema.Struct({
     type: Schema.Literal("turn.terminal"),
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,

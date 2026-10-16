@@ -10,7 +10,6 @@ import type {
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
   OrchestrationV2PlanArtifact,
-  PlanId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProjectedTurnItem,
@@ -24,6 +23,7 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
   ProviderInstanceId,
+  ProviderDriverKind,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -49,6 +49,7 @@ import {
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   orchestrationV2RunWorkStartedAt,
   RunId,
+  PlanId,
   RuntimeRequestId,
   CheckpointScopeId,
   ThreadId,
@@ -404,6 +405,36 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     planId: PlanId,
   ) => Effect.Effect<OrchestrationV2PlanArtifact | undefined, ProjectionStoreV2Error>;
+  readonly getSupersededPlanIds: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<PlanId>, ProjectionStoreV2Error>;
+  readonly getPriorIncompletePlanItems: (input: {
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerTurnId: ProviderTurnId;
+    readonly planId: PlanId;
+    readonly itemId: TurnItemId;
+    readonly kind: OrchestrationV2PlanArtifact["kind"];
+  }) => Effect.Effect<
+    ReadonlyArray<{
+      readonly plan: OrchestrationV2PlanArtifact;
+      readonly turnItem: OrchestrationV2TurnItem;
+    }>,
+    ProjectionStoreV2Error
+  >;
+  readonly getNativePlanItems: (input: {
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly driver: ProviderDriverKind;
+    readonly nativeItemIdSuffix: string;
+    readonly includeCompleted: boolean;
+  }) => Effect.Effect<
+    ReadonlyArray<{
+      readonly plan: OrchestrationV2PlanArtifact;
+      readonly turnItem: OrchestrationV2TurnItem;
+    }>,
+    ProjectionStoreV2Error
+  >;
   readonly hasUnpairedRunInterruptRequest: (
     threadId: ThreadId,
     requestId: TurnItemId,
@@ -3855,7 +3886,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           SELECT payload_json FROM orchestration_v2_projection_turn_items
           WHERE thread_id = ${threadId}
             AND type IN ('user_message','assistant_message','command_execution','error',
-              'run_interrupt_result','file_change','proposed_plan')
+              'run_interrupt_result','file_change','proposed_plan','todo_list')
             AND ${runIds === undefined ? sql`1` : sql`run_id IN ${sql.in(runIds)}`}
           ORDER BY ordinal ASC, turn_item_id ASC
         `;
@@ -4211,6 +4242,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getSupersededPlanIds: ProjectionStoreV2Shape["getSupersededPlanIds"] = (threadId) =>
+      sql<{ plan_id: string }>`
+        SELECT plan_id FROM orchestration_v2_projection_plans
+        WHERE thread_id = ${threadId} AND status = 'superseded'
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => PlanId.make(row.plan_id))),
+        Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
+      );
+
     const getPlan: ProjectionStoreV2Shape["getPlan"] = (threadId, planId) =>
       sql
         .withTransaction(
@@ -4225,6 +4265,72 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }),
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
+
+    const getPriorIncompletePlanItems: ProjectionStoreV2Shape["getPriorIncompletePlanItems"] = (
+      input,
+    ) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ plan_json: string; item_json: string }>`
+          SELECT plan.payload_json AS plan_json, item.payload_json AS item_json
+          FROM orchestration_v2_projection_plans plan
+          JOIN orchestration_v2_projection_turn_items item
+            ON item.node_id = plan.node_id AND item.thread_id = plan.thread_id
+          JOIN orchestration_v2_projection_provider_turns prior_turn
+            ON prior_turn.provider_turn_id = item.provider_turn_id
+          JOIN orchestration_v2_projection_provider_turns current_turn
+            ON current_turn.provider_turn_id = ${input.providerTurnId}
+          WHERE plan.thread_id = ${input.threadId}
+            AND item.provider_thread_id = ${input.providerThreadId}
+            AND item.type = ${input.kind} AND plan.kind = ${input.kind}
+            AND plan.plan_id <> ${input.planId}
+            AND plan.status IN ('draft', 'active', 'superseded')
+            AND item.status <> 'cancelled'
+            AND (
+              prior_turn.ordinal < current_turn.ordinal OR (
+                prior_turn.ordinal = current_turn.ordinal AND item.ordinal < COALESCE(
+                  (SELECT ordinal FROM orchestration_v2_projection_turn_items
+                   WHERE turn_item_id = ${input.itemId}), 9223372036854775807
+                )
+              )
+            )
+          ORDER BY item.ordinal
+        `;
+        return yield* Effect.forEach(rows, (row) =>
+          Effect.gen(function* () {
+            return {
+              plan: yield* decodePlanPayload(row.plan_json),
+              turnItem: yield* decodeTurnItemPayload(row.item_json),
+            };
+          }),
+        );
+      }).pipe(Effect.mapError(controlReadError(input.threadId)));
+
+    const getNativePlanItems: ProjectionStoreV2Shape["getNativePlanItems"] = (input) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ plan_json: string; item_json: string }>`
+          SELECT plan.payload_json AS plan_json, item.payload_json AS item_json
+          FROM orchestration_v2_projection_plans plan
+          JOIN orchestration_v2_projection_turn_items item
+            ON item.node_id = plan.node_id AND item.thread_id = plan.thread_id
+          WHERE plan.thread_id = ${input.threadId}
+            AND item.provider_thread_id = ${input.providerThreadId}
+            AND item.type IN ('todo_list', 'proposed_plan')
+            AND item.status <> 'cancelled'
+            AND (${input.includeCompleted ? 1 : 0} = 1 OR plan.status <> 'completed')
+            AND json_extract(item.payload_json, '$.nativeItemRef.driver') = ${input.driver}
+            AND substr(json_extract(item.payload_json, '$.nativeItemRef.nativeId'),
+              -length(${input.nativeItemIdSuffix})) = ${input.nativeItemIdSuffix}
+          ORDER BY item.ordinal
+        `;
+        return yield* Effect.forEach(rows, (row) =>
+          Effect.gen(function* () {
+            return {
+              plan: yield* decodePlanPayload(row.plan_json),
+              turnItem: yield* decodeTurnItemPayload(row.item_json),
+            };
+          }),
+        );
+      }).pipe(Effect.mapError(controlReadError(input.threadId)));
 
     const hasUnpairedRunInterruptRequest: ProjectionStoreV2Shape["hasUnpairedRunInterruptRequest"] =
       (threadId, requestId, resultId) =>
@@ -5676,6 +5782,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getSettlementCandidates,
       getThreadsWithPullRequests,
       getThreadProjection,
+      getPriorIncompletePlanItems,
+      getNativePlanItems,
       getTurnStartContext,
       getTurnStartHistory,
       getRuntimeRecoveryProjection,
@@ -5694,6 +5802,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadRecords,
       getRuntimeRequest,
       getPlan,
+      getSupersededPlanIds,
       getProviderControlContext,
       getLimitRecoveryCandidates,
       getRecoveryThreadIds,
@@ -5915,12 +6024,76 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
           };
         }),
+      getSupersededPlanIds: (threadId) =>
+        service
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) =>
+              projection.plans
+                .filter((plan) => plan.status === "superseded")
+                .map((plan) => plan.id),
+            ),
+          ),
       getPlan: (threadId, planId) =>
         Effect.gen(function* () {
           const projection = (yield* Ref.get(replayState)).projections.get(threadId);
           if (projection === undefined)
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           return projection.plans.find((plan) => plan.id === planId);
+        }),
+      getPriorIncompletePlanItems: (input) =>
+        Effect.gen(function* () {
+          const projection = (yield* Ref.get(replayState)).projections.get(input.threadId);
+          if (projection === undefined) return [];
+          const currentTurn = projection.providerTurns.find(
+            (turn) => turn.id === input.providerTurnId,
+          );
+          if (currentTurn === undefined) return [];
+          const currentOrdinal =
+            projection.turnItems.find((item) => item.id === input.itemId)?.ordinal ?? Infinity;
+          return projection.turnItems.flatMap((turnItem) => {
+            if (
+              turnItem.type !== input.kind ||
+              turnItem.status === "cancelled" ||
+              turnItem.providerThreadId !== input.providerThreadId
+            )
+              return [];
+            const plan = projection.plans.find(
+              (candidate) =>
+                candidate.nodeId === turnItem.nodeId &&
+                candidate.kind === input.kind &&
+                candidate.id !== input.planId &&
+                candidate.status !== "completed",
+            );
+            const priorTurn = projection.providerTurns.find(
+              (turn) => turn.id === turnItem.providerTurnId,
+            );
+            return plan !== undefined &&
+              priorTurn !== undefined &&
+              (priorTurn.ordinal < currentTurn.ordinal ||
+                (priorTurn.ordinal === currentTurn.ordinal && turnItem.ordinal < currentOrdinal))
+              ? [{ plan, turnItem }]
+              : [];
+          });
+        }),
+      getNativePlanItems: (input) =>
+        Effect.gen(function* () {
+          const projection = (yield* Ref.get(replayState)).projections.get(input.threadId);
+          if (projection === undefined) return [];
+          return projection.turnItems.flatMap((turnItem) => {
+            if (
+              (turnItem.type !== "todo_list" && turnItem.type !== "proposed_plan") ||
+              turnItem.status === "cancelled" ||
+              turnItem.providerThreadId !== input.providerThreadId ||
+              turnItem.nativeItemRef?.driver !== input.driver ||
+              turnItem.nativeItemRef.nativeId?.endsWith(input.nativeItemIdSuffix) !== true
+            )
+              return [];
+            const plan = projection.plans.find((candidate) => candidate.id === turnItem.planId);
+            return plan !== undefined && (input.includeCompleted || plan.status !== "completed")
+              ? [{ plan, turnItem }]
+              : [];
+          });
         }),
       hasUnpairedRunInterruptRequest: (threadId, requestId, resultId) =>
         Effect.gen(function* () {
@@ -6239,6 +6412,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     "run_interrupt_result",
                     "file_change",
                     "proposed_plan",
+                    "todo_list",
                   ].includes(item.type) &&
                   (runIds === undefined || (item.runId !== null && runIds.includes(item.runId))),
               ),

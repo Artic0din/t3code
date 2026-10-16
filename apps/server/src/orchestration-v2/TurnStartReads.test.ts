@@ -4,6 +4,7 @@ import {
   NodeId,
   EventId,
   MessageId,
+  PlanId,
   ProjectId,
   ProviderInstanceId,
   RunId,
@@ -281,8 +282,35 @@ it.effect.each(["sqlite", "memory"] as const)(
       assert.equal(context.messages.find((m) => m.id === messageId)?.text, "Continue");
       assert.isTrue(context.hasConversation);
       assert.deepEqual(context.turnItems, []);
-      assert.deepEqual(yield* store.getTurnStartHistory(threadId), [item]);
-      assert.deepEqual(yield* store.getTurnStartHistory(threadId, [oldRunId]), [item]);
+      const todo = {
+        id: TurnItemId.make("item:todo"),
+        threadId,
+        runId: oldRunId,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 2,
+        status: "completed" as const,
+        title: "live plan",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "todo_list" as const,
+        planId: PlanId.make("plan:live"),
+        steps: [{ id: "step-1", text: "Map the todo list", status: "running" as const }],
+      };
+      yield* store.apply({
+        id: EventId.make("todo-event"),
+        type: "turn-item.updated",
+        threadId,
+        runId: oldRunId,
+        occurredAt: now,
+        payload: todo,
+      });
+      assert.deepEqual(yield* store.getTurnStartHistory(threadId), [item, todo]);
+      assert.deepEqual(yield* store.getTurnStartHistory(threadId, [oldRunId]), [item, todo]);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [runId]), []);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, []), []);
       // Pairing depends on IDs, not payload decoding or item status.

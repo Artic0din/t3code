@@ -18,10 +18,13 @@ import {
   handoffTokenCapConfig,
   handoffCoverage,
   historicalMessage,
+  readSupersededHistoryPlans,
   renderHistory,
   selectHistory,
 } from "./ContextHandoffBudget.ts";
 import * as IdAllocator from "./IdAllocator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import { omittedPlanSnapshots } from "./ContextHandoffSnapshots.ts";
 
 export class ContextHandoffPrepareError extends Schema.TaggedError<ContextHandoffPrepareError>()(
   "ContextHandoffPrepareError",
@@ -229,6 +232,26 @@ function providerMessageWithContextHandoffs(input: {
 const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffService.layer")(
   function* () {
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const planStateFor = (
+      input: {
+        readonly threadId: ThreadId;
+        readonly targetRunId: RunId;
+        readonly fromProviderThreadIds?: ReadonlyArray<ProviderThreadId>;
+        readonly toProviderThreadId: ProviderThreadId;
+      },
+      messages: Parameters<typeof readSupersededHistoryPlans>[1],
+    ) =>
+      readSupersededHistoryPlans(projectionStore, messages).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ContextHandoffPrepareError({
+              ...input,
+              fromProviderThreadIds: Array.from(input.fromProviderThreadIds ?? []),
+              cause,
+            }),
+        ),
+      );
     const tokenCap = yield* handoffTokenCapConfig.pipe(
       Effect.orElseSucceed(() => DEFAULT_HANDOFF_TOKEN_CAP),
     );
@@ -261,11 +284,13 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             ),
           );
         const coverage = handoffCoverage({ ...input, coveredRunOrdinals: { from: 1, to: 1 } });
+        const messages = input.items.flatMap((item) => {
+          const message = historicalMessage(item);
+          return message === null ? [] : [message];
+        });
         const selected = selectHistory({
-          messages: input.items.flatMap((item) => {
-            const message = historicalMessage(item);
-            return message === null ? [] : [message];
-          }),
+          messages,
+          supersededPlans: yield* planStateFor(input, messages),
           coverage,
           budget: tokenCap,
         });
@@ -286,6 +311,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             coverage,
             omittedItems: selected.omittedItems,
             omittedItemIds: selected.omittedItemIds,
+            omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
           },
           createdByProviderInstanceId: null,
           createdAt: input.createdAt,
@@ -374,11 +400,16 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
           coveredRunOrdinals: input.coveredRunOrdinals,
           items: input.deltaItems,
         });
+        const messages = input.deltaItems.flatMap((item) => {
+          const message = historicalMessage(item);
+          return message === null ? [] : [message];
+        });
         const selected = selectHistory({
-          messages: input.deltaItems.flatMap((item) => {
-            const message = historicalMessage(item);
-            return message === null ? [] : [message];
-          }),
+          messages,
+          supersededPlans: yield* planStateFor(
+            { ...input, threadId: input.sourceThreadId },
+            messages,
+          ),
           coverage,
           budget: tokenCap,
         });
@@ -399,6 +430,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             coverage,
             omittedItems: selected.omittedItems,
             omittedItemIds: selected.omittedItemIds,
+            omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
           },
           createdByProviderInstanceId: null,
           createdAt: input.createdAt,
@@ -446,18 +478,20 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
         );
       const runStatuses = new Map(input.runs?.map((run) => [run.id, run.status]));
       const coverage = handoffCoverage(input);
+      const messages = input.items.flatMap((item) => {
+        const message = historicalMessage(item);
+        return message === null
+          ? []
+          : [
+              {
+                ...message,
+                ...(item.runId === null ? {} : { runStatus: runStatuses.get(item.runId) }),
+              },
+            ];
+      });
       const selected = selectHistory({
-        messages: input.items.flatMap((item) => {
-          const message = historicalMessage(item);
-          return message === null
-            ? []
-            : [
-                {
-                  ...message,
-                  ...(item.runId === null ? {} : { runStatus: runStatuses.get(item.runId) }),
-                },
-              ];
-        }),
+        messages,
+        supersededPlans: yield* planStateFor(input, messages),
         coverage,
         budget: tokenCap,
       });
@@ -478,6 +512,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
           coverage,
           omittedItems: selected.omittedItems,
           omittedItemIds: selected.omittedItemIds,
+          omittedPlanSnapshots: omittedPlanSnapshots(messages, selected.messages),
         },
         createdByProviderInstanceId: null,
         createdAt: input.createdAt,
@@ -494,5 +529,8 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
   },
 );
 
-export const layer: Layer.Layer<ContextHandoffServiceV2, never, IdAllocator.IdAllocatorV2> =
-  Layer.effect(ContextHandoffServiceV2, makeContextHandoffService());
+export const layer: Layer.Layer<
+  ContextHandoffServiceV2,
+  never,
+  IdAllocator.IdAllocatorV2 | ProjectionStore.ProjectionStoreV2
+> = Layer.effect(ContextHandoffServiceV2, makeContextHandoffService());

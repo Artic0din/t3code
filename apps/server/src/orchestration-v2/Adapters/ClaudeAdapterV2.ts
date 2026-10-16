@@ -3068,7 +3068,6 @@ export function makeClaudeAdapterV2(
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
-        const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         const planIdsByNativeItem = yield* Ref.make(
           new Map<string, OrchestrationV2PlanArtifact["id"]>(),
         );
@@ -4602,32 +4601,14 @@ export function makeClaudeAdapterV2(
                   markdown: input.markdown ?? "",
                   streaming: false,
                 };
-          const latestPlanKey = `${input.context.input.threadId}:${input.kind}`;
-          const previousPlan = (yield* Ref.get(latestPlanByKind)).get(latestPlanKey);
           yield* Effect.all(
             [
-              ...(previousPlan === undefined ||
-              previousPlan.id === plan.id ||
-              previousPlan.status === "completed"
-                ? []
-                : [
-                    emitProviderEvent({
-                      type: "plan.updated" as const,
-                      driver: CLAUDE_PROVIDER,
-                      plan: { ...previousPlan, status: "superseded" as const },
-                    }),
-                  ]),
               emitProviderEvent({ type: "node.updated", driver: CLAUDE_PROVIDER, node }),
               emitProviderEvent({ type: "plan.updated", driver: CLAUDE_PROVIDER, plan }),
               emitProviderEvent({ type: "turn_item.updated", driver: CLAUDE_PROVIDER, turnItem }),
             ],
             { concurrency: 1 },
           );
-          yield* Ref.update(latestPlanByKind, (current) => {
-            const updated = new Map(current);
-            updated.set(latestPlanKey, plan);
-            return updated;
-          });
         });
 
         // Resolves the subagent that owns a parent_tool_use_id. The session

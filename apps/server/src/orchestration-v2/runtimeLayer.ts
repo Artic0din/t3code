@@ -113,7 +113,7 @@ const layerCheckpointServiceProvided = CheckpointService.layer.pipe(
   Layer.provide(IdAllocator.layer),
 );
 const layerContextHandoffServiceProvided = ContextHandoffService.layer.pipe(
-  Layer.provide(IdAllocator.layer),
+  Layer.provide(Layer.merge(IdAllocator.layer, ProjectionStore.layer)),
 );
 
 const layerProviderAdapterRegistryProvided =

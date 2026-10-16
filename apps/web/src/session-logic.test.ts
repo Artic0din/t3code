@@ -30,6 +30,7 @@ import {
   deriveRevertTurnCountByUserMessageId,
   derivePhase,
   findLatestProposedPlan,
+  hasActionableProposedPlan,
   isLatestRunSettled,
   selectHandoffImageResources,
   selectMessageImageResources,
@@ -237,6 +238,58 @@ describe("V2 session presentation", () => {
       runId,
     );
     expect(plan?.planMarkdown).toBe("Plan");
+  });
+
+  it("selects the live proposed plan when a superseded plan sorts last", () => {
+    const projection = makeThreadProjectionFixture();
+    const runId = RunId.make("run-plan-replacement");
+    const latest = findLatestProposedPlan(
+      {
+        ...projection,
+        plans: [
+          {
+            id: PlanId.make("plan-a-current"),
+            threadId: projection.thread.id,
+            runId,
+            nodeId: NodeId.make("node-plan-current"),
+            kind: "proposed_plan",
+            status: "active",
+            markdown: "CURRENT_PLAN",
+          },
+          {
+            id: PlanId.make("plan-z-retired"),
+            threadId: projection.thread.id,
+            runId,
+            nodeId: NodeId.make("node-plan-retired"),
+            kind: "proposed_plan",
+            status: "superseded",
+            markdown: "RETIRED_PLAN",
+          },
+        ],
+      },
+      runId,
+    );
+    expect(latest?.planMarkdown).toBe("CURRENT_PLAN");
+    expect(hasActionableProposedPlan(latest)).toBe(true);
+    expect(
+      findLatestProposedPlan(
+        {
+          ...projection,
+          plans: [
+            {
+              id: PlanId.make("plan-retired-only"),
+              threadId: projection.thread.id,
+              runId,
+              nodeId: NodeId.make("node-plan-retired-only"),
+              kind: "proposed_plan",
+              status: "superseded",
+              markdown: "RETIRED_PLAN",
+            },
+          ],
+        },
+        runId,
+      ),
+    ).toBeNull();
   });
 
   it("assigns run rollback to the turn-start message instead of a later steer", () => {
