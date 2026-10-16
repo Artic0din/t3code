@@ -26,6 +26,7 @@ import type { ComponentProps } from "react";
 import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
+import { TaskContextGroupPanel } from "./TaskContextGroupPanel";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
@@ -220,6 +221,10 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                 ) : null}
               </div>
             </ThreadDetailsSection>
+          ) : null}
+
+          {density === "full" && !props.draftId ? (
+            <TaskContextGroupPanel environmentId={props.environmentId} threadId={props.threadId} />
           ) : null}
 
           {density === "full" && !props.draftId ? (

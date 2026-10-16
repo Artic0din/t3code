@@ -18,6 +18,7 @@ import {
 } from "./timelineMinimapItems";
 import {
   COMPOSER_CONTEXT_KINDS,
+  turnReceivedTaskContext,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type AssistantCitation,
   type EnvironmentId,
@@ -31,6 +32,8 @@ import {
   type ThreadId,
   type ToolActivityIcon,
 } from "@t3tools/contracts";
+import { TaskContextSnapshotDetails } from "./TaskContextSnapshotDetails";
+import { FilesIcon } from "lucide-react";
 import { parseScopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails } from "../../state/threads";
@@ -2081,7 +2084,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       return (
         <UserMessageContextReferenceChip
           reference={reference}
-          record={record}
+          record={resolvedContext.recordsById.get(reference.contextId)}
           annotationImage={annotationImage}
           attachment={attachment}
           onExpandImage={(image) => {
@@ -4321,7 +4324,7 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
 /** One inline context chip in a sent message, dispatched by the shared presentation registry. */
 function UserMessageContextReferenceChip(props: {
   reference: ChatMarkdownContextReference;
-  record: KnownComposerContextRecord | undefined;
+  record: ComposerContextRecord | undefined;
   annotationImage: ChatImageAttachment | null;
   attachment: ChatImageAttachment | ChatFileAttachment | null;
   onExpandImage: (image: ChatImageAttachment) => void;
@@ -4334,16 +4337,36 @@ function UserMessageContextReferenceChip(props: {
     contextId: props.reference.contextId as ComposerContextId,
     label: props.reference.label,
   });
-  return userMessageContextPresentationRegistry.render(props.reference.kind, props.record, {
-    reference: props.reference,
-    annotationImage: props.annotationImage,
-    attachment: props.attachment,
-    resolvedTheme,
-    copyMarkdown,
-    onExpandImage: props.onExpandImage,
-    onExpandVideo: props.onExpandVideo,
-    onOpenFile: props.onOpenFile,
+  const snapshot = turnReceivedTaskContext({
+    records: props.record ? [props.record] : [],
   });
+  if (snapshot !== null) {
+    return (
+      <UserMessageContextPopover
+        kind="thread"
+        icon={<FilesIcon />}
+        label={snapshot.title}
+        accessibleLabel={`Shared context, ${snapshot.title}`}
+        copyMarkdown={copyMarkdown}
+      >
+        <TaskContextSnapshotDetails snapshot={snapshot} />
+      </UserMessageContextPopover>
+    );
+  }
+  return userMessageContextPresentationRegistry.render(
+    props.reference.kind,
+    asKnownContextRecord(props.record),
+    {
+      reference: props.reference,
+      annotationImage: props.annotationImage,
+      attachment: props.attachment,
+      resolvedTheme,
+      copyMarkdown,
+      onExpandImage: props.onExpandImage,
+      onExpandVideo: props.onExpandVideo,
+      onOpenFile: props.onOpenFile,
+    },
+  );
 }
 
 const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;

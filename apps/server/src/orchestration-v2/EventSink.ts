@@ -10,6 +10,7 @@ import {
   NodeId,
   type ProjectId,
   ThreadId,
+  TaskContextGroup,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -70,6 +71,8 @@ export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 /**
  * SERVICE DEFINITION
  */
+const encodeTaskContextGroup = Schema.encodeEffect(Schema.fromJsonString(TaskContextGroup));
+
 export interface EventSinkV2Shape {
   readonly write: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
@@ -126,6 +129,7 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    readonly taskContextGroup?: TaskContextGroup;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -555,6 +559,17 @@ const layerBase: Layer.Layer<
             );
           }
           yield* applyStoredEvents(storedEvents);
+          if (input.taskContextGroup !== undefined) {
+            const group = input.taskContextGroup;
+            const documentJson = yield* encodeTaskContextGroup(group);
+            yield* sql`
+              INSERT INTO task_context_groups (group_id, document_json, updated_at)
+              VALUES (${group.id}, ${documentJson}, ${group.updatedAt})
+              ON CONFLICT(group_id) DO UPDATE SET
+                document_json = excluded.document_json,
+                updated_at = excluded.updated_at
+            `;
+          }
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,

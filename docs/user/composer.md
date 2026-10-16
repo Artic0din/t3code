@@ -249,6 +249,23 @@ them back.
 On mobile, tap a chip to inspect its content. File references open the current file; attached
 files show the copy that was attached to the message.
 
+## Shared task context
+
+Open **Shared context** in a thread's details on web or desktop, or from the shared-context control on mobile.
+Create a group or join an existing group in the same environment.
+Edit its brief and attach other threads, notes, URLs, or references to existing threads and projects.
+You can remove resources or detach a thread from the same controls.
+
+Each ordinary message captures the group's current brief and resources, including scheduled and agent-sent messages.
+Select the shared-context chip on a sent message to inspect the snapshot that turn received.
+Later edits affect future turns and leave earlier snapshots intact.
+Provider slash commands stay unchanged and do not capture shared context.
+
+A group can contain up to 100 threads and 100 resources, with a brief of up to 32,000 characters.
+The complete snapshot must fit within 64,000 characters, including escaped text and reference metadata.
+If a change exceeds that limit, shorten the brief or remove resources before saving.
+References identify existing records; they do not grant repository access or add sibling worktrees to a thread's workspace.
+
 ## Attached files
 
 Select a file chip in your draft or a sent message to preview it. Code and JSON use syntax

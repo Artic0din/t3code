@@ -11,6 +11,7 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
+  TaskContextGroupId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -37,6 +38,7 @@ function makeSourceThread(): OrchestrationV2AppThread {
     id: sourceThreadId,
     projectId: ProjectId.make("project:fork-snooze"),
     title: "Snoozed source",
+    taskContextGroupId: TaskContextGroupId.make("group:source"),
     providerInstanceId,
     modelSelection,
     runtimeMode: "full-access",
@@ -165,6 +167,16 @@ it.effect("keeps a fork awake when its source thread is snoozed", () =>
       threadId: sourceThreadId,
       runId: sourceRunId,
     });
+  }),
+);
+
+it.effect("leaves a fork ungrouped until it is explicitly attached", () =>
+  Effect.gen(function* () {
+    const result = yield* planFork(makeSourceRun("completed"));
+    assert.equal(result.targetThread.taskContextGroupId ?? null, null);
+    assert.equal(makeSourceThread().taskContextGroupId, "group:source");
+    assert.equal(result.targetThread.projectId, makeSourceThread().projectId);
+    assert.equal(result.targetThread.worktreePath, "/tmp/source-worktree");
   }),
 );
 

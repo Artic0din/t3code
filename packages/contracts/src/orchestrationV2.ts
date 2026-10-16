@@ -1,4 +1,5 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
+import { TaskContextGroup } from "./taskContextGroup.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
@@ -32,6 +33,7 @@ import {
   RunId,
   RuntimeRequestId,
   ScheduledTaskId,
+  TaskContextGroupId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
@@ -435,6 +437,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
       }),
     ),
   ),
+  /** Shared task context group this thread belongs to. */
+  taskContextGroupId: Schema.optional(Schema.NullOr(TaskContextGroupId)),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
@@ -1921,6 +1925,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
       }),
     ),
   ),
+  /** Shared task context group this thread belongs to. */
+  taskContextGroupId: Schema.optional(Schema.NullOr(TaskContextGroupId)),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2ThreadShell = typeof OrchestrationV2ThreadShell.Type;
@@ -3057,6 +3063,13 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literals(["thread.task-context-group.attach", "thread.task-context-group.detach"]),
+    commandId: CommandId,
+    threadId: ThreadId,
+    groupId: TaskContextGroupId,
+    group: TaskContextGroup,
+  }),
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

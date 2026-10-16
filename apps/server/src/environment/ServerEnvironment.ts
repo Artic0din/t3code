@@ -243,6 +243,8 @@ export const make = Effect.gen(function* () {
       threadActiveReorder: true,
       threadAutoSettleOptOut: true,
       threadTitleRegeneration: true,
+      taskContextGroups: true,
+      taskContextGroupChanges: true,
       threadVisitedTracking: true,
       threadPullRequests: true,
       threadPullRequestWatch: true,

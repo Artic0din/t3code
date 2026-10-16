@@ -49,6 +49,8 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as TaskContextGroupService from "./TaskContextGroupService.ts";
+import * as TaskContextGroupStore from "./TaskContextGroupStore.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -197,6 +199,9 @@ const layerRunFinalizationServiceProvided = RunFinalizationService.layer.pipe(
   Layer.provide(Layer.merge(layerCheckpointCaptureServiceProvided, ProjectionStore.layer)),
 );
 
+const layerTaskContextGroupStoreProvided = TaskContextGroupStore.layer.pipe(
+  Layer.provide(Layer.merge(ProjectionStore.layer, ProjectStore.layer)),
+);
 const layerOrchestratorProvided = Orchestrator.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -218,6 +223,7 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerProviderSwitchServiceProvided,
       layerRunExecutionServiceProvided,
       ThreadForkService.layer,
+      layerTaskContextGroupStoreProvided,
     ),
   ),
 );
@@ -231,10 +237,21 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
       layerEventSinkProvided,
       IdAllocator.layer,
       ProviderSessionRuntime.layer,
+      layerTaskContextGroupStoreProvided,
     ),
   ),
 );
 
+const layerTaskContextGroupProvided = TaskContextGroupService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerOrchestratorProvided,
+      layerProjectService,
+      layerTaskContextGroupStoreProvided,
+      OrchestrationEventStore.layer,
+    ),
+  ),
+);
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(Layer.merge(layerOrchestratorProvided, layerLegacyV1ThreadImporterProvided)),
 );
@@ -332,6 +349,8 @@ export const layerProduction = Layer.mergeAll(
   layerThreadLaunchProvided,
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
+  layerTaskContextGroupProvided,
+  layerTaskContextGroupStoreProvided,
   layerSecretRequestsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),

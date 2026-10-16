@@ -6,6 +6,7 @@ import {
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  TaskContextGroupError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -20,6 +21,7 @@ import {
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as TaskContextGroups from "../../../orchestration-v2/TaskContextGroupService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
 
@@ -75,7 +77,56 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
+function taskContextFailure(error: TaskContextGroupError): OrchestratorMcpFailure {
+  return error.code === "orchestration_error"
+    ? unavailable()
+    : new OrchestratorMcpFailure({
+        code:
+          error.code === "permission_denied"
+            ? "capability_denied"
+            : error.code === "path_refused"
+              ? "path_refused"
+              : "invalid_request",
+        message: error.message,
+      });
+}
+
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_task_context_list: McpToolAccess.reads(() =>
+    Effect.gen(function* () {
+      const service = yield* TaskContextGroups.TaskContextGroupService;
+      return yield* service.list().pipe(Effect.mapError(taskContextFailure));
+    }),
+  ),
+  t3_task_context_read: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const service = yield* TaskContextGroups.TaskContextGroupService;
+      return yield* service
+        .forThread(projection.thread.id)
+        .pipe(Effect.mapError(taskContextFailure));
+    }),
+  ),
+  t3_task_context_mutate: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const service = yield* TaskContextGroups.TaskContextGroupService;
+      const context = yield* Effect.context<Effect.Services<typeof check>>();
+      const authorize = check.pipe(
+        Effect.asVoid,
+        Effect.mapError(
+          () =>
+            new TaskContextGroupError({
+              code: "permission_denied",
+              message: "Shared context mutation is no longer authorized.",
+            }),
+        ),
+        Effect.provide(context),
+      );
+      return yield* service
+        .mutate(input.input, authorize)
+        .pipe(Effect.mapError(taskContextFailure));
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

@@ -18,6 +18,10 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  TaskContextGroupForThreadResult,
+  TaskContextGroupListResult,
+  TaskContextGroupMutateRequest,
+  TaskContextGroupMutateResult,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -26,6 +30,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as TaskContextGroupService from "../../../orchestration-v2/TaskContextGroupService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
@@ -267,7 +272,44 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const taskContextTool = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    TaskContextGroupService.TaskContextGroupService,
+  ],
+};
+const TaskContextListTool = Tool.make("t3_task_context_list", {
+  ...taskContextTool,
+  description:
+    "List shared context groups in this environment. Groups contain explicit references and notes; linking them never grants repository write access.",
+  success: TaskContextGroupListResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const TaskContextReadTool = Tool.make("t3_task_context_read", {
+  ...taskContextTool,
+  description:
+    "Read a thread's current shared brief, resources, and related threads. Omit threadId for this thread. Inspect a historical message's context to see the snapshot it received.",
+  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
+  success: TaskContextGroupForThreadResult,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const TaskContextMutateTool = Tool.make("t3_task_context_mutate", {
+  ...taskContextTool,
+  description:
+    "Create shared context, edit its brief, attach or detach existing threads, and attach or remove note, URL, thread, or project references. Requires full-access/default authorization. Groups and resources stay in this environment; repository permissions and Git operations remain owned by each thread.",
+  parameters: Schema.Struct({ input: TaskContextGroupMutateRequest }),
+  success: TaskContextGroupMutateResult,
+}).annotate(Tool.Destructive, true);
+
 export const ThreadToolkit = Toolkit.make(
+  TaskContextListTool,
+  TaskContextReadTool,
+  TaskContextMutateTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadForkTool,

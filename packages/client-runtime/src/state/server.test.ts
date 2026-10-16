@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  TaskContextGroupError,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -48,6 +49,7 @@ import {
   waitForNextEnvironmentReconnect,
   waitForDesktopUpdateTarget,
   runDesktopCommitWithReconnectObserver,
+  taskContextGroupChangesStream,
 } from "./server.ts";
 import { applyServerConfigProjection } from "./serverConfigProjection.ts";
 
@@ -87,6 +89,50 @@ function session(client: WsRpcProtocolClient): RpcSession {
     closed: Effect.never,
   };
 }
+
+describe("shared context subscription", () => {
+  it.effect("recovers from storage failure on the same environment session", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Queue.unbounded<number>();
+      let count = 0;
+      const client = {
+        [WS_METHODS.taskContextGroupsSubscribe]: () =>
+          Stream.unwrap(
+            Effect.gen(function* () {
+              count += 1;
+              yield* Queue.offer(attempts, count);
+              return count === 1
+                ? Stream.fail(
+                    new TaskContextGroupError({
+                      code: "orchestration_error",
+                      message: "Storage unavailable",
+                    }),
+                  )
+                : Stream.succeed(7);
+            }),
+          ),
+      } as unknown as WsRpcProtocolClient;
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+        session: yield* SubscriptionRef.make(Option.some(session(client))),
+        prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      });
+      const received = yield* taskContextGroupChangesStream().pipe(
+        Stream.runHead,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      expect(yield* Queue.take(attempts)).toBe(1);
+      yield* TestClock.adjust("250 millis");
+      expect(yield* Fiber.join(received)).toEqual(Option.some(7));
+      expect(yield* Queue.take(attempts)).toBe(2);
+    }),
+  );
+});
 
 describe("update restart reconnect nudges", () => {
   it.effect("retries a desktop commit that was lost before delivery", () =>

@@ -1472,6 +1472,9 @@ export function threadShellFromProjection(
     lastVisitedAt: projection.thread.lastVisitedAt,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
+    ...(projection.thread.taskContextGroupId === undefined
+      ? {}
+      : { taskContextGroupId: projection.thread.taskContextGroupId }),
     deletedAt: projection.thread.deletedAt,
   };
 }
@@ -1727,6 +1730,9 @@ function shellFromState(input: {
     lastVisitedAt: input.state.thread.lastVisitedAt,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
+    ...(input.state.thread.taskContextGroupId === undefined
+      ? {}
+      : { taskContextGroupId: input.state.thread.taskContextGroupId }),
     deletedAt: input.state.thread.deletedAt,
   };
 }

@@ -609,6 +609,17 @@ export function resolveServerConfigValue(
   return initialConfig ?? projection?.config ?? null;
 }
 
+export const taskContextGroupChangesStream = () =>
+  subscribe(
+    WS_METHODS.taskContextGroupsSubscribe,
+    {},
+    {
+      onExpectedFailure: (cause) =>
+        Effect.logWarning("Shared context updates interrupted.", safeErrorLogAttributes(cause)),
+      retryExpectedFailureAfter: "250 millis",
+    },
+  );
+
 export function createServerEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<
     EnvironmentRegistry.EnvironmentRegistry | Persistence.EnvironmentCacheStore | R,
@@ -980,6 +991,21 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  const taskContextRefresh = Atom.family((_environmentId: EnvironmentId) => Atom.make(0));
+  const taskContextChanges = createEnvironmentSubscriptionAtomFamily(runtime, {
+    label: "environment-data:server:task-context-groups:changes",
+    subscribe: (_input: EnvironmentRpcInput<typeof WS_METHODS.taskContextGroupsSubscribe>) =>
+      taskContextGroupChangesStream(),
+  });
+  const taskContextSignal = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      const supported =
+        get(configValueAtom(environmentId))?.environment.capabilities.taskContextGroupChanges ===
+        true;
+      const remote = supported ? get(taskContextChanges({ environmentId, input: {} })) : null;
+      return `${get(taskContextRefresh(environmentId))}:${remote === null ? null : Option.getOrNull(AsyncResult.value(remote))}`;
+    }),
+  );
 
   return {
     configValueAtom,
@@ -1088,6 +1114,24 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduledTasksLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:scheduled-tasks:live",
       tag: WS_METHODS.scheduledTasksSubscribe,
+    }),
+    taskContextGroupsList: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:list",
+      tag: WS_METHODS.taskContextGroupsList,
+      staleTimeMs: 5_000,
+      refreshTrigger: ({ environmentId }) => taskContextSignal(environmentId),
+    }),
+    taskContextGroup: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:get",
+      tag: WS_METHODS.taskContextGroupsGet,
+      staleTimeMs: 5_000,
+      refreshTrigger: ({ environmentId }) => taskContextSignal(environmentId),
+    }),
+    taskContextGroupForThread: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:task-context-groups:for-thread",
+      tag: WS_METHODS.taskContextGroupsForThread,
+      staleTimeMs: 5_000,
+      refreshTrigger: ({ environmentId }) => taskContextSignal(environmentId),
     }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
@@ -1298,6 +1342,25 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.scheduledTasksRotateWebhookToken,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    mutateTaskContextGroup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:task-context-groups:mutate",
+      tag: WS_METHODS.taskContextGroupsMutate,
+      onSuccess: ({ environmentId }, registry) =>
+        Effect.sync(() => {
+          const signal = taskContextRefresh(environmentId);
+          registry.set(signal, registry.get(signal) + 1);
+        }),
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([
+            environmentId,
+            input.action,
+            "groupId" in input ? input.groupId : null,
+            "threadId" in input ? input.threadId : null,
+          ]),
+      },
     }),
     // Off the config lane: answering a card must not queue behind settings
     // edits. One answer per card at a time.

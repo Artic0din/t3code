@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./task-context-group": {
+      "types": "./src/taskContextGroup.ts",
+      "default": "./src/taskContextGroup.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"

@@ -120,6 +120,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as TaskContextGroupService from "./orchestration-v2/TaskContextGroupService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import {
   archivedShellStreamItemFromThreadShell,
@@ -1219,6 +1220,7 @@ const layerWsRpc = (
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const taskContextGroups = yield* TaskContextGroupService.TaskContextGroupService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -2119,6 +2121,37 @@ const layerWsRpc = (
             scheduledTasks.getWebhookDelivery(input),
             { "rpc.aggregate": "scheduledTasks", "scheduled_task.id": input.id },
           ),
+        [WS_METHODS.taskContextGroupsList]: (_input) =>
+          observeRpcEffect(WS_METHODS.taskContextGroupsList, taskContextGroups.list(), {
+            "rpc.aggregate": "taskContextGroups",
+          }),
+        [WS_METHODS.taskContextGroupsSubscribe]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.taskContextGroupsSubscribe,
+            taskContextGroups.subscribeChanges(),
+            {
+              "rpc.aggregate": "taskContextGroups",
+            },
+          ),
+        [WS_METHODS.taskContextGroupsGet]: (input) =>
+          observeRpcEffect(WS_METHODS.taskContextGroupsGet, taskContextGroups.get(input.groupId), {
+            "rpc.aggregate": "taskContextGroups",
+            "task_context_group.id": input.groupId,
+          }),
+        [WS_METHODS.taskContextGroupsForThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.taskContextGroupsForThread,
+            taskContextGroups.forThread(input.threadId),
+            {
+              "rpc.aggregate": "taskContextGroups",
+              "orchestration_v2.thread_id": input.threadId,
+            },
+          ),
+        [WS_METHODS.taskContextGroupsMutate]: (input) =>
+          observeRpcEffect(WS_METHODS.taskContextGroupsMutate, taskContextGroups.mutate(input), {
+            "rpc.aggregate": "taskContextGroups",
+            "task_context_group.action": input.action,
+          }),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",
