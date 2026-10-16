@@ -68,6 +68,7 @@ import {
 } from "./filesystem.ts";
 import {
   AgentSessionImportInput,
+  AgentSessionImportInvalidSelectorError,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionImportResult,
@@ -1205,6 +1206,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   payload: AgentSessionImportInput,
   success: AgentSessionImportResult,
   error: Schema.Union([
+    AgentSessionImportInvalidSelectorError,
     AgentSessionImportProjectChangedError,
     AgentSessionImportProjectNotFoundError,
     AgentSessionScanError,

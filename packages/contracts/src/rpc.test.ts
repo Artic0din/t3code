@@ -3,7 +3,12 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
-import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
+import { WS_METHODS, WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
+
+const agentSessionsImport = WsRpcGroup.requests.get(WS_METHODS.agentSessionsImport);
+if (agentSessionsImport === undefined) throw new Error("agentSessions.import is not registered");
+const decodeAgentSessionImportExit = Schema.decodeExit(agentSessionsImport.payloadSchema);
+const decodeAgentSessionImport = Schema.decodeSync(agentSessionsImport.payloadSchema);
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -32,6 +37,28 @@ describe("subscribeServerConfig payload compatibility", () => {
 });
 
 describe("WebSocket RPC contracts", () => {
+  it.each([{ providerInstanceId: "codex" }, { providerSessionId: "native-codex-thread" }])(
+    "rejects a partial agent session selector %j",
+    (selector) => {
+      expect(
+        Exit.isFailure(decodeAgentSessionImportExit({ projectId: "project-1", ...selector })),
+      ).toBe(true);
+    },
+  );
+
+  it.each([{}, { providerInstanceId: "codex", providerSessionId: "native-codex-thread" }])(
+    "preserves a supported agent session selector %j",
+    (selector) => {
+      const input = {
+        projectId: "project-1",
+        expectedWorkspaceRoot: "/workspace/project",
+        ...selector,
+      };
+
+      expect(decodeAgentSessionImport(input)).toEqual(input);
+    },
+  );
+
   it("exposes only the V2 orchestration transport surface", () => {
     const methods = [...WsRpcGroup.requests.keys()];
 

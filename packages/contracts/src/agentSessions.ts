@@ -61,18 +61,65 @@ export const AgentSessionProjectCandidate = Schema.Struct({
 });
 export type AgentSessionProjectCandidate = typeof AgentSessionProjectCandidate.Type;
 
+export const AgentSessionHomeState = Schema.Literals(["present", "missing", "unreadable"]);
+export type AgentSessionHomeState = typeof AgentSessionHomeState.Type;
+
+export const AgentSessionSourceReport = Schema.Struct({
+  provider: AgentSessionSource,
+  providerInstanceId: ProviderInstanceId,
+  homeState: AgentSessionHomeState,
+  truncated: Schema.Boolean,
+});
+export type AgentSessionSourceReport = typeof AgentSessionSourceReport.Type;
+
+export const AgentSessionObservation = Schema.Struct({
+  provider: AgentSessionSource,
+  providerInstanceId: ProviderInstanceId,
+  providerSessionId: TrimmedNonEmptyString,
+  projectPath: Schema.NullOr(TrimmedNonEmptyString),
+  projectId: Schema.optional(ProjectId),
+  repository: Schema.NullOr(Schema.String),
+  lastObservedActivityAt: Schema.NullOr(IsoDateTime),
+  importedThreadDeleted: Schema.optional(Schema.Boolean),
+});
+export type AgentSessionObservation = typeof AgentSessionObservation.Type;
+
 export const AgentSessionScanResult = Schema.Struct({
   candidates: Schema.Array(AgentSessionProjectCandidate),
   scannedAt: IsoDateTime,
   truncated: Schema.optional(Schema.Boolean),
+  sessionsTruncated: Schema.optional(Schema.Boolean),
+  /**
+   * Absent on servers that predate session reporting. Clients must not treat
+   * that absence as an empty session list.
+   */
+  sessions: Schema.optional(Schema.Array(AgentSessionObservation)),
+  sourceReports: Schema.optional(Schema.Array(AgentSessionSourceReport)),
 });
 export type AgentSessionScanResult = typeof AgentSessionScanResult.Type;
 
 export const AgentSessionImportInput = Schema.Struct({
   projectId: ProjectId,
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
-});
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  providerSessionId: Schema.optional(TrimmedNonEmptyString),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      (input.providerInstanceId === undefined) === (input.providerSessionId === undefined) ||
+      "Provide both providerInstanceId and providerSessionId, or neither.",
+  ),
+);
 export type AgentSessionImportInput = typeof AgentSessionImportInput.Type;
+
+export class AgentSessionImportInvalidSelectorError extends Schema.TaggedError<AgentSessionImportInvalidSelectorError>()(
+  "AgentSessionImportInvalidSelectorError",
+  {},
+) {
+  override get message(): string {
+    return "Provide both providerInstanceId and providerSessionId, or neither.";
+  }
+}
 
 export class AgentSessionImportProjectNotFoundError extends Schema.TaggedError<AgentSessionImportProjectNotFoundError>()(
   "AgentSessionImportProjectNotFoundError",

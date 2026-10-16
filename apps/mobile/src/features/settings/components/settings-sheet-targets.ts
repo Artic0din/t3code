@@ -18,6 +18,7 @@ export type SettingsSheetTarget =
   | "SettingsProjectGrouping"
   | "SettingsClientStorage"
   | "SettingsDiagnostics"
+  | "SettingsExternalSessions"
   | "SettingsOpenSourceLicenses"
   | "SettingsUsage";
 
