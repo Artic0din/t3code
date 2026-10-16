@@ -442,6 +442,7 @@ function layerTest(input: {
         IdAllocator.layer,
         layerTestStores,
         ThreadCommandExecutor.layer,
+        input.serverSettingsLayer ?? ServerSettings.layerTest(),
       ),
     ),
   );

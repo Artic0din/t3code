@@ -1127,3 +1127,23 @@ describe("ServerSettings.removeAgentCreditsOnMerge", () => {
     ).toBe(true);
   });
 });
+
+describe("model fallback", () => {
+  it("stays off with an empty list until configured", () => {
+    expect(decodeServerSettings({}).modelFallback).toEqual({ enabled: false, models: [] });
+  });
+
+  it("accepts an ordered fallback list", () => {
+    expect(
+      decodeServerSettingsPatch({
+        modelFallback: {
+          enabled: true,
+          models: [{ instanceId: "codex", model: "gpt-6" }],
+        },
+      }).modelFallback,
+    ).toEqual({
+      enabled: true,
+      models: [{ instanceId: "codex", model: "gpt-6" }],
+    });
+  });
+});

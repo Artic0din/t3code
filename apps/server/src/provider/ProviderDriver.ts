@@ -76,6 +76,8 @@ export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
   readonly driverKind: ProviderDriverKind;
   readonly continuationIdentity: ProviderContinuationIdentity;
+  /** Known shared authentication scope; distinct scopes may still hold the same account. */
+  readonly quotaOwnerKey?: string;
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly enabled: boolean;

@@ -1,3 +1,4 @@
+import { presentedDelegatedStatus } from "../orchestration-v2/modelFallback.ts";
 import {
   CommandId,
   type RunId,
@@ -1235,16 +1236,14 @@ const make = Effect.gen(function* () {
         messages: [...childControls.messages, ...resultRecords.messages],
         turnItems: resultRecords.turnItems,
       };
-      // A restart cut the child's run and its continuation has not settled, or
-      // the child started working again after this read.
-      const heldForRestart =
+      const heldForRecovery =
         task.result === null &&
         progress.state === "result_available" &&
         (yield* threadManagement
-          .delegatedTaskResultPending(task.childThreadId)
+          .delegatedTaskResultPending(task.childThreadId, progress.resultRun?.id)
           .pipe(Effect.mapError(threadManagementFailure)));
       const workState =
-        task.result !== null ? "result_available" : heldForRestart ? "working" : progress.state;
+        task.result !== null ? "result_available" : heldForRecovery ? "working" : progress.state;
       const status =
         task.result !== null
           ? taskStatusForRun(
@@ -1282,12 +1281,32 @@ const make = Effect.gen(function* () {
             null);
       const resultTransfer = resultTransfers[0] ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
+      const withoutQuotaSuccess = (reported: typeof status, text: string | null) =>
+        reported === "completed" &&
+        text !== null &&
+        presentedDelegatedStatus({
+          runStatus: "completed",
+          resultText: text,
+          failureClass: null,
+        }) === "failed"
+          ? ("failed" as const)
+          : reported;
+      const presentedStatus = withoutQuotaSuccess(status, derivedResult);
+      const latestTerminalSummary = canExposeTaskRunResult(terminalRun)
+        ? terminalRun.id === childRun?.id
+          ? derivedResult
+          : subagentResultForRun(childProjection, terminalRun).text
+        : null;
+      const presentedTerminalStatus =
+        terminalStatus !== null && isTerminalTaskStatus(terminalStatus)
+          ? withoutQuotaSuccess(terminalStatus, latestTerminalSummary)
+          : null;
       const response = {
         taskId: task.id,
         childThreadId: task.childThreadId,
         childRunId: childRun?.id ?? null,
         childNodeId: task.id,
-        status,
+        status: presentedStatus,
         workState,
         hasPendingChildRuns: hasPendingChildRuns(childProjection, childRun),
         providerInstanceId: task.providerInstanceId,
@@ -1296,12 +1315,10 @@ const make = Effect.gen(function* () {
         resultContextTransferId: resultTransfer?.id ?? null,
         latestTerminalRunId: terminalRun?.id ?? null,
         latestTerminalStatus:
-          terminalStatus !== null && isTerminalTaskStatus(terminalStatus) ? terminalStatus : null,
-        latestTerminalSummary: canExposeTaskRunResult(terminalRun)
-          ? terminalRun.id === childRun?.id
-            ? derivedResult
-            : subagentResultForRun(childProjection, terminalRun).text
-          : null,
+          presentedTerminalStatus !== null && isTerminalTaskStatus(presentedTerminalStatus)
+            ? presentedTerminalStatus
+            : null,
+        latestTerminalSummary,
         latestTerminalResultContextTransferId: resultTransferForRun(terminalRun)?.id ?? null,
         waitTimedOut,
       } satisfies OrchestratorMcpDelegateTaskResult;

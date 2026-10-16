@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { SettingsTarget } from "./settings-environment-filter";
 import {
+  mobileModelFallbackControl,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -20,6 +21,42 @@ const firstProject = "first-project" as ProjectId;
 const secondProject = "second-project" as ProjectId;
 
 describe("mobile usage-limit settings across environments", () => {
+  it("can disable fallback with an empty list on one or mixed environments", () => {
+    const targets = resolveMobileSettingsTargets(
+      [
+        environment(firstId, {
+          ...DEFAULT_SERVER_SETTINGS,
+          modelFallback: { enabled: true, models: [] },
+        }),
+        environment(secondId, DEFAULT_SERVER_SETTINGS),
+      ],
+      null,
+    );
+    expect(mobileModelFallbackControl(targets.slice(0, 1))).toEqual({
+      value: true,
+      configured: false,
+      canToggle: true,
+      mixedValue: false,
+    });
+    expect(mobileModelFallbackControl(targets)).toEqual({
+      value: null,
+      configured: false,
+      canToggle: true,
+      mixedValue: false,
+    });
+    expect(
+      planMobileScopedSettingsPatch(targets, false, { modelFallback: { enabled: false } }),
+    ).toEqual([
+      { environmentId: firstId, patch: { modelFallback: { enabled: false } } },
+      { environmentId: secondId, patch: { modelFallback: { enabled: false } } },
+    ]);
+    expect(mobileModelFallbackControl(targets.slice(1))).toEqual({
+      value: false,
+      configured: false,
+      canToggle: false,
+      mixedValue: false,
+    });
+  });
   it.each(["autoResumeLimitedThreads", "snoozeLimitedThreads"] as const)(
     "shows %s as mixed and can enable it everywhere without changing other settings",
     (key) => {

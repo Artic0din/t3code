@@ -294,6 +294,7 @@ interface SubagentCall {
   child: ThreadState | undefined;
   status: OrchestrationV2Subagent["status"];
   result: string | null;
+  failure: ReturnType<typeof makeProviderFailure> | undefined;
   completedAt: DateTime.Utc | null;
 }
 
@@ -1320,6 +1321,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           model: call.model,
           status: call.status,
           result: call.result,
+          failure: call.status === "failed" ? call.failure : undefined,
           startedAt: call.startedAt,
           completedAt,
           updatedAt,
@@ -1535,6 +1537,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     ) => Effect.Effect<void> = Effect.fnUntraced(function* (call, status, result) {
       if (!isOrchestrationV2WorkActive(call.status)) return;
       call.status = status;
+      call.failure =
+        status === "failed"
+          ? (call.failure ??
+            makeProviderFailure({ class: "unknown", message: "OpenCode delegated task failed." }))
+          : undefined;
       call.completedAt = yield* DateTime.now;
       if (result !== undefined) call.result = result;
       call.state.calls.delete(call.toolId);
@@ -1603,6 +1610,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       turn.before = subagent.queued;
       subagent.queued = undefined;
       child.active = turn;
+      subagent.call.failure = undefined;
       yield* emit({
         type: "node.updated",
         driver,
@@ -1764,6 +1772,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       // and T3 has no terminal to wait on.
       if (state.subagent !== undefined) {
         const call = state.subagent.call;
+        if (isOrchestrationV2WorkActive(call.status) && terminal.status !== "failed") {
+          call.failure = undefined;
+        }
         if (!call.background && terminal.status !== "completed") {
           yield* settleCall(call, terminal.status);
         }
@@ -2172,6 +2183,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         child: undefined,
         status: "running",
         result: null,
+        failure: undefined,
         completedAt: null,
       };
       turn.usedSubagents = true;
@@ -2251,6 +2263,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const call = state.calls.get(event.data.id);
           // A refused call (unknown agent, the nesting limit) is a failed subagent.
           if (call !== undefined) {
+            call.failure = aborted
+              ? undefined
+              : makeProviderFailure({
+                  message: event.data.error.message,
+                  code: event.data.error.type,
+                  class: "provider_error",
+                });
             return yield* settleCall(
               call,
               aborted ? "interrupted" : "failed",
@@ -2292,22 +2311,34 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         case "session.execution.started":
           // The execution that delivers steers the last one ended without.
           turn.heldEnd = undefined;
+          if (state.subagent !== undefined) state.subagent.call.failure = undefined;
           return;
         case "session.execution.succeeded":
+          if (state.subagent !== undefined) state.subagent.call.failure = undefined;
           return yield* endExecution(state, turn, {
             status: turn.interrupted ? "interrupted" : "completed",
           });
         case "session.execution.interrupted":
+          if (state.subagent !== undefined) state.subagent.call.failure = undefined;
           return yield* endExecution(state, turn, { status: "interrupted" });
-        case "session.execution.failed":
-          return yield* endExecution(state, turn, {
-            status: "failed",
-            failure: makeProviderFailure({
-              message: event.data.error.message,
-              code: event.data.error.type,
-              class: "provider_error",
-            }),
-          });
+        case "session.execution.failed": {
+          const terminal: TurnTerminal =
+            state.subagent !== undefined && event.data.error.type === "aborted"
+              ? { status: "interrupted" }
+              : {
+                  status: "failed",
+                  failure: makeProviderFailure({
+                    message: event.data.error.message,
+                    code: event.data.error.type,
+                    class: "provider_error",
+                  }),
+                };
+          if (state.subagent !== undefined) {
+            state.subagent.call.failure =
+              terminal.status === "failed" ? terminal.failure : undefined;
+          }
+          return yield* endExecution(state, turn, terminal);
+        }
         default:
           return;
       }
@@ -2507,10 +2538,12 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       // Marks where a running turn's own execution begins; it never ends one.
       // With no turn running it is a subagent's or a follow-up's start, below.
       if (event.type === "unreadable.execution.started") {
-        const turn = threads.get(event.sessionID)?.active;
+        const state = threads.get(event.sessionID);
+        const turn = state?.active;
         if (turn !== undefined) {
           turn.awaitingStart = false;
           turn.heldEnd = undefined;
+          if (state?.subagent !== undefined) state.subagent.call.failure = undefined;
           return;
         }
       }

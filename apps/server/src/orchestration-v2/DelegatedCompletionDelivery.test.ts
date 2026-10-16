@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   type ModelSelection,
@@ -12,22 +13,36 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderTurnId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -35,10 +50,20 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
-import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
+import type { ProviderAdapterV2Shape, ProviderAdapterV2Event } from "./ProviderAdapter.ts";
+import { ProviderAdapterCapabilitiesError } from "./ProviderAdapter.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import * as ModelFallbackWorker from "./ModelFallbackWorker.ts";
+import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
-import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
+import { modelFallbackCommand } from "./modelFallback.ts";
 
 const layerPlatformTest = Layer.merge(
   NodeServices.layer,
@@ -67,13 +92,146 @@ const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
 );
 
 const driver = ProviderDriverKind.make("codex");
-const orchestrationAdapter = {
-  instanceId: modelSelection.instanceId,
+const beforeCapabilities = Context.Reference<Effect.Effect<void, ProviderAdapterCapabilitiesError>>(
+  "test/before-capabilities",
+  {
+    defaultValue: () => Effect.void,
+  },
+);
+const makeAdapter = (instanceId: ProviderInstanceId): ProviderAdapterV2Shape => ({
+  instanceId,
   driver,
-  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+  getCapabilities: () =>
+    beforeCapabilities.pipe(
+      Effect.flatMap((before) => before),
+      Effect.as(CodexProviderCapabilitiesV2),
+    ),
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
-  openSession: () => Effect.die("sessions are not used by delegated completion tests"),
-} as ProviderAdapterV2Shape;
+  openSession: (input) =>
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+      const now = yield* DateTime.now;
+      return {
+        instanceId,
+        driver,
+        providerSessionId: input.providerSessionId,
+        providerSession: {
+          id: input.providerSessionId,
+          driver,
+          providerInstanceId: instanceId,
+          status: "ready",
+          cwd: input.runtimePolicy.cwd ?? "/workspace",
+          model: input.modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+        events: Stream.fromQueue(events),
+        ensureThread: (thread) =>
+          Effect.succeed({
+            id: ProviderThreadId.make(`provider-thread:${thread.threadId}`),
+            driver,
+            providerInstanceId: instanceId,
+            providerSessionId: input.providerSessionId,
+            appThreadId: thread.threadId,
+            ownerNodeId: null,
+            nativeThreadRef: { driver, nativeId: `native:${thread.threadId}`, strength: "strong" },
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          }),
+        resumeThread: ({ providerThread }) =>
+          Effect.succeed({
+            ...providerThread,
+            providerInstanceId: instanceId,
+            providerSessionId: input.providerSessionId,
+          }),
+        startTurn: (turn) =>
+          Effect.gen(function* () {
+            const at = yield* DateTime.now;
+            const providerTurnId = ProviderTurnId.make(`provider-turn:${turn.runId}`);
+            const failed =
+              turn.threadId === ThreadId.make("thread:fallback-lifecycle-exhausted") ||
+              (turn.threadId === ThreadId.make("thread:delegated-finalization-race") &&
+                instanceId === modelSelection.instanceId);
+            const status = failed ? "failed" : "completed";
+            yield* Queue.offer(events, {
+              type: "provider_turn.updated",
+              driver,
+              providerTurn: {
+                id: providerTurnId,
+                providerThreadId: turn.providerThread.id,
+                nodeId: turn.rootNodeId,
+                runAttemptId: turn.attemptId,
+                nativeTurnRef: { driver, nativeId: `native:${turn.runId}`, strength: "strong" },
+                ordinal: turn.providerTurnOrdinal,
+                status,
+                startedAt: at,
+                completedAt: at,
+              },
+            });
+            if (!failed)
+              yield* Queue.offer(events, {
+                type: "turn_item.updated",
+                driver,
+                turnItem: {
+                  id: TurnItemId.make(`item:${turn.runId}:answer`),
+                  threadId: turn.threadId,
+                  runId: turn.runId,
+                  nodeId: turn.rootNodeId,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 1,
+                  status: "completed",
+                  title: null,
+                  startedAt: at,
+                  completedAt: at,
+                  updatedAt: at,
+                  type: "assistant_message",
+                  messageId: MessageId.make(`message:${turn.runId}:answer`),
+                  text: "Finished usage limit documentation.",
+                  streaming: false,
+                },
+              });
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: turn.providerThread.id,
+              providerTurnId,
+              runOrdinal: turn.runOrdinal,
+              threadDisposition: "reusable",
+              ...(failed
+                ? {
+                    status: "failed",
+                    failureItemOrdinal: 2,
+                    failure: {
+                      class: "usage_limit",
+                      message: "Account usage limit",
+                      code: null,
+                      retryable: false,
+                    },
+                  }
+                : { status: "completed", failure: null }),
+            });
+          }),
+        steerTurn: () => Effect.die("unused steering"),
+        interruptTurn: () => Effect.die("unused interruption"),
+        respondToRuntimeRequest: () => Effect.die("unused request response"),
+        readThreadSnapshot: () => Effect.die("unused snapshot"),
+        rollbackThread: () => Effect.die("unused rollback"),
+        forkThread: () => Effect.die("unused fork"),
+      };
+    }),
+});
+const orchestrationAdapter = makeAdapter(modelSelection.instanceId);
 const providerInstance = {
   instanceId: modelSelection.instanceId,
   driverKind: driver,
@@ -81,6 +239,7 @@ const providerInstance = {
     driverKind: driver,
     continuationKey: "codex:test",
   },
+  quotaOwnerKey: "codex:test-auth",
   displayName: "Codex test",
   enabled: true,
   // No supportedRuntimeModes: every runtime mode runs as stored.
@@ -88,27 +247,51 @@ const providerInstance = {
   orchestrationAdapter,
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
+const aliasInstanceId = ProviderInstanceId.make("codex-test-alias");
+const aliasInstance = {
+  ...providerInstance,
+  instanceId: aliasInstanceId,
+  orchestrationAdapter: makeAdapter(aliasInstanceId),
+} satisfies ProviderInstance;
+const isolatedInstanceId = ProviderInstanceId.make("codex-test-isolated");
+const isolatedInstance = {
+  ...providerInstance,
+  instanceId: isolatedInstanceId,
+  quotaOwnerKey: "codex:isolated-test-auth",
+  orchestrationAdapter: makeAdapter(isolatedInstanceId),
+} satisfies ProviderInstance;
+const providerInstances = [providerInstance, aliasInstance, isolatedInstance];
 
 const layerTestProviderInstanceRegistry = Layer.succeed(
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   {
     getInstance: (instanceId) =>
-      Effect.succeed(instanceId === providerInstance.instanceId ? providerInstance : undefined),
-    listInstances: Effect.succeed([providerInstance]),
+      Effect.succeed(providerInstances.find((instance) => instance.instanceId === instanceId)),
+    listInstances: Effect.succeed(providerInstances),
     listUnavailable: Effect.succeed([]),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.never,
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  CommandReceiptStore.layer,
+  ProjectionStore.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
       normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
     }),
   ),
-  Layer.provide(ProviderTurnStartServiceTestkit.layer),
+  Layer.provide(
+    Layer.mock(GitWorkflow.GitWorkflowService)({
+      pruneWorktrees: () => Effect.void,
+      createWorktree: () => Effect.die("unused worktree creation"),
+    }),
+  ),
   Layer.provide(
     Layer.succeed(ProjectEnrichmentService.ProjectEnrichmentService, {
       peek: () =>
@@ -132,10 +315,51 @@ const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerPlatformTest),
 );
+
+const sweepFallbacks = Layer.build(ModelFallbackWorker.layer).pipe(
+  Effect.provideService(Scheduler.Scheduler, {
+    register: (_name, sweep) => sweep.pipe(Effect.orDie),
+  }),
+);
+
+const readMcpTask = (threadId: ThreadId, taskId: NodeId) =>
+  OrchestratorMcpService.OrchestratorMcpService.pipe(
+    Effect.flatMap((service) =>
+      service.taskStatus(
+        {
+          environmentId: EnvironmentId.make("environment:fallback-lifecycle"),
+          requestNamespace: `provider-session:${threadId}`,
+          thread: {
+            threadId,
+            providerSessionId: `provider-session:${threadId}`,
+            providerInstanceId: modelSelection.instanceId,
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 1,
+        },
+        taskId,
+      ),
+    ),
+    Effect.provide(
+      OrchestratorMcpService.layer.pipe(
+        Layer.provide(ThreadManagementService.layer),
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+          ),
+        ),
+      ),
+    ),
+  );
 
 const seedParentWithTerminalTask = (input: {
   readonly threadId: ThreadId;
@@ -147,6 +371,7 @@ const seedParentWithTerminalTask = (input: {
   readonly completionWake?: "always" | "settled_only";
   readonly deliveryTaskIds?: ReadonlyArray<NodeId>;
   readonly now: DateTime.Utc;
+  readonly workspaceRoot?: string;
 }) =>
   Effect.gen(function* () {
     const projects = yield* ProjectService.ProjectService;
@@ -160,7 +385,7 @@ const seedParentWithTerminalTask = (input: {
       commandId: CommandId.make(`command:seed-project:${input.threadId}`),
       projectId: input.projectId,
       title: "Delegated completion delivery",
-      workspaceRoot: `/workspace/${input.projectId}`,
+      workspaceRoot: input.workspaceRoot ?? `/workspace/${input.projectId}`,
     });
 
     yield* orchestrator.dispatch({
@@ -799,6 +1024,7 @@ const seedRestartCancelledChild = (input: {
   readonly continuationPending: boolean;
   /** "completed" seeds a settled turn whose background work the restart cancelled. */
   readonly runStatus?: "cancelled" | "completed";
+  readonly seedRun?: boolean;
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
@@ -876,6 +1102,7 @@ const seedRestartCancelledChild = (input: {
         },
       ],
     });
+    if (input.seedRun === false) return { taskId, childThreadId, childRunId };
     yield* eventSink.writeWithEffects({
       commandId: reconcileCommandId(input.name),
       events: [
@@ -902,6 +1129,1147 @@ const seedRestartCancelledChild = (input: {
   });
 
 it.layer(layerTest)("delegated tasks across a server restart", (it) => {
+  it.effect.each(["switched", "rejected-then-disabled"] as const)(
+    "reconciles a limited wake through %s and offers a later sibling result",
+    (outcome) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+          const now = yield* DateTime.now;
+          const fixture = `fallback-limited-wake:${outcome}`;
+          const threadId = ThreadId.make(`thread:${fixture}`);
+          const projectId = ProjectId.make(`project:${fixture}`);
+          const spawningRunId = RunId.make(`run:${fixture}:spawning`);
+          const rootNodeId = NodeId.make(`node:${fixture}:root`);
+          const firstTaskId = NodeId.make(`node:${fixture}:first`);
+          const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
+          const wakeRunId = RunId.make(`run:${fixture}:wake`);
+          yield* settings.updateSettings({
+            providers: { codex: { enabled: true } },
+            providerInstances: {
+              [modelSelection.instanceId]: { driver, enabled: true, config: {} },
+            },
+            modelFallback: { enabled: true, models: [{ ...modelSelection, model: "o3" }] },
+          });
+          yield* seedParentWithTerminalTask({
+            threadId,
+            projectId,
+            runId: spawningRunId,
+            rootNodeId,
+            taskId: firstTaskId,
+            deliveryState: "claimed",
+            completionWake: "always",
+            deliveryTaskIds: [firstTaskId],
+            workspaceRoot: yield* checkpointWorkspace(fixture),
+            now,
+          });
+          const spawning = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.id === spawningRunId,
+          )!;
+          const sequence = yield* sink.latestSequence();
+          yield* sink.write({
+            commandId: reconcileCommandId(`${fixture}:failed`),
+            events: [
+              {
+                ...runEvent({
+                  threadId,
+                  runId: spawningRunId,
+                  ordinal: 1,
+                  status: "completed",
+                  now,
+                }),
+                payload: { ...spawning, status: "completed", completedAt: now },
+              },
+              {
+                id: EventId.make(`event:${fixture}:message`),
+                type: "message.updated",
+                threadId,
+                runId: wakeRunId,
+                occurredAt: now,
+                payload: {
+                  id: messageId,
+                  threadId,
+                  runId: wakeRunId,
+                  nodeId: null,
+                  role: "user",
+                  text: "Continue with the first child's completed result.",
+                  attachments: [],
+                  streaming: false,
+                  createdBy: "agent",
+                  creationSource: "server",
+                  createdAt: now,
+                  updatedAt: now,
+                  delegatedCompletion: {
+                    parentRunId: spawningRunId,
+                    generation: 1,
+                    taskIds: [firstTaskId],
+                  },
+                },
+              },
+              runEvent({
+                threadId,
+                runId: wakeRunId,
+                ordinal: 2,
+                status: "failed",
+                now,
+                userMessageId: messageId,
+                providerThreadId: parentProviderThreadId(threadId),
+              }),
+              {
+                id: EventId.make(`event:${fixture}:failure`),
+                type: "turn-item.updated",
+                threadId,
+                runId: wakeRunId,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make(`item:${fixture}:failure`),
+                  threadId,
+                  runId: wakeRunId,
+                  nodeId: null,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 1,
+                  type: "error",
+                  status: "failed",
+                  title: null,
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  failure: {
+                    class: "usage_limit",
+                    message: "Weekly GPT usage limit",
+                    code: "weekly_gpt",
+                    retryable: false,
+                  },
+                },
+              },
+            ],
+          });
+          if (outcome === "rejected-then-disabled") {
+            let capabilityReads = 0;
+            yield* sweepFallbacks.pipe(
+              Effect.provideService(
+                beforeCapabilities,
+                Effect.gen(function* () {
+                  capabilityReads += 1;
+                  if (capabilityReads > 2)
+                    return yield* new ProviderAdapterCapabilitiesError({
+                      driver,
+                      cause: "Durable dispatch refusal",
+                    });
+                }),
+              ),
+            );
+            const command = modelFallbackCommand({
+              threadId,
+              runId: wakeRunId,
+              decision: {
+                type: "switch",
+                to: { ...modelSelection, model: "o3" },
+                detail: "Continue",
+                window: "weekly",
+                resetAt: null,
+              },
+            })!;
+            const receipt = yield* receipts.getByCommandId(command.commandId);
+            assert.isTrue(receipt._tag === "Some" && receipt.value.status === "rejected");
+            yield* settings.updateSettings({ modelFallback: { enabled: false } });
+          }
+          yield* sweepFallbacks;
+          const dispatched = yield* orchestrator.getThreadProjection(threadId);
+          const replacement = dispatched.runs.find((run) => run.ordinal === 3);
+          if (outcome === "switched") {
+            assert.equal(replacement?.status, "starting");
+            if (replacement === undefined) return;
+            const replacementRunId = replacement.id;
+            const completed = yield* sink
+              .stream({ afterSequence: sequence, eventType: "run.updated" })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "run.updated" &&
+                    stored.event.payload.id === replacementRunId &&
+                    ["waiting", "failed"].includes(stored.event.payload.status),
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+            yield* worker.drain();
+            yield* Fiber.join(completed);
+            yield* worker.drain();
+            const continued = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(
+              continued.runs.find((run) => run.id === replacementRunId)?.status,
+              "completed",
+            );
+          } else {
+            assert.isUndefined(replacement);
+          }
+          const continued = yield* orchestrator.getThreadProjection(threadId);
+          assert.isNull(
+            continued.runs.find((run) => run.id === spawningRunId)?.delegatedCompletion?.delivery,
+          );
+          assert.equal(
+            continued.subagents.find((task) => task.id === firstTaskId)?.completionDelivery?.state,
+            "delivered",
+          );
+          const sibling = yield* seedRestartCancelledChild({
+            parentThreadId: threadId,
+            projectId,
+            parentRunId: spawningRunId,
+            rootNodeId,
+            name: `${fixture}:sibling`,
+            completionWake: "always",
+            continuationPending: false,
+            runStatus: "completed",
+            now,
+          });
+          yield* orchestrator.recoverDelegatedTask(sibling.childThreadId, sibling.childRunId);
+          const offered = yield* orchestrator.getThreadProjection(threadId);
+          const delivery = offered.runs.find((run) => run.id === spawningRunId)?.delegatedCompletion
+            ?.delivery;
+          assert.equal(delivery?.generation, 2);
+          assert.deepEqual(delivery?.taskIds, [sibling.taskId]);
+          assert.equal(
+            offered.subagents.find((task) => task.id === sibling.taskId)?.completionDelivery?.state,
+            "claimed",
+          );
+          yield* orchestrator.recoverDelegatedTask(sibling.childThreadId, sibling.childRunId);
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).contextTransfers.filter(
+              (transfer) => transfer.sourceThreadId === sibling.childThreadId,
+            ).length,
+            1,
+          );
+          yield* settings.updateSettings({ modelFallback: { enabled: false } });
+        }),
+      ),
+  );
+
+  it.effect.each([
+    "completed",
+    "exhausted",
+    "settled",
+    "settled-during-plan",
+    "disabled-during-plan",
+    "removed-during-plan",
+    "added-during-plan",
+    "reordered-during-plan",
+    "archived-during-plan",
+    "deleted-during-plan",
+    "stop-during-plan",
+    "selection-during-plan",
+    "finalized-then-reenabled",
+    "legacy-default",
+    "explicit-disabled",
+    "rejected-then-disabled",
+    "rejected-then-archived",
+    "rejected-then-deleted",
+    "snoozed",
+    "request-blocked",
+    "snoozed-then-removed",
+    "request-blocked-then-removed",
+    "snoozed-unavailable",
+    "request-blocked-unavailable",
+    "options-during-plan",
+    "rejected-then-recovered",
+    "notice-retry",
+    "shared-auth-alias",
+  ] as const)(
+    "persists the fallback lifecycle through %s and recovers it without duplicate delivery",
+    (outcome) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+          const now = yield* DateTime.now;
+          const cwd = yield* checkpointWorkspace(`fallback-lifecycle-${outcome}`);
+          const threadId = ThreadId.make(`thread:fallback-lifecycle-parent-${outcome}`);
+          const projectId = ProjectId.make(`project:fallback-lifecycle-${outcome}`);
+          const runId = RunId.make(`run:fallback-lifecycle-parent-${outcome}`);
+          const rootNodeId = NodeId.make(`node:fallback-lifecycle-parent-${outcome}`);
+          const target = {
+            ...modelSelection,
+            instanceId: outcome.endsWith("unavailable")
+              ? ProviderInstanceId.make("unavailable")
+              : modelSelection.instanceId,
+            model: "o3",
+          };
+          const updatedTarget: ModelSelection = {
+            ...target,
+            options: [{ id: "reasoningEffort", value: "high" }],
+          };
+          const initialTarget =
+            outcome === "added-during-plan"
+              ? { ...target, instanceId: ProviderInstanceId.make("unavailable") }
+              : outcome === "shared-auth-alias"
+                ? { ...target, instanceId: aliasInstanceId, model: "gpt-5.4-mini" }
+                : target;
+          const reorderedTarget = { ...target, model: "o4-mini" };
+          const finalTarget = outcome === "reordered-during-plan" ? reorderedTarget : target;
+          yield* settings.updateSettings({
+            providers: { codex: { enabled: true } },
+            providerInstances: {
+              [modelSelection.instanceId]: { driver, enabled: true, config: {} },
+              ...(initialTarget.instanceId !== modelSelection.instanceId
+                ? {
+                    [initialTarget.instanceId]: { driver, enabled: true, config: {} },
+                  }
+                : {}),
+            },
+            modelFallback: {
+              enabled: true,
+              models: [
+                { ...modelSelection, model: "gpt-5.4-mini" },
+                initialTarget,
+                ...(outcome === "shared-auth-alias" ? [target] : []),
+                ...(outcome === "reordered-during-plan" ? [reorderedTarget] : []),
+              ],
+            },
+          });
+          if (outcome === "legacy-default") {
+            yield* settings.updateProviderInstance({
+              operation: "remove",
+              instanceId: modelSelection.instanceId,
+            });
+          }
+          if (outcome === "explicit-disabled") {
+            yield* settings.updateSettings({
+              providerInstances: {
+                [modelSelection.instanceId]: { driver, enabled: false, config: {} },
+              },
+            });
+          }
+          yield* seedParentWithTerminalTask({
+            threadId,
+            projectId,
+            runId,
+            rootNodeId,
+            taskId: NodeId.make(`node:seed-${outcome}`),
+            deliveryState: "delivered",
+            workspaceRoot: cwd,
+            now,
+          });
+          const child = yield* seedRestartCancelledChild({
+            parentThreadId: threadId,
+            projectId,
+            parentRunId: runId,
+            rootNodeId,
+            name: `fallback-lifecycle-${outcome}`,
+            completionWake: "settled_only",
+            continuationPending: false,
+            seedRun: outcome !== "stop-during-plan",
+            now,
+          });
+          let failedRun: OrchestrationV2Run = runEvent({
+            threadId: child.childThreadId,
+            runId: child.childRunId,
+            ordinal: 1,
+            status: "failed",
+            now,
+          }).payload;
+          if (outcome === "stop-during-plan") {
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`fallback-lifecycle-${outcome}:start`),
+              threadId: child.childThreadId,
+              messageId: MessageId.make(`fallback-lifecycle-${outcome}:prompt`),
+              text: "Run the delegated task.",
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "server",
+              dispatchMode: { type: "start_immediately" },
+            });
+            const created = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs[0];
+            assert.isDefined(created);
+            if (created === undefined) return;
+            assert.isNotNull(created.rootNodeId);
+            assert.isNotNull(created.providerThreadId);
+            assert.isNotNull(created.activeAttemptId);
+            child.childRunId = created.id;
+            failedRun = { ...created, status: "failed", completedAt: now };
+          }
+          const cancelled = runEvent({
+            threadId: child.childThreadId,
+            runId: RunId.make(`run:fallback-lifecycle-${outcome}:cancelled`),
+            ordinal: 2,
+            status: "cancelled",
+            now,
+          });
+          yield* eventSink.write({
+            commandId: reconcileCommandId(`fallback-lifecycle-${outcome}:limited`),
+            events: [
+              {
+                ...runEvent({
+                  threadId: child.childThreadId,
+                  runId: child.childRunId,
+                  ordinal: 1,
+                  status: "failed",
+                  now,
+                }),
+                payload: failedRun,
+              },
+              { ...cancelled, payload: { ...cancelled.payload, startedAt: null } },
+              {
+                id: EventId.make(`event:fallback-lifecycle-${outcome}:failure`),
+                type: "turn-item.updated",
+                threadId: child.childThreadId,
+                runId: child.childRunId,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make(`item:fallback-lifecycle-${outcome}:failure`),
+                  threadId: child.childThreadId,
+                  runId: child.childRunId,
+                  nodeId: failedRun.rootNodeId,
+                  providerThreadId: failedRun.providerThreadId,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 1,
+                  type: "error",
+                  status: "failed",
+                  title: null,
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  failure: {
+                    class: "usage_limit",
+                    message: "Weekly GPT usage limit",
+                    code: "weekly_gpt",
+                    retryable: false,
+                  },
+                },
+              },
+            ],
+          });
+          const settle = orchestrator
+            .dispatch({
+              type: "thread.settle",
+              threadId: child.childThreadId,
+              commandId: CommandId.make(`fallback-lifecycle-${outcome}:settle`),
+            })
+            .pipe(Effect.asVoid, Effect.orDie);
+          if (outcome === "notice-retry") {
+            yield* settings.updateSettings({ modelFallback: { enabled: false, models: [] } });
+            const paused = {
+              type: "pause" as const,
+              reason: "exhausted" as const,
+              activeModel: modelSelection,
+              detail:
+                "Usage limit reached on gpt-5.4 (weekly). Automatic fallback stopped because every configured model is unavailable or shares this quota. The active model is still gpt-5.4.",
+            };
+            const note = modelFallbackCommand({
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              decision: paused,
+            })!;
+            yield* orchestrator.dispatch(note).pipe(Effect.flip);
+            yield* settings.updateSettings({ modelFallback: { enabled: true } });
+            const retry = modelFallbackCommand({
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              decision: paused,
+              attempt: 2,
+            })!;
+            const delivered = yield* orchestrator.dispatch(retry);
+            const beforeReplay = yield* eventSink.latestSequence();
+            assert.deepEqual(yield* orchestrator.dispatch(retry), delivered);
+            assert.equal(yield* eventSink.latestSequence(), beforeReplay);
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(child.childThreadId)).messages.filter(
+                (message) => message.role === "system" && message.text === paused.detail,
+              ).length,
+              1,
+            );
+          }
+          if (outcome === "settled") yield* settle;
+          const deferred =
+            !outcome.endsWith("unavailable") &&
+            (outcome.startsWith("snoozed") || outcome.startsWith("request-blocked"));
+          if (outcome.startsWith("snoozed"))
+            yield* orchestrator.dispatch({
+              type: "thread.snooze",
+              threadId: child.childThreadId,
+              commandId: CommandId.make(`fallback-lifecycle-${outcome}:snooze`),
+              snoozedUntil: DateTime.formatIso(DateTime.add(now, { minutes: 10 })),
+            });
+          if (outcome.startsWith("request-blocked"))
+            yield* eventSink.write({
+              commandId: reconcileCommandId(`fallback-lifecycle-${outcome}:request`),
+              events: [
+                {
+                  id: EventId.make(`event:fallback-lifecycle-${outcome}:request`),
+                  type: "runtime-request.updated",
+                  threadId: child.childThreadId,
+                  occurredAt: now,
+                  payload: {
+                    id: RuntimeRequestId.make(`request:${child.childThreadId}`),
+                    nodeId: NodeId.make(`node:${child.childThreadId}`),
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "user_input",
+                    status: "pending",
+                    responseCapability: { type: "not_resumable", reason: "Process stopped" },
+                    createdAt: now,
+                    resolvedAt: null,
+                  },
+                },
+              ],
+            });
+          const rejectThenChange = outcome.startsWith("rejected-then-");
+          let capabilityReads = 0;
+          let planningMutationFailure: string | null = null;
+          let stopMarkers: readonly { readonly runId: RunId | null; readonly type: string }[] = [];
+          const onCapabilities = Effect.gen(function* () {
+            capabilityReads += 1;
+            if (rejectThenChange && capabilityReads > 2) {
+              return yield* new ProviderAdapterCapabilitiesError({
+                driver,
+                cause: "Durable dispatch refusal",
+              });
+            }
+            if (capabilityReads !== 1) return;
+            yield* Effect.gen(function* () {
+              if (outcome === "settled-during-plan") yield* settle;
+              if (outcome === "disabled-during-plan")
+                yield* settings.updateSettings({ modelFallback: { enabled: false } });
+              if (outcome === "removed-during-plan")
+                yield* settings.updateSettings({ modelFallback: { models: [] } });
+              if (outcome === "added-during-plan")
+                yield* settings.updateSettings({ modelFallback: { models: [target] } });
+              if (outcome === "reordered-during-plan")
+                yield* settings.updateSettings({
+                  modelFallback: { models: [reorderedTarget, target] },
+                });
+              if (outcome === "options-during-plan")
+                yield* settings.updateSettings({ modelFallback: { models: [updatedTarget] } });
+              if (outcome === "stop-during-plan") {
+                yield* orchestrator.dispatch({
+                  type: "thread.stop",
+                  threadId: child.childThreadId,
+                  commandId: CommandId.make(`fallback-lifecycle-${outcome}:stop`),
+                });
+                const stopped = yield* orchestrator.getThreadProjection(child.childThreadId);
+                stopMarkers = stopped.turnItems.map((item) => ({
+                  runId: item.runId,
+                  type: item.type,
+                }));
+              }
+              if (outcome === "selection-during-plan")
+                yield* orchestrator.dispatch({
+                  type: "thread.model-selection.set",
+                  threadId: child.childThreadId,
+                  modelSelection: { ...modelSelection, model: "user-choice" },
+                  commandId: CommandId.make(`fallback-lifecycle-${outcome}:selection`),
+                });
+              if (outcome === "archived-during-plan" || outcome === "deleted-during-plan") {
+                yield* orchestrator.dispatch({
+                  type: outcome === "archived-during-plan" ? "thread.archive" : "thread.delete",
+                  threadId: child.childThreadId,
+                  commandId: CommandId.make(`fallback-lifecycle-${outcome}:stop`),
+                });
+              }
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.sync(() => {
+                  planningMutationFailure = Cause.pretty(cause);
+                }),
+              ),
+            );
+          });
+          const recover =
+            outcome === "legacy-default"
+              ? sweepFallbacks
+              : orchestrator.recoverDelegatedTask(child.childThreadId, child.childRunId);
+          if (outcome === "shared-auth-alias") {
+            const command = modelFallbackCommand({
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              decision: {
+                type: "switch",
+                to: initialTarget,
+                detail: "Continue",
+                window: "weekly",
+                resetAt: null,
+              },
+            });
+            assert.isNotNull(command);
+            if (command === null) return;
+            assert.isTrue(Exit.isFailure(yield* orchestrator.dispatch(command).pipe(Effect.exit)));
+            const receipt = yield* receipts.getByCommandId(command.commandId);
+            assert.isTrue(receipt._tag === "Some" && receipt.value.status === "rejected");
+            const refused = yield* orchestrator.getThreadProjection(child.childThreadId);
+            assert.deepEqual(
+              refused.runs.map((run) => run.status),
+              ["failed", "cancelled"],
+            );
+            assert.deepEqual(refused.thread.modelSelection, modelSelection);
+          }
+          if (outcome === "finalized-then-reenabled")
+            yield* settings.updateSettings({ modelFallback: { enabled: false } });
+          yield* recover.pipe(Effect.provideService(beforeCapabilities, onCapabilities));
+          assert.isNull(planningMutationFailure, planningMutationFailure ?? undefined);
+          if (outcome === "added-during-plan" || outcome === "reordered-during-plan") {
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                (task) => task.id === child.taskId,
+              )?.status,
+              "running",
+            );
+            const pending = yield* orchestrator.getThreadProjection(child.childThreadId);
+            assert.deepEqual(
+              pending.runs.map((run) => run.status),
+              ["failed", "cancelled"],
+            );
+            assert.equal(
+              pending.turnItems.filter(
+                (item) => item.type === "system_notice" && item.title === "Model fallback",
+              ).length,
+              0,
+            );
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).contextTransfers.filter(
+                (transfer) => transfer.sourceThreadId === child.childThreadId,
+              ).length,
+              0,
+            );
+            yield* sweepFallbacks;
+          }
+          if (outcome === "stop-during-plan") {
+            assert.isTrue(
+              stopMarkers.some(
+                (item) => item.runId === child.childRunId && item.type === "run_interrupt_request",
+              ),
+              JSON.stringify(stopMarkers),
+            );
+            const projections = yield* ProjectionStore.ProjectionStoreV2;
+            assert.notInclude(
+              (yield* projections.getLimitRecoveryCandidates({
+                now,
+                fallback: true,
+                autoResume: false,
+                snooze: false,
+              })).map((candidate) => candidate.id),
+              child.childThreadId,
+            );
+          }
+          if (outcome.endsWith("unavailable")) {
+            const unavailable = yield* readMcpTask(threadId, child.taskId);
+            assert.equal(unavailable.status, "failed");
+            assert.equal(unavailable.workState, "result_available");
+          }
+          if (deferred) {
+            yield* sweepFallbacks.pipe(Effect.provideService(beforeCapabilities, onCapabilities));
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                (task) => task.id === child.taskId,
+              )?.status,
+              "running",
+            );
+            yield* settings.updateSettings({
+              modelFallback: outcome.endsWith("then-removed") ? { models: [] } : { enabled: false },
+            });
+            if (outcome.endsWith("then-removed")) {
+              assert.isTrue(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+            }
+            yield* sweepFallbacks;
+            if (outcome.endsWith("then-removed")) {
+              assert.isFalse(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+            }
+          }
+          if (outcome === "options-during-plan") {
+            assert.deepEqual(
+              (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.map(
+                (run) => run.status,
+              ),
+              ["failed", "cancelled"],
+            );
+            yield* sweepFallbacks;
+          }
+          if (rejectThenChange) {
+            const command = modelFallbackCommand({
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              decision: {
+                type: "switch",
+                to: target,
+                detail: "Continue",
+                window: "weekly",
+                resetAt: null,
+              },
+            });
+            assert.isNotNull(command);
+            if (command === null) return;
+            const receipt = yield* receipts.getByCommandId(command.commandId);
+            assert.isTrue(receipt._tag === "Some" && receipt.value.status === "rejected");
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                (task) => task.id === child.taskId,
+              )?.status,
+              "running",
+            );
+            if (outcome === "rejected-then-recovered") {
+              const held = yield* readMcpTask(threadId, child.taskId);
+              assert.equal(held.status, "running");
+              assert.equal(held.workState, "working");
+              assert.isNull(held.summary);
+              assert.isUndefined(
+                (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                  (task) => task.id === child.taskId,
+                )?.completionDelivery,
+              );
+            }
+            if (outcome === "rejected-then-disabled")
+              yield* settings.updateSettings({ modelFallback: { enabled: false } });
+            else if (outcome !== "rejected-then-recovered")
+              yield* orchestrator.dispatch({
+                type: outcome === "rejected-then-archived" ? "thread.archive" : "thread.delete",
+                threadId: child.childThreadId,
+                commandId: CommandId.make(`fallback-lifecycle-${outcome}:stop`),
+              });
+            yield* sweepFallbacks;
+            if (outcome === "rejected-then-recovered") {
+              const retried = modelFallbackCommand({
+                threadId: child.childThreadId,
+                runId: child.childRunId,
+                decision: {
+                  type: "switch",
+                  to: target,
+                  detail: "Continue",
+                  window: "weekly",
+                  resetAt: null,
+                },
+                attempt: 2,
+              })!;
+              const retry = yield* receipts.getByCommandId(retried.commandId);
+              assert.isTrue(retry._tag === "Some" && retry.value.status === "accepted");
+            }
+          }
+          const continuing = yield* orchestrator.getThreadProjection(child.childThreadId);
+          if (
+            ![
+              "completed",
+              "added-during-plan",
+              "reordered-during-plan",
+              "shared-auth-alias",
+              "exhausted",
+              "legacy-default",
+              "options-during-plan",
+              "rejected-then-recovered",
+            ].includes(outcome)
+          ) {
+            if (rejectThenChange) {
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                  (task) => task.id === child.taskId,
+                )?.status,
+                "failed",
+              );
+            }
+            yield* orchestrator.recoverDelegatedTasks;
+            const parent = yield* orchestrator.getThreadProjection(threadId);
+            const task = parent.subagents.find((task) => task.id === child.taskId);
+            if (outcome === "settled" || outcome === "settled-during-plan")
+              assert.equal(continuing.thread.settledOverride, "settled");
+            assert.deepEqual(
+              continuing.runs.map((run) => run.status),
+              ["failed", "cancelled"],
+            );
+            assert.equal(task?.status, "failed");
+            if (outcome === "selection-during-plan")
+              assert.equal(continuing.thread.modelSelection.model, "user-choice");
+            assert.include(task?.result ?? "", "Weekly GPT usage limit");
+            assert.equal(
+              parent.contextTransfers.filter(
+                (transfer) => transfer.sourceThreadId === child.childThreadId,
+              ).length,
+              1,
+            );
+            if (outcome === "finalized-then-reenabled") {
+              yield* settings.updateSettings({ modelFallback: { enabled: true } });
+              yield* sweepFallbacks;
+              assert.deepEqual(
+                (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.map(
+                  (run) => run.status,
+                ),
+                ["failed", "cancelled"],
+              );
+              const projections = yield* ProjectionStore.ProjectionStoreV2;
+              assert.notInclude(
+                (yield* projections.getLimitRecoveryCandidates({
+                  now,
+                  fallback: true,
+                  autoResume: false,
+                  snooze: false,
+                })).map((candidate) => candidate.id),
+                child.childThreadId,
+              );
+            }
+            yield* settings.updateSettings({ modelFallback: { enabled: false } });
+            return;
+          }
+          assert.deepEqual(
+            continuing.runs.map((run) => run.status),
+            ["failed", "cancelled", "starting"],
+          );
+          assert.deepEqual(
+            continuing.runs[2]?.modelSelection,
+            outcome === "options-during-plan" ? updatedTarget : finalTarget,
+          );
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+              (task) => task.id === child.taskId,
+            )?.status,
+            "running",
+          );
+          const sequence = yield* eventSink.latestSequence();
+          const terminal = yield* eventSink.stream({ afterSequence: sequence }).pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.threadId === child.childThreadId &&
+                event.payload.id === continuing.runs[2]?.id &&
+                ["waiting", "failed"].includes(event.payload.status),
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* worker.drain();
+          yield* Fiber.join(terminal);
+          yield* worker.drain();
+          yield* orchestrator.recoverDelegatedTask(child.childThreadId, child.childRunId);
+          yield* orchestrator.recoverDelegatedTasks;
+          const final = yield* orchestrator.getThreadProjection(child.childThreadId);
+          const parent = yield* orchestrator.getThreadProjection(threadId);
+          const task = parent.subagents.find((task) => task.id === child.taskId);
+          assert.deepEqual(
+            final.runs.map((run) => run.status),
+            ["failed", "cancelled", outcome === "exhausted" ? "failed" : "completed"],
+          );
+          assert.equal(task?.status, outcome === "exhausted" ? "failed" : "completed");
+          assert.equal(task?.model, outcome === "reordered-during-plan" ? "o4-mini" : "o3");
+          assert.equal(
+            parent.contextTransfers.filter(
+              (transfer) => transfer.sourceThreadId === child.childThreadId,
+            ).length,
+            1,
+          );
+          if (outcome !== "exhausted")
+            assert.equal(task?.result, "Finished usage limit documentation.");
+          else {
+            assert.include(
+              task?.result ?? "",
+              "every configured model is unavailable or shares this quota",
+            );
+            assert.equal(
+              final.messages.filter(
+                (message) =>
+                  message.role === "system" && message.text.includes("every configured model"),
+              ).length,
+              1,
+            );
+          }
+          if (outcome === "rejected-then-recovered") {
+            assert.isTrue(
+              yield* orchestrator.delegatedTaskResultPending(child.childThreadId, child.childRunId),
+            );
+            const result = yield* readMcpTask(threadId, child.taskId);
+            assert.equal(result.status, "completed");
+            assert.equal(result.summary, "Finished usage limit documentation.");
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+                (record) => record.id === child.taskId,
+              )?.completionDelivery?.state,
+              "acknowledged",
+            );
+            const acknowledgedSequence = yield* eventSink.latestSequence();
+            yield* readMcpTask(threadId, child.taskId);
+            assert.equal(yield* eventSink.latestSequence(), acknowledgedSequence);
+          }
+          yield* settings.updateSettings({ modelFallback: { enabled: false } });
+        }),
+      ),
+  );
+
+  it.effect("rejects a fallback after the user settles its source thread", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:fallback-settled");
+      const runId = RunId.make("run:fallback-settled");
+      const projects = yield* ProjectService.ProjectService;
+      yield* projects.create({
+        commandId: CommandId.make("fallback-settled:project"),
+        projectId: ProjectId.make("project:fallback-settled"),
+        title: "Limited thread",
+        workspaceRoot: "/workspace/fallback-settled",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("fallback-settled:create"),
+        threadId,
+        projectId: ProjectId.make("project:fallback-settled"),
+        title: "Limited thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* eventSink.write({
+        commandId: CommandId.make("fallback-settled:failure"),
+        events: [
+          runEvent({ threadId, runId, ordinal: 1, status: "failed", now }),
+          {
+            id: EventId.make("event:fallback-settled:failure"),
+            type: "turn-item.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make("item:fallback-settled:failure"),
+              threadId,
+              runId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              type: "error",
+              status: "failed",
+              title: null,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "usage_limit",
+                message: "Weekly limit",
+                code: "weekly_gpt",
+                retryable: false,
+              },
+            },
+          },
+        ],
+      });
+      const command = modelFallbackCommand({
+        threadId,
+        runId,
+        decision: {
+          type: "switch",
+          to: { ...modelSelection, model: "o3" },
+          detail: "Continue on o3",
+          window: "weekly",
+          resetAt: null,
+        },
+      });
+      assert.isNotNull(command);
+      if (command === null) return;
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("fallback-settled:settle"),
+        threadId,
+      });
+      const rejected = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      assert.equal(rejected.cause, "This thread can no longer fall back from that run.");
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(projection.thread.settledOverride, "settled");
+      assert.deepEqual(
+        projection.runs.map((run) => run.id),
+        [runId],
+      );
+    }),
+  );
+
+  it.effect("persists the final provider and model with a successful quota-related answer", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:fallback-metadata-parent");
+      const projectId = ProjectId.make("project:fallback-metadata");
+      const runId = RunId.make("run:fallback-metadata-parent");
+      const rootNodeId = NodeId.make("node:fallback-metadata-parent");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:fallback-metadata-seed"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "fallback-metadata-child",
+        completionWake: "settled_only",
+        continuationPending: false,
+        now,
+      });
+      const selection = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      };
+      const finalDriver = ProviderDriverKind.make("claudeAgent");
+      const providerThreadId = ProviderThreadId.make("provider-thread:fallback-metadata-child");
+      const finalRunId = RunId.make("run:fallback-metadata-child:2");
+      const result = "Implemented usage limit handling and monthly spend limit reporting.";
+      const transcriptId = TurnItemId.make("item:fallback-metadata-task");
+      const finalRun = runEvent({
+        threadId: child.childThreadId,
+        runId: finalRunId,
+        ordinal: 2,
+        status: "completed",
+        providerThreadId,
+        now,
+      });
+      yield* eventSink.write({
+        commandId: reconcileCommandId("fallback-metadata-final"),
+        events: [
+          {
+            id: EventId.make("event:fallback-metadata-task-item"),
+            type: "turn-item.updated",
+            threadId,
+            runId,
+            occurredAt: now,
+            payload: {
+              id: transcriptId,
+              threadId,
+              runId,
+              nodeId: child.taskId,
+              providerThreadId: parentProviderThreadId(threadId),
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "running",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              type: "subagent",
+              subagentId: child.taskId,
+              origin: "app_owned",
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              childThreadId: child.childThreadId,
+              prompt: "Check fallback metadata.",
+              result: null,
+            },
+          },
+          {
+            id: EventId.make("event:fallback-metadata-provider"),
+            type: "provider-thread.updated",
+            threadId: child.childThreadId,
+            driver: finalDriver,
+            providerInstanceId: selection.instanceId,
+            occurredAt: now,
+            payload: {
+              id: providerThreadId,
+              driver: finalDriver,
+              providerInstanceId: selection.instanceId,
+              providerSessionId: null,
+              appThreadId: child.childThreadId,
+              ownerNodeId: null,
+              nativeThreadRef: {
+                driver: finalDriver,
+                nativeId: "final-native",
+                strength: "strong",
+              },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: 2,
+              lastRunOrdinal: 2,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            ...finalRun,
+            providerInstanceId: selection.instanceId,
+            payload: {
+              ...finalRun.payload,
+              providerInstanceId: selection.instanceId,
+              modelSelection: selection,
+            },
+          },
+          {
+            id: EventId.make("event:fallback-metadata-answer"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: finalRunId,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("message:fallback-metadata-answer"),
+              threadId: child.childThreadId,
+              runId: finalRunId,
+              nodeId: null,
+              role: "assistant",
+              text: result,
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ modelFallback: { enabled: true } });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        threadId: child.childThreadId,
+        commandId: CommandId.make("fallback-metadata:snooze"),
+        snoozedUntil: DateTime.formatIso(DateTime.add(now, { minutes: 10 })),
+      });
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, finalRunId);
+      yield* orchestrator.recoverDelegatedTask(child.childThreadId, finalRunId);
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const task = parent.subagents.find((task) => task.id === child.taskId);
+      assert.equal(task?.status, "completed");
+      assert.equal(task?.result, result);
+      assert.equal(task?.driver, finalDriver);
+      assert.equal(task?.providerInstanceId, selection.instanceId);
+      assert.equal(task?.model, selection.model);
+      assert.equal(task?.providerThreadId, providerThreadId);
+      const transcriptItem = parent.turnItems.find((item) => item.id === transcriptId);
+      if (transcriptItem?.type !== "subagent")
+        return yield* Effect.die("Missing task transcript item");
+      assert.equal(transcriptItem.status, "completed");
+      assert.equal(transcriptItem.driver, finalDriver);
+      assert.equal(transcriptItem.providerInstanceId, selection.instanceId);
+      assert.equal(transcriptItem.result, result);
+      yield* settings.updateSettings({ modelFallback: { enabled: false } });
+      assert.equal(
+        parent.contextTransfers.filter(
+          (transfer) => transfer.sourceThreadId === child.childThreadId,
+        ).length,
+        1,
+      );
+    }),
+  );
   it.effect("holds a restart-cancelled child for its continuation's result", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1272,3 +2640,190 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 });
+
+it.layer(Layer.merge(layerTest, ThreadCommandExecutor.layer))(
+  "concurrent delegated finalization",
+  (it) => {
+    it.effect(
+      "does not start a replacement after a concurrent finalization publishes its failure",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const sink = yield* EventSink.EventSinkV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const settings = yield* ServerSettings.ServerSettingsService;
+            const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+            const now = yield* DateTime.now;
+            const parentId = ThreadId.make("thread:delegated-finalization-race-parent");
+            const projectId = ProjectId.make("project:delegated-finalization-race");
+            const parentRunId = RunId.make("run:delegated-finalization-race-parent");
+            const parentRootId = NodeId.make("node:delegated-finalization-race-parent");
+            yield* settings.updateSettings({
+              providerInstances: {
+                [modelSelection.instanceId]: { driver, enabled: true, config: {} },
+                [isolatedInstanceId]: { driver, enabled: true, config: {} },
+              },
+              modelFallback: {
+                enabled: false,
+                models: [{ instanceId: isolatedInstanceId, model: "o3" }],
+              },
+            });
+            yield* seedParentWithTerminalTask({
+              threadId: parentId,
+              projectId,
+              runId: parentRunId,
+              rootNodeId: parentRootId,
+              taskId: NodeId.make("node:delegated-finalization-race-seed"),
+              deliveryState: "delivered",
+              workspaceRoot: yield* checkpointWorkspace("delegated-finalization-race"),
+              now,
+            });
+            const child = yield* seedRestartCancelledChild({
+              parentThreadId: parentId,
+              projectId,
+              parentRunId,
+              rootNodeId: parentRootId,
+              name: "delegated-finalization-race",
+              completionWake: "settled_only",
+              continuationPending: false,
+              seedRun: false,
+              now,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("delegated-finalization-race:start"),
+              threadId: child.childThreadId,
+              messageId: MessageId.make("delegated-finalization-race:prompt"),
+              text: "Complete the delegated work.",
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "server",
+              dispatchMode: { type: "start_immediately" },
+            });
+            const source = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs[0];
+            assert.isDefined(source);
+            if (source === undefined) return;
+            assert.isNotNull(source.rootNodeId);
+            assert.isNotNull(source.providerThreadId);
+            assert.isNotNull(source.activeAttemptId);
+            const finalizationPrepared = yield* Deferred.make<void>();
+            const allowFinalization = yield* Deferred.make<void>();
+            const retryPrepared = yield* Deferred.make<void>();
+            const allowRetry = yield* Deferred.make<void>();
+            const retryWaiting = yield* Deferred.make<void>();
+            const heldKeys = new Set<ThreadId>();
+            let finalizing = false;
+            const writeWithEffects = sink.writeWithEffects;
+            const commitCommand = sink.commitCommand;
+            const withLock = executor.withLock;
+            Object.assign(sink, {
+              writeWithEffects: ((input) =>
+                Effect.gen(function* () {
+                  if (
+                    input.events.some(
+                      (event) =>
+                        event.type === "context-transfer.created" &&
+                        event.payload.type === "subagent_result" &&
+                        event.payload.sourceThreadId === child.childThreadId,
+                    )
+                  ) {
+                    finalizing = true;
+                    yield* Deferred.succeed(finalizationPrepared, undefined);
+                    yield* Deferred.await(allowFinalization);
+                  }
+                  return yield* writeWithEffects(input);
+                })) satisfies typeof sink.writeWithEffects,
+              commitCommand: ((input) =>
+                Effect.gen(function* () {
+                  if (
+                    input.events.some(
+                      (event) =>
+                        event.type === "run.created" && event.threadId === child.childThreadId,
+                    )
+                  ) {
+                    yield* Deferred.succeed(retryPrepared, undefined);
+                    yield* Deferred.await(allowRetry);
+                  }
+                  return yield* commitCommand(input);
+                })) satisfies typeof sink.commitCommand,
+            });
+            Object.assign(executor, {
+              withLock: ((key, effect) =>
+                Effect.gen(function* () {
+                  if (finalizing && heldKeys.has(key))
+                    yield* Deferred.succeed(retryWaiting, undefined);
+                  return yield* withLock(
+                    key,
+                    Effect.acquireUseRelease(
+                      Effect.sync(() => {
+                        heldKeys.add(key);
+                      }),
+                      () => effect,
+                      () =>
+                        Effect.sync(() => {
+                          heldKeys.delete(key);
+                        }),
+                    ),
+                  );
+                })) satisfies typeof executor.withLock,
+            });
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                Object.assign(sink, { writeWithEffects, commitCommand });
+                Object.assign(executor, { withLock });
+              }),
+            );
+            const draining = yield* worker.drain().pipe(Effect.forkScoped);
+            yield* Deferred.await(finalizationPrepared);
+            yield* settings.updateSettings({ modelFallback: { enabled: true } });
+            const recovering = yield* orchestrator
+              .recoverDelegatedTask(child.childThreadId, source.id)
+              .pipe(Effect.forkScoped);
+            yield* Effect.race(Deferred.await(retryWaiting), Deferred.await(retryPrepared));
+            const sequence = yield* sink.latestSequence();
+            const published = yield* sink
+              .stream({ afterSequence: sequence, eventType: "context-transfer.created" })
+              .pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "context-transfer.created" &&
+                    event.payload.sourceThreadId === child.childThreadId,
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+            yield* Deferred.succeed(allowFinalization, undefined);
+            yield* Fiber.join(published);
+            yield* Deferred.succeed(allowRetry, undefined);
+            yield* Fiber.join(recovering);
+            yield* Fiber.join(draining);
+            yield* worker.drain();
+            const terminal = yield* orchestrator.getThreadProjection(child.childThreadId);
+            const parent = yield* orchestrator.getThreadProjection(parentId);
+            assert.deepEqual(
+              terminal.runs.map((run) => run.id),
+              [source.id],
+            );
+            assert.deepEqual(terminal.thread.modelSelection, modelSelection);
+            assert.equal(
+              parent.subagents.find((task) => task.id === child.taskId)?.status,
+              "failed",
+            );
+            assert.include(
+              parent.subagents.find((task) => task.id === child.taskId)?.result ?? "",
+              "Account usage limit",
+            );
+            assert.equal(
+              parent.contextTransfers.filter(
+                (transfer) => transfer.sourceThreadId === child.childThreadId,
+              ).length,
+              1,
+            );
+            yield* settings.updateSettings({ modelFallback: { enabled: false } });
+          }),
+        ),
+    );
+  },
+);

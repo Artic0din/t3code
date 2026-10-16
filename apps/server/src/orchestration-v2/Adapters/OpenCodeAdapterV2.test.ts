@@ -807,6 +807,129 @@ describe("OpenCodeAdapterV2", () => {
     }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
   );
 
+  it.effect.each(["failed", "completed", "reopened", "interrupted"] as const)(
+    "keeps child session errors scoped until Task settlement after %s",
+    (ending) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const push = (event: unknown) => Effect.promise(() => nativeEvents.push(event));
+        const root = "ses_native_failure_root";
+        const child = "ses_native_failure_child";
+        const harness = yield* makeOpenCodeRuntimeHarness(`native-failure-${ending}`, root, {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          session: {
+            create: async () => ({ data: { id: root, time: { created: 1, updated: 1 } } }),
+            get: async () => ({
+              data: { id: child, parentID: root, permission: [], time: { created: 2, updated: 2 } },
+            }),
+            update: async () => ({ data: { id: child, parentID: root } }),
+            promptAsync: async () => ({ data: true }),
+          },
+        });
+        yield* harness.startTurn();
+        const collected = yield* harness.runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "subagent" &&
+              (event.turnItem.status === "failed" || event.turnItem.status === "completed"),
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const task = (status: "running" | "completed" | "error") => ({
+          type: "message.part.updated",
+          properties: {
+            part: {
+              id: "prt_native_failure",
+              sessionID: root,
+              messageID: "msg_native_failure",
+              type: "tool",
+              tool: "task",
+              callID: "call_native_failure",
+              state: {
+                status,
+                input: { description: "Review", prompt: "Review code", subagent_type: "general" },
+                metadata: { sessionId: child },
+                title: "Review",
+                time: { start: 3, ...(status === "running" ? {} : { end: 4 }) },
+                ...(status === "error" ? { error: "Task failed. token=task-secret" } : {}),
+                ...(status === "completed"
+                  ? { output: "Usage limit documentation reviewed." }
+                  : {}),
+              },
+            },
+          },
+        });
+        const childPrompt = (id: string) => ({
+          type: "message.updated",
+          properties: {
+            sessionID: child,
+            info: {
+              id,
+              sessionID: child,
+              role: "user",
+              time: { created: 3 },
+              agent: "general",
+              model: { providerID: "openai", modelID: "gpt-5.4" },
+            },
+          },
+        });
+        yield* push(task("running"));
+        yield* push(childPrompt("msg_child_first"));
+        yield* push({
+          type: "session.error",
+          properties: {
+            sessionID: child,
+            error: {
+              name: "APIError",
+              data: { message: "Child rejected. token=child-secret", isRetryable: false },
+            },
+          },
+        });
+        if (ending === "reopened" || ending === "interrupted") {
+          yield* push(childPrompt("msg_child_reopened"));
+        }
+        if (ending === "interrupted") {
+          yield* push({
+            type: "session.error",
+            properties: {
+              sessionID: child,
+              error: { name: "MessageAbortedError", data: { message: "Stopped" } },
+            },
+          });
+        }
+        yield* push(task(ending === "completed" ? "completed" : "error"));
+        const events = yield* Fiber.join(collected);
+        const settled = events.findLast((event) => event.type === "subagent.updated")?.subagent;
+        assert.equal(settled?.status, ending === "completed" ? "completed" : "failed");
+        assert.equal(settled?.origin, "provider_native");
+        if (ending === "failed") {
+          assert.deepEqual(settled?.failure, {
+            class: "provider_error",
+            message: "Child rejected. token=[REDACTED]",
+            code: "APIError",
+            retryable: null,
+          });
+        } else if (ending === "completed") {
+          assert.isUndefined(settled?.failure);
+          assert.equal(settled?.result, "Usage limit documentation reviewed.");
+        } else {
+          assert.deepEqual(settled?.failure, {
+            class: "unknown",
+            message: "Task failed. token=[REDACTED]",
+            code: null,
+            retryable: null,
+          });
+        }
+        assert.equal(events.filter((event) => event.type === "turn.terminal").length, 0);
+        const childTurn = events.findLast(
+          (event) => event.type === "node.updated" && event.node.runId === null,
+        );
+        assert.equal(childTurn?.type === "node.updated" ? childTurn.node.runId : "missing", null);
+      }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+  );
+
   it.effect("titles OpenCode reads and searches from their input", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();

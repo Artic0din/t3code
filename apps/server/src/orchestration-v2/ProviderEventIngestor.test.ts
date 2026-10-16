@@ -10,6 +10,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -28,6 +29,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -50,12 +52,14 @@ const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pip
 const layerTestEventSink = EventSink.layer.pipe(
   Layer.provide(Layer.mergeAll(layerTestStores, layerTestDatabase)),
 );
+const layerTestSettings = ServerSettings.layerTest();
 
 const layerTest = Layer.mergeAll(
   layerTestStores,
   layerTestEventSink,
   IdAllocator.layer,
   ThreadCommandExecutor.layer,
+  layerTestSettings,
   ProviderEventIngestor.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -63,6 +67,7 @@ const layerTest = Layer.mergeAll(
         layerTestEventSink,
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        layerTestSettings,
       ),
     ),
   ),
@@ -1242,6 +1247,128 @@ layer("ProviderEventIngestorV2", (it) => {
       assert.equal(messageEvents[0]?.type, "message.updated");
       assert.equal(messageEvents[0]?.threadId, childThreadId);
     }),
+  );
+
+  it.effect.each([true, false])(
+    "persists native child failures atomically with fallback enabled=%s",
+    (enabled) =>
+      Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({ modelFallback: { enabled, models: [] } });
+        const root = yield* threadCreatedEvent(now);
+        if (root.type !== "thread.created") throw new Error("Expected a thread.created event");
+        const childThreadId = ids.derive.threadFromProviderThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: `native-quota-child-${enabled}`,
+        });
+        const sessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: root.threadId,
+        });
+        yield* eventSink.write({ events: [root] });
+        const ingest = (event: ProviderEventIngestor.ProviderEventIngestInput["event"]) =>
+          ingestor.ingestNormalized({
+            providerSessionId: sessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId: root.threadId,
+            runId: RunId.make("run:active-parent"),
+            nodeId: NodeId.make("node:active-parent"),
+            event,
+          });
+        yield* ingest({
+          type: "app_thread.created",
+          driver: CODEX_DRIVER,
+          appThread: {
+            ...root.payload,
+            id: childThreadId,
+            activeProviderThreadId: null,
+            lineage: {
+              parentThreadId: root.threadId,
+              relationshipToParent: "subagent",
+              rootThreadId: root.threadId,
+            },
+          },
+        });
+        const task = {
+          id: NodeId.make(`node:native-quota-child-${enabled}`),
+          threadId: root.threadId,
+          runId: RunId.make("run:active-parent"),
+          parentNodeId: NodeId.make("node:active-parent"),
+          origin: "provider_native",
+          createdBy: "agent",
+          driver: CODEX_DRIVER,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId: null,
+          childThreadId,
+          nativeTaskRef: null,
+          prompt: "Inspect the change",
+          title: "Inspect the change",
+          model: modelSelection.model,
+          status: "failed",
+          result: null,
+          failure: makeProviderFailure({ class: "unknown", message: "Provider child failed." }),
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        } satisfies OrchestrationV2Subagent;
+        const first = yield* ingest({
+          type: "subagent.updated",
+          driver: CODEX_DRIVER,
+          subagent: task,
+        });
+        assert.deepEqual(
+          first.map((stored) => stored.event.type),
+          ["subagent.updated", "turn-item.updated"],
+        );
+        const failure = makeProviderFailure({
+          class: "usage_limit",
+          code: "usageLimitExceeded",
+          message: "Child quota exhausted.",
+        });
+        const typed = {
+          type: "subagent.updated",
+          driver: CODEX_DRIVER,
+          subagent: { ...task, failure },
+        } as const;
+        const enriched = yield* ingest(typed);
+        yield* ingest(typed);
+        assert.deepEqual(
+          enriched.map((stored) => stored.event.type),
+          enabled
+            ? ["subagent.updated", "turn-item.updated", "turn-item.updated"]
+            : ["subagent.updated", "turn-item.updated"],
+        );
+        const child = yield* projections.getThreadProjection(childThreadId);
+        const parent = yield* projections.getThreadProjection(root.threadId);
+        assert.equal(child.runs.length, 0);
+        assert.equal(child.turnItems.length, 1);
+        const errorItem = child.turnItems[0];
+        assert.equal(errorItem?.type, "error");
+        assert.deepEqual(errorItem?.type === "error" ? errorItem.failure : undefined, failure);
+        assert.isNull(child.turnItems[0]?.runId);
+        assert.isNull(child.turnItems[0]?.nodeId);
+        const childEvent = enriched.find(
+          (stored) => stored.event.threadId === childThreadId,
+        )?.event;
+        assert.isUndefined(childEvent?.runId);
+        assert.isUndefined(childEvent?.nodeId);
+        assert.equal(parent.turnItems.length, enabled ? 1 : 0);
+        if (enabled) {
+          assert.equal(parent.turnItems[0]?.type, "system_notice");
+          assert.equal(parent.turnItems[0]?.nodeId, task.id);
+          assert.equal(parent.turnItems[0]?.title, "Delegated agent stopped");
+          const notice = parent.turnItems[0];
+          assert.include(
+            notice?.type === "system_notice" ? notice.message : "",
+            "cannot safely continue",
+          );
+        }
+      }),
   );
 
   it.effect("moves a native subagent's thread to the model its provider reports later", () =>

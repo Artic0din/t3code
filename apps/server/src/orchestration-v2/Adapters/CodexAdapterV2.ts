@@ -1122,6 +1122,30 @@ interface ActiveCodexProviderRetry {
   readonly itemOrdinal: number;
 }
 
+function codexTurnFailure(input: {
+  readonly context: ActiveCodexTurnContext;
+  readonly failureMessage?: string;
+  readonly failureCode?: string | null;
+  readonly providerRetry?: ActiveCodexProviderRetry;
+}): OrchestrationV2ProviderFailure {
+  const previousFailure = input.context.latestProviderFailure ?? input.providerRetry;
+  return previousFailure !== undefined &&
+    (input.failureMessage === undefined ||
+      input.failureMessage === previousFailure.nativeMessage) &&
+    (input.failureCode === undefined || input.failureCode === previousFailure.failure.code)
+    ? previousFailure.failure
+    : makeProviderFailure({
+        message: input.failureMessage,
+        code: input.failureCode,
+        class:
+          input.failureCode === "usageLimitExceeded" || input.failureCode === "rateLimitExceeded"
+            ? "usage_limit"
+            : input.failureCode == null && input.context.subagent !== null
+              ? "unknown"
+              : "provider_error",
+      });
+}
+
 /** Snapshot of a still-running commandExecution item for interrupt/fail terminalization. */
 interface TrackedRunningCommandItem {
   readonly id: string;
@@ -2356,6 +2380,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           readonly completedAt?: DateTime.Utc | null;
           readonly startedAt?: DateTime.Utc;
           readonly reopen?: boolean;
+          readonly nativeTerminal?: boolean;
+          readonly failure?: OrchestrationV2ProviderFailure;
         }) =>
           Effect.gen(function* () {
             const now = yield* DateTime.now;
@@ -2364,13 +2390,25 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             // Snapshots can arrive after completion. Only an actual new turn
             // may reopen the reusable child identity.
             if (settled && isOrchestrationV2WorkActive(input.status) && !input.reopen) return;
-            const status = settled && !input.reopen ? prior.status : input.status;
+            const status =
+              settled && !input.reopen && !(input.nativeTerminal && prior.status === "failed")
+                ? prior.status
+                : input.status;
+            if (status !== input.status) return;
             const completedAt = isOrchestrationV2WorkActive(status)
               ? null
               : (prior.completedAt ?? input.completedAt ?? now);
+            const { failure: priorFailure, ...priorTask } = prior;
+            const failure =
+              status === "failed" && !input.reopen
+                ? (input.failure ??
+                  priorFailure ??
+                  makeProviderFailure({ message: input.result ?? undefined }))
+                : undefined;
             const task = {
-              ...prior,
+              ...priorTask,
               status,
+              ...(failure === undefined ? {} : { failure }),
               ...(input.reopen
                 ? {
                     runId: input.subagent.parentContext.projectionRunId,
@@ -4188,7 +4226,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     notificationCode === "usageLimitExceeded" ||
                     notificationCode === "rateLimitExceeded"
                       ? "usage_limit"
-                      : "provider_error",
+                      : notificationCode === null && context.subagent !== null
+                        ? "unknown"
+                        : "provider_error",
                 }),
               };
               return;
@@ -4214,7 +4254,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   ? "usage_limit"
                   : code?.startsWith("http") === true || code?.startsWith("responseStream") === true
                     ? "transport_error"
-                    : "provider_error",
+                    : code === null && context.subagent !== null
+                      ? "unknown"
+                      : "provider_error",
               retryable: true,
             });
             const itemOrdinal =
@@ -5190,23 +5232,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           }): Effect.fn.Return<CodexRootTerminalEvent> {
             const terminalStatus = providerTurnStatusToTerminal(input.status);
             if (terminalStatus === "failed") {
-              const previousFailure = input.context.latestProviderFailure ?? input.providerRetry;
-              const failure =
-                previousFailure !== undefined &&
-                (input.failureMessage === undefined ||
-                  input.failureMessage === previousFailure.nativeMessage) &&
-                (input.failureCode === undefined ||
-                  input.failureCode === previousFailure.failure.code)
-                  ? previousFailure.failure
-                  : makeProviderFailure({
-                      message: input.failureMessage,
-                      code: input.failureCode,
-                      class:
-                        input.failureCode === "usageLimitExceeded" ||
-                        input.failureCode === "rateLimitExceeded"
-                          ? "usage_limit"
-                          : "provider_error",
-                    });
+              const failure = codexTurnFailure(input);
               return {
                 type: "turn.terminal",
                 driver: CODEX_PROVIDER,
@@ -5490,7 +5516,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   input.status === "completed",
                 ),
               };
-              if (!holdsForGoal) {
+              if (!holdsForGoal && input.context.subagent === null) {
                 yield* emitProviderEvent({
                   type: "provider_turn.updated",
                   driver: CODEX_PROVIDER,
@@ -5554,6 +5580,26 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   subagent: input.context.subagent,
                   status: input.status,
                   completedAt: input.completedAt,
+                  nativeTerminal: true,
+                  ...(input.status === "completed" &&
+                  input.context.subagent.task.status === "failed"
+                    ? {
+                        result:
+                          Array.from(
+                            (yield* Ref.get(completedFinalAnswerTextsByTurn)).get(
+                              input.nativeTurnId,
+                            ) ?? [],
+                          ).at(-1) ?? null,
+                      }
+                    : {}),
+                  ...(input.status === "failed"
+                    ? {
+                        failure: codexTurnFailure({
+                          ...input,
+                          ...(providerRetry === undefined ? {} : { providerRetry }),
+                        }),
+                      }
+                    : {}),
                 });
               }
               if (input.status === "interrupted" || input.status === "failed") {
@@ -5575,6 +5621,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 input.completedAt,
                 input.status === "interrupted" || input.status === "failed",
               );
+              if (input.context.subagent !== null) {
+                yield* emitProviderEvent({
+                  type: "provider_turn.updated",
+                  driver: CODEX_PROVIDER,
+                  threadId: input.context.projectionThreadId,
+                  providerTurn: completedTurn,
+                });
+              }
               if (input.context.subagent === null) {
                 yield* emitOrDeferRootTerminal({
                   ...input,

@@ -309,6 +309,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // its own account under `effectiveHomePath`, while plain instances share
       // the common home. The continuation key would conflate the two.
       const accountKey = homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath;
+      const inheritedHome = processEnv.CODEX_HOME;
+      const quotaAuthHome =
+        homeLayout.effectiveHomePath ??
+        (inheritedHome === undefined
+          ? homeLayout.sharedHomePath
+          : pathService.isAbsolute(inheritedHome)
+            ? pathService.normalize(inheritedHome)
+            : undefined);
       const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
         resetCreditCoordinator
           .redeem(accountKey, (idempotencyKey) =>
@@ -370,6 +378,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         instanceId,
         driverKind: DRIVER_KIND,
         continuationIdentity,
+        ...(quotaAuthHome === undefined
+          ? {}
+          : { quotaOwnerKey: `codex:auth-home:${quotaAuthHome}` }),
         displayName,
         accentColor,
         enabled,

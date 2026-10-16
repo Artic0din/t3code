@@ -10,7 +10,7 @@ import {
   type BackgroundActivityProfile,
   type DesktopUpdateChannel,
   ProviderDriverKind,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
@@ -144,6 +144,8 @@ import {
   backgroundActivityOverrideSettings,
   backgroundActivitySharedPolicySettings,
   durationToSeconds,
+  formatModelFallbackList,
+  parseModelFallbackList,
   getChangedBrowserSettingLabels,
   getChangedTypographySettingLabels,
   normalizeIntervalSeconds,
@@ -2183,6 +2185,7 @@ export function GeneralSettingsPanel() {
   const isEnvironmentScope = scope.environmentIds.length === 1 && environmentId !== null;
   const hasServerTargets = connectedEnvironments.length > 0;
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
+  const [modelFallbackError, setModelFallbackError] = useState<string | null>(null);
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
@@ -2361,6 +2364,59 @@ export function GeneralSettingsPanel() {
               }
               aria-label="Snooze limited threads"
             />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("model-fallback")}
+          description="After an explicit usage limit, continue on the next model in this list. Edit the JSON list with instanceId, model, and optional options. Kept per environment. Authentication, network, and other provider errors stay on the current model."
+          settingKeys={["modelFallback"]}
+          control={
+            <div className="flex w-72 flex-col gap-2">
+              <ScopedSwitch
+                settingKeys={["modelFallback"]}
+                settingValue={(value) => value.modelFallback.enabled}
+                checked={settings.modelFallback.enabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({ modelFallback: { enabled: Boolean(checked) } })
+                }
+                aria-label="Automatic model fallback"
+              />
+              <textarea
+                disabled={scope.kind !== "environment" || !isEnvironmentScope}
+                key={formatModelFallbackList(settings.modelFallback.models)}
+                defaultValue={formatModelFallbackList(settings.modelFallback.models)}
+                rows={4}
+                spellCheck={false}
+                aria-label="Fallback models"
+                aria-invalid={modelFallbackError !== null}
+                className="w-full rounded-md border px-2 py-1 text-xs"
+                onChange={() => setModelFallbackError(null)}
+                onBlur={(event) => {
+                  const models = parseModelFallbackList(event.currentTarget.value);
+                  if (models === null) {
+                    setModelFallbackError("Enter a JSON array of valid model selections.");
+                    return;
+                  }
+                  setModelFallbackError(null);
+                  updateSettings({
+                    modelFallback: {
+                      models,
+                    },
+                  });
+                }}
+              />
+              {modelFallbackError !== null ? (
+                <p role="alert" className="text-destructive text-xs">
+                  {modelFallbackError}
+                </p>
+              ) : null}
+              {scope.kind !== "environment" || !isEnvironmentScope ? (
+                <p className="text-muted-foreground text-xs">
+                  Select one environment to edit its fallback models.
+                </p>
+              ) : null}
+            </div>
           }
         />
 

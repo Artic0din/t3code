@@ -1528,6 +1528,8 @@ export function makeCursorAdapterV2(
                 ? "failed"
                 : "completed"
               : "running");
+          const error: unknown =
+            input.toolCall.result?.status === "error" ? input.toolCall.result.error : undefined;
           const resultText = [
             ...assistantTextsFromConversationSteps(result?.conversationSteps ?? []),
             ...(result?.resultSuffix === undefined ? [] : [result.resultSuffix]),
@@ -1582,6 +1584,15 @@ export function makeCursorAdapterV2(
               strength: "strong" as const,
             },
             status,
+            failure:
+              status === "failed"
+                ? makeProviderFailure({
+                    class: "unknown",
+                    message:
+                      (typeof error === "string" ? error : nestedString(error, ["message"])) ??
+                      "Cursor delegated task failed.",
+                  })
+                : undefined,
             result: resultText.length === 0 ? (existing?.task.result ?? null) : resultText,
             completedAt: input.completed ? (existing?.task.completedAt ?? now) : null,
             updatedAt: now,

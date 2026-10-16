@@ -40,14 +40,21 @@ const decodeCursorSettings = Schema.decodeEffect(CursorSettings);
 
 describe("CursorAdapterV2", () => {
   it.effect.each([
-    { status: "finished", model: undefined, lateModel: undefined },
-    { status: "cancelled", model: "claude-opus-4-6", lateModel: undefined },
-    { status: "error", model: "custom-fable", lateModel: undefined },
-    { status: "finished", model: undefined, lateModel: "gpt-6-sol" },
-    { status: "finished", model: "gpt-6-sol", lateModel: null },
+    { status: "finished", model: undefined, lateModel: undefined, taskOutcome: "unfinished" },
+    {
+      status: "cancelled",
+      model: "claude-opus-4-6",
+      lateModel: undefined,
+      taskOutcome: "unfinished",
+    },
+    { status: "error", model: "custom-fable", lateModel: undefined, taskOutcome: "unfinished" },
+    { status: "finished", model: undefined, lateModel: "gpt-6-sol", taskOutcome: "completed" },
+    { status: "finished", model: "gpt-6-sol", lateModel: null, taskOutcome: "completed" },
+    { status: "finished", model: undefined, lateModel: "gpt-6-sol", taskOutcome: "failed" },
+    { status: "finished", model: undefined, lateModel: "gpt-6-sol", taskOutcome: "recovered" },
   ] as const)(
-    "projects Cursor tasks: $status, late model $lateModel",
-    ({ status, model, lateModel }) =>
+    "projects Cursor tasks: $status, late model $lateModel, task $taskOutcome",
+    ({ status, model, lateModel, taskOutcome }) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -99,10 +106,18 @@ describe("CursorAdapterV2", () => {
                       },
                     };
                     const updates =
-                      lateModel !== undefined
-                        ? (["tool-call-started", "tool-call-completed"] as const)
-                        : (["partial-tool-call", "tool-call-started"] as const);
+                      taskOutcome === "recovered"
+                        ? ([
+                            "tool-call-started",
+                            "tool-call-completed",
+                            "tool-call-completed",
+                          ] as const)
+                        : lateModel !== undefined
+                          ? (["tool-call-started", "tool-call-completed"] as const)
+                          : (["partial-tool-call", "tool-call-started"] as const);
+                    let completions = 0;
                     for (const type of updates) {
+                      if (type === "tool-call-completed") completions += 1;
                       yield* input.onDelta!({
                         type,
                         modelCallId: "model-call",
@@ -115,6 +130,25 @@ describe("CursorAdapterV2", () => {
                               ? { model: lateModel ?? undefined }
                               : {}),
                           },
+                          ...(type !== "tool-call-completed"
+                            ? {}
+                            : {
+                                result:
+                                  taskOutcome === "failed" ||
+                                  (taskOutcome === "recovered" && completions === 1)
+                                    ? {
+                                        status: "error" as const,
+                                        error: { message: "Task rejected. token=child-secret" },
+                                      }
+                                    : {
+                                        status: "success" as const,
+                                        value: {
+                                          isBackground: false,
+                                          backgroundReason: "unspecified" as const,
+                                          resultSuffix: "Usage limit documentation reviewed.",
+                                        },
+                                      },
+                              }),
                         },
                       }).pipe(Effect.orDie);
                     }
@@ -197,15 +231,32 @@ describe("CursorAdapterV2", () => {
         assert.equal(rows.at(-1)?.subagent.model, lateModel ?? model ?? null);
         assert.equal(
           rows.at(-1)?.subagent.status,
-          lateModel !== undefined
-            ? "completed"
-            : status === "finished"
-              ? "idle"
-              : status === "cancelled"
-                ? "cancelled"
-                : "failed",
+          taskOutcome === "failed"
+            ? "failed"
+            : lateModel !== undefined
+              ? "completed"
+              : status === "finished"
+                ? "idle"
+                : status === "cancelled"
+                  ? "cancelled"
+                  : "failed",
         );
         assert.isNotNull(rows.at(-1)?.subagent.completedAt);
+        const failed = rows.find((event) => event.subagent.status === "failed")?.subagent;
+        if (taskOutcome === "failed" || taskOutcome === "recovered") {
+          assert.deepEqual(failed?.failure, {
+            class: "unknown",
+            message: "Task rejected. token=[REDACTED]",
+            code: null,
+            retryable: null,
+          });
+          assert.equal(failed?.origin, "provider_native");
+          const terminal = events.find((event) => event.type === "turn.terminal");
+          assert.equal(terminal?.status, "completed");
+        }
+        if (taskOutcome !== "failed" && status !== "error") {
+          assert.isUndefined(rows.at(-1)?.subagent.failure);
+        }
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
   );
 

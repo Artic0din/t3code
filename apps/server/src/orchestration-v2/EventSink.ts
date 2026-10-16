@@ -124,6 +124,7 @@ export interface EventSinkV2Shape {
     readonly threadId: ThreadId;
     readonly commandType: string;
     readonly acceptedAt: DateTime.Utc;
+    readonly retry?: { readonly retryGroup: CommandId; readonly retryAttempt: number };
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
     readonly cancelUnsettledEffects?: {
@@ -144,6 +145,7 @@ export interface EventSinkV2Shape {
     readonly threadId: ThreadId;
     readonly commandType: string;
     readonly rejectedAt: DateTime.Utc;
+    readonly retry?: { readonly retryGroup: CommandId; readonly retryAttempt: number };
     readonly error: string;
   }) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
   /**
@@ -530,6 +532,7 @@ const layerBase: Layer.Layer<
       const result = yield* commitThenPublish(
         Effect.gen(function* () {
           const reserved = yield* commandReceipts.insertIfAbsent({
+            ...input.retry,
             commandId: input.commandId,
             threadId: input.threadId,
             commandType: input.commandType,
@@ -557,6 +560,7 @@ const layerBase: Layer.Layer<
           yield* applyStoredEvents(storedEvents);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
+            ...input.retry,
             commandId: input.commandId,
             threadId: input.threadId,
             commandType: input.commandType,
@@ -599,6 +603,7 @@ const layerBase: Layer.Layer<
         Effect.gen(function* () {
           const sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
+            ...input.retry,
             commandId: input.commandId,
             threadId: input.threadId,
             commandType: input.commandType,

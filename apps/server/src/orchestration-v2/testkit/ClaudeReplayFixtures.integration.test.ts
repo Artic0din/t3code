@@ -8,11 +8,15 @@ import {
   type ProviderReplayTranscript,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
 
 import { classifyClaudeNativeTool } from "../Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../Adapters/ClaudeAdapterV2.testkit.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as Orchestrator from "../Orchestrator.ts";
+import * as EventSink from "../EventSink.ts";
+import * as EffectWorker from "../EffectWorker.ts";
 import { userFacingDispatchErrorMessage } from "../UserFacingErrors.ts";
 import { provideDeterministicTestRuntime } from "./DeterministicRuntime.ts";
 import { ORCHESTRATOR_REPLAY_FIXTURES } from "./fixtures/index.ts";
@@ -34,6 +38,7 @@ import {
   THREAD_MERGE_BACK_SOURCE_MARKER,
 } from "./fixtures/shared.ts";
 import { readProviderReplayTranscript } from "./ReplayTranscriptNdjson.ts";
+import { makeProviderReplayGate } from "./ProviderReplayGate.testkit.ts";
 
 const readTranscript = Effect.fn("readClaudeReplayFixture")(function* (file: URL) {
   return yield* readProviderReplayTranscript(file);
@@ -132,6 +137,159 @@ function claudeToolUseNamesFromTranscript(
 }
 
 describe("Claude Agent SDK replay fixtures", () => {
+  it.effect(
+    "persists native child quota failure and explains unsupported continuation while the parent stays active",
+    () =>
+      Effect.gen(function* () {
+        const raw = yield* readClaudeTranscriptFixture("subagent");
+        const terminalEntry = raw.entries.find(
+          (entry): entry is FramedReplayEntry =>
+            entry.type === "emit_inbound" &&
+            isRecord(entry.frame) &&
+            entry.frame.subtype === "task_notification",
+        );
+        assert.isDefined(terminalEntry);
+        const terminal = frameRecord(terminalEntry);
+        const childAssistant = raw.entries.find(
+          (entry): entry is FramedReplayEntry =>
+            entry.type === "emit_inbound" &&
+            isRecord(entry.frame) &&
+            entry.frame.type === "assistant" &&
+            entry.frame.parent_tool_use_id === terminal.tool_use_id,
+        );
+        assert.isDefined(childAssistant);
+        const childFrame = frameRecord(childAssistant);
+        assert.isTrue(isRecord(childFrame.message));
+        const message = isRecord(childFrame.message) ? childFrame.message : {};
+        const failedFrame = {
+          ...terminal,
+          status: "failed",
+          summary: "You've hit your weekly limit",
+        };
+        const entries = raw.entries.flatMap((entry) => {
+          if (entry === terminalEntry)
+            return [
+              {
+                type: "emit_inbound" as const,
+                frame: {
+                  ...childFrame,
+                  uuid: "00000000-0000-4000-8000-000000000101",
+                  error: "rate_limit",
+                  message: {
+                    ...message,
+                    id: "native-quota-assistant",
+                    content: [{ type: "text", text: "You've hit your weekly limit" }],
+                  },
+                },
+              },
+              { ...entry, frame: failedFrame },
+              { ...entry, frame: { ...failedFrame, uuid: "00000000-0000-4000-8000-000000000102" } },
+            ];
+          if (
+            entry.type === "emit_inbound" &&
+            isRecord(entry.frame) &&
+            entry.frame.type === "result"
+          )
+            return [{ ...entry, label: "native-quota:parent-result" }];
+          return [entry];
+        });
+        const transcript = yield* ClaudeOrchestratorReplayHarness.decodeTranscript(
+          materializeReplayTranscriptRuntimeInstructions(
+            { ...raw, entries },
+            { driver: ProviderDriverKind.make("claudeAgent"), model: CLAUDE_MODEL_SELECTION.model },
+          ),
+        );
+        const materialized = yield* materializeFixtureInput({
+          scenario: "subagent",
+          fixtureInput: subagentInput(),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: CLAUDE_MODEL_SELECTION,
+        }).pipe(Effect.provide(IdAllocator.layer), provideDeterministicTestRuntime);
+        const scenario = {
+          name: "subagent/claudeAgent:native-quota",
+          transcript,
+          commands: materialized.commands,
+          steps: materialized.steps,
+          projectionThreadIds: materialized.projectionThreadIds,
+        };
+        const gate = makeProviderReplayGate(["native-quota:parent-result"]);
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => Effect.sync(() => gate.releaseAll()));
+          const sink = yield* EventSink.EventSinkV2;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const nativeFailed = yield* sink.stream({ eventType: "subagent.updated" }).pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "subagent.updated" &&
+                event.payload.nativeTaskRef?.nativeId === terminal.task_id &&
+                event.payload.status === "failed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          const executing = yield* runOrchestratorV2Scenario(scenario).pipe(Effect.forkScoped);
+          yield* Fiber.join(nativeFailed);
+          const parentId = materialized.projectionThreadIds[0];
+          assert.isDefined(parentId);
+          const parent = yield* orchestrator.getThreadProjection(parentId);
+          const task = parent.subagents.find(
+            (row) => row.nativeTaskRef?.nativeId === terminal.task_id,
+          );
+          assert.isDefined(task);
+          assert.equal(task.failure?.class, "usage_limit");
+          assert.isNotNull(task.childThreadId);
+          const child = yield* orchestrator.getThreadProjection(task.childThreadId);
+          assert.lengthOf(child.runs, 0);
+          assert.isTrue(isProviderNativeSubagentThread(child.thread));
+          assert.equal(parent.runs[0]?.status, "running");
+          assert.deepEqual(parent.thread.modelSelection, CLAUDE_MODEL_SELECTION);
+          const notices = parent.turnItems.filter(
+            (item) => item.type === "system_notice" && item.nodeId === task.id,
+          );
+          assert.lengthOf(notices, 1);
+          assert.include(
+            notices[0]?.type === "system_notice" ? notices[0].message : "",
+            "cannot safely continue",
+          );
+          assert.isFalse(
+            parent.turnItems.some(
+              (item) =>
+                item.type === "error" &&
+                item.nodeId === parent.runs[0]?.rootNodeId &&
+                item.failure?.class === "usage_limit",
+            ),
+          );
+          gate.releaseAll();
+          yield* Fiber.join(executing);
+          yield* worker.drain();
+          const settled = yield* orchestrator.getThreadProjection(parentId);
+          assert.lengthOf(settled.runs, 1);
+          assert.equal(settled.runs[0]?.status, "completed");
+          assert.lengthOf(
+            settled.turnItems.filter(
+              (item) => item.type === "system_notice" && item.nodeId === task.id,
+            ),
+            1,
+          );
+          assert.lengthOf(
+            settled.contextTransfers.filter((transfer) => transfer.type === "subagent_result"),
+            0,
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerProviderReplay(scenario, ClaudeOrchestratorReplayHarness, {
+              replayGate: gate,
+              modelFallback: { enabled: true, models: [CLAUDE_MODEL_SELECTION] },
+            }),
+          ),
+          provideDeterministicTestRuntime,
+          Effect.scoped,
+        );
+      }),
+  );
+
   it.effect("refuses messages to a native subagent thread without touching it", () =>
     Effect.gen(function* () {
       const raw = yield* readClaudeTranscriptFixture("subagent");

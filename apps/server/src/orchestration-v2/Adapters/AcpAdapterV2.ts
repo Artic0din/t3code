@@ -2735,6 +2735,13 @@ export function makeAcpAdapterV2(
             }),
             model: update.model?.trim() || existing?.task.model || null,
             status: taskStatus,
+            failure:
+              taskStatus === "failed"
+                ? update.result === null
+                  ? (existing?.task.failure ??
+                    makeProviderFailure({ class: "unknown", message: "Delegated agent failed." }))
+                  : makeProviderFailure({ class: "unknown", message: update.result })
+                : undefined,
             result: update.result ?? existing?.task.result ?? null,
             completedAt: acpSubagentStatusIsTerminal(taskStatus) ? now : null,
             updatedAt: now,
@@ -5078,6 +5085,13 @@ export function makeAcpAdapterV2(
           subagent.task = {
             ...subagent.task,
             status,
+            failure:
+              status === "failed"
+                ? resultOverride == null
+                  ? (subagent.task.failure ??
+                    makeProviderFailure({ class: "unknown", message: "Delegated agent failed." }))
+                  : makeProviderFailure({ class: "unknown", message: resultOverride })
+                : undefined,
             result,
             completedAt,
             updatedAt: now,

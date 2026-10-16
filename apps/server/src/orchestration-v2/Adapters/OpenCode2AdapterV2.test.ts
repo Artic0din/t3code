@@ -65,11 +65,17 @@ const reply = (operation: string, data: unknown): ProviderReplayEntry => ({
   frame: { type: "sdk.response", operation, data },
 });
 const replyData = (operation: string, data: unknown) => reply(operation, { data });
-const event = (type: string, data: Record<string, unknown>): ProviderReplayEntry => ({
+const event = (type: string, data: Record<string, unknown>, version = 1): ProviderReplayEntry => ({
   type: "emit_inbound",
   frame: {
     type: "sdk.event",
-    event: { id: `evt_${type.replaceAll(".", "")}0000`, created: 1, type, data, ...durable },
+    event: {
+      id: `evt_${type.replaceAll(".", "")}0000`,
+      created: 1,
+      type,
+      data,
+      durable: { ...durable.durable, version },
+    },
   },
 });
 const durable = { durable: { aggregateID: SESSION, seq: 1, version: 1 } };
@@ -634,6 +640,145 @@ describe("OpenCode2 adapter", () => {
       );
       return { attached: Deferred.await(attached), terminal: Fiber.join(terminal) };
     });
+  it.effect.each(["failed", "completed", "reopened", "interrupted"] as const)(
+    "settles a background child's own failure only at its report after %s",
+    (ending) =>
+      Effect.gen(function* () {
+        const state =
+          ending === "completed" ? "completed" : ending === "interrupted" ? "cancelled" : "error";
+        const { runtime, thread } = yield* resumed([
+          ...backgroundLaunch(CHILD),
+          event("session.execution.started", { sessionID: CHILD }),
+          event("session.execution.failed", {
+            sessionID: CHILD,
+            error: {
+              type: ending === "interrupted" ? "aborted" : "provider",
+              message: "Child rejected. token=child-secret",
+            },
+          }),
+          ...(ending === "reopened"
+            ? [event("session.execution.started", { sessionID: CHILD })]
+            : []),
+          event("session.inbox.enqueued", {
+            inboxID: "msg_native_failure_report",
+            sessionID: SESSION,
+            item: {
+              type: "synthetic",
+              payload: {
+                text: `<subagent sessionID="${CHILD}" state="${state}">\nUsage limit documentation reviewed.\n</subagent>`,
+                metadata: { source: "subagent", childID: CHILD, state },
+              },
+              delivery: "steer",
+            },
+          }),
+        ]);
+        const collected = yield* runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "subagent" &&
+              event.turnItem.status !== "running",
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(withLineage(thread));
+        const events = yield* Fiber.join(collected);
+        const settled = events.findLast((event) => event.type === "subagent.updated")?.subagent;
+        assert.equal(
+          settled?.status,
+          state === "completed" ? "completed" : state === "cancelled" ? "cancelled" : "failed",
+        );
+        assert.equal(settled?.origin, "provider_native");
+        if (ending === "failed") {
+          assert.deepEqual(settled?.failure, {
+            class: "provider_error",
+            message: "Child rejected. token=[REDACTED]",
+            code: "provider",
+            retryable: null,
+          });
+        } else if (ending === "reopened") {
+          assert.deepEqual(settled?.failure, {
+            class: "unknown",
+            message: "OpenCode delegated task failed.",
+            code: null,
+            retryable: null,
+          });
+        } else {
+          assert.isUndefined(settled?.failure);
+        }
+        const rows = events.filter((event) => event.type === "subagent.updated");
+        assert.equal(rows.filter((event) => event.subagent.status !== "running").length, 1);
+        assert.equal(events.filter((event) => event.type === "turn.terminal").length, 0);
+        const childNodes = events.filter(
+          (event) => event.type === "node.updated" && event.node.runId === null,
+        );
+        assert.equal(childNodes.length, ending === "reopened" ? 4 : 2);
+        if (ending === "interrupted") {
+          const terminal = childNodes.at(-1);
+          assert.equal(
+            terminal?.type === "node.updated" ? terminal.node.status : null,
+            "interrupted",
+          );
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each(["provider", "aborted"] as const)(
+    "projects a native tool's own %s error without ending the parent",
+    (errorType) =>
+      Effect.gen(function* () {
+        const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call_failed" };
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.started", { sessionID: SESSION }),
+          event("session.tool.input.started", { ...tool, name: "subagent" }),
+          event(
+            "session.tool.failed",
+            {
+              ...tool,
+              error: { type: errorType, message: "Task rejected. token=child-secret" },
+              executed: false,
+            },
+            2,
+          ),
+        ]);
+        const collected = yield* runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "subagent" &&
+              event.turnItem.status !== "running",
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(withLineage(thread));
+        const events = yield* Fiber.join(collected);
+        const settled = events.findLast((event) => event.type === "subagent.updated")?.subagent;
+        assert.equal(settled?.status, errorType === "aborted" ? "interrupted" : "failed");
+        if (errorType === "aborted") {
+          assert.isUndefined(settled?.failure);
+        } else {
+          assert.deepEqual(settled?.failure, {
+            class: "provider_error",
+            message: "Task rejected. token=[REDACTED]",
+            code: "provider",
+            retryable: null,
+          });
+        }
+        const item = events.findLast(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "subagent",
+        );
+        assert.equal(
+          item?.type === "turn_item.updated" ? item.turnItem.status : null,
+          settled?.status,
+        );
+        assert.equal(events.filter((event) => event.type === "turn.terminal").length, 0);
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps background subagents running when a turn is interrupted to restart it", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([

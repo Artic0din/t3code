@@ -132,12 +132,15 @@ export function resolveScopedSettingsTargets(
 export function scopedSettingsAreMixed(
   targets: readonly Pick<ScopedSettingsTarget, "settings">[],
   keys: readonly (keyof ServerSettings)[],
+  settingValue?: (settings: ServerSettings) => unknown,
 ): boolean {
   const first = targets[0];
   return (
     first !== undefined &&
     targets.some((candidate) =>
-      keys.some((key) => !Equal.equals(first.settings[key], candidate.settings[key])),
+      settingValue === undefined
+        ? keys.some((key) => !Equal.equals(first.settings[key], candidate.settings[key]))
+        : !Equal.equals(settingValue(first.settings), settingValue(candidate.settings)),
     )
   );
 }
@@ -223,11 +226,14 @@ export function planScopedSettingsPatch(
   const serverKeys = Object.keys(serverPatch);
   const { connectedEnvironments } = selectScopedSettingsEnvironments(scope, environments, null);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+  const fallbackListNeedsEnvironment =
+    serverPatch.modelFallback?.models !== undefined &&
+    (scope.kind !== "environment" || scope.environmentIds.length !== 1);
   const unscopableKeys = isProjectScope
     ? serverKeys.filter((key) => !isProjectScopedSettingKey(key))
     : [];
   const serverWrites: ScopedServerWrite[] =
-    serverKeys.length === 0
+    serverKeys.length === 0 || fallbackListNeedsEnvironment
       ? []
       : isProjectScope
         ? unscopableKeys.length > 0
@@ -291,8 +297,9 @@ export function planScopedSettingsPatch(
           : [];
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
-  const unavailableReason =
-    hasWrite || Object.keys(patch).length === 0
+  const unavailableReason = fallbackListNeedsEnvironment
+    ? "Select one environment to edit its fallback models."
+    : hasWrite || Object.keys(patch).length === 0
       ? null
       : scope.kind === "unavailable"
         ? scope.message

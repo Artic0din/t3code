@@ -23,6 +23,7 @@ import {
 import { planAutoSettleSettingsSync, type AutoSettleSettings } from "./autoSettleSettingsSync";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
+  mobileModelFallbackControl,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -90,6 +91,7 @@ function AutoSettleSettingsRows() {
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
       snoozeLimitedThreads?: boolean;
+      modelFallback?: { readonly enabled?: boolean };
     },
   ) => {
     if (writeInFlight.current) return;
@@ -157,6 +159,7 @@ function AutoSettleSettingsRows() {
   };
 
   const afterDays = referenceSettings.sidebarAutoSettleAfterDays;
+  const fallbackControl = mobileModelFallbackControl(displayTargets);
 
   return (
     <View className="gap-6">
@@ -185,6 +188,21 @@ function AutoSettleSettingsRows() {
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
           />
+          <SettingsSwitchRow
+            icon="clock"
+            label="Automatic model fallback"
+            value={fallbackControl.value}
+            mixedValue={fallbackControl.mixedValue}
+            disabled={disabled || !fallbackControl.canToggle}
+            onValueChange={(value) => writeToAll({ modelFallback: { enabled: value } })}
+          />
+          {!fallbackControl.configured ? (
+            <View className="px-4 pb-3">
+              <Text className="text-muted-foreground text-sm android:text-xs">
+                Add fallback models in web or desktop Settings before enabling this on mobile.
+              </Text>
+            </View>
+          ) : null}
         </SettingsSection>
       ) : null}
       <SettingsSection title="Auto-settle">

@@ -29,6 +29,8 @@ export const OrchestrationCommandReceipt = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: Schema.Literals(["accepted", "rejected"]),
   error: Schema.NullOr(Schema.String),
+  retryGroup: Schema.optionalKey(Schema.NullOr(CommandId)),
+  retryAttempt: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
 });
 export type OrchestrationCommandReceipt = typeof OrchestrationCommandReceipt.Type;
 
@@ -65,6 +67,13 @@ export class OrchestrationCommandReceiptRepository extends Context.Service<
       Option.Option<OrchestrationCommandReceipt>,
       OrchestrationCommandReceiptRepositoryError
     >;
+    readonly getLatestRetry: (input: {
+      readonly threadId: ThreadId;
+      readonly retryGroup: CommandId;
+    }) => Effect.Effect<
+      Option.Option<OrchestrationCommandReceipt>,
+      OrchestrationCommandReceiptRepositoryError
+    >;
   }
 >()("t3/persistence/OrchestrationCommandReceipts/OrchestrationCommandReceiptRepository") {}
 
@@ -83,7 +92,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at,
           result_sequence,
           status,
-          error
+          error,
+          retry_group,
+          retry_attempt
         )
         VALUES (
           ${receipt.commandId},
@@ -93,7 +104,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           ${receipt.acceptedAt},
           ${receipt.resultSequence},
           ${receipt.status},
-          ${receipt.error}
+          ${receipt.error},
+          ${receipt.retryGroup ?? null},
+          ${receipt.retryAttempt ?? null}
         )
         ON CONFLICT (command_id)
         DO UPDATE SET
@@ -103,7 +116,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at = excluded.accepted_at,
           result_sequence = excluded.result_sequence,
           status = excluded.status,
-          error = excluded.error
+          error = excluded.error,
+          retry_group = COALESCE(excluded.retry_group, retry_group),
+          retry_attempt = COALESCE(excluded.retry_attempt, retry_attempt)
       `,
   });
 
@@ -120,7 +135,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
           accepted_at AS "acceptedAt",
           result_sequence AS "resultSequence",
           status,
-          error
+          error,
+          retry_group AS "retryGroup",
+          retry_attempt AS "retryAttempt"
         FROM orchestration_command_receipts
         WHERE command_id = ${commandId}
       `,
@@ -143,7 +160,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
         accepted_at,
         result_sequence,
         status,
-        error
+        error,
+        retry_group,
+        retry_attempt
       )
       VALUES (
         ${receipt.commandId},
@@ -153,7 +172,9 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
         ${receipt.acceptedAt},
         ${receipt.resultSequence},
         ${receipt.status},
-        ${receipt.error}
+        ${receipt.error},
+        ${receipt.retryGroup ?? null},
+        ${receipt.retryAttempt ?? null}
       )
       ON CONFLICT(command_id) DO NOTHING
       RETURNING command_id
@@ -173,10 +194,80 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
       ),
     );
 
+  const getLatestRetry = Effect.fn("OrchestrationCommandReceiptRepository.getLatestRetry")(
+    function* ({
+      threadId,
+      retryGroup,
+    }: {
+      readonly threadId: ThreadId;
+      readonly retryGroup: CommandId;
+    }) {
+      const latest = SqlSchema.findOneOption({
+        Request: Schema.Void,
+        Result: OrchestrationCommandReceipt,
+        execute: () => sql`
+          SELECT command_id AS "commandId", aggregate_kind AS "aggregateKind", aggregate_id AS "aggregateId",
+            command_type AS "commandType", accepted_at AS "acceptedAt", result_sequence AS "resultSequence",
+            status, error, retry_group AS "retryGroup", retry_attempt AS "retryAttempt"
+          FROM orchestration_command_receipts
+          WHERE aggregate_kind = 'thread' AND aggregate_id = ${threadId} AND retry_group = ${retryGroup}
+          ORDER BY retry_attempt DESC LIMIT 1
+        `,
+      });
+      const existing = yield* latest(undefined);
+      if (Option.isSome(existing)) return existing;
+      const root = yield* findReceiptByCommandId({ commandId: retryGroup });
+      if (
+        Option.isNone(root) ||
+        root.value.aggregateKind !== "thread" ||
+        root.value.aggregateId !== threadId
+      )
+        return Option.none();
+      const occupiedOriginal = Option.some({
+        ...root.value,
+        status: "rejected" as const,
+        retryGroup,
+        retryAttempt: 1,
+      });
+      const [bootstrap] = yield* sql<{ readonly complete: number }>`
+        SELECT retry_bootstrapped AS complete FROM orchestration_command_receipts
+        WHERE command_id = ${retryGroup}
+      `;
+      if (bootstrap?.complete === 1) return occupiedOriginal;
+      const prefix = `${retryGroup}:attempt-`;
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+        UPDATE orchestration_command_receipts
+        SET retry_group = ${retryGroup}, retry_attempt = CAST(substr(command_id, length(${prefix}) + 1) AS INTEGER)
+        WHERE retry_group IS NULL AND aggregate_kind = 'thread' AND aggregate_id = ${threadId}
+          AND command_id >= ${prefix} AND command_id < ${`${retryGroup}:attempt.`}
+          AND substr(command_id, length(${prefix}) + 1) GLOB '[1-9]*'
+          AND substr(command_id, length(${prefix}) + 1) NOT GLOB '*[^0-9]*'
+          AND CAST(substr(command_id, length(${prefix}) + 1) AS INTEGER) > 1
+        `;
+          yield* sql`
+          UPDATE orchestration_command_receipts
+          SET retry_group = COALESCE(retry_group, ${retryGroup}),
+            retry_attempt = COALESCE(retry_attempt, 1), retry_bootstrapped = 1
+          WHERE aggregate_kind = 'thread' AND aggregate_id = ${threadId}
+            AND command_id = ${retryGroup}
+        `;
+        }),
+      );
+      const migrated = yield* latest(undefined);
+      return Option.isSome(migrated) ? migrated : occupiedOriginal;
+    },
+    Effect.mapError(
+      toPersistenceSqlError("OrchestrationCommandReceiptRepository.getLatestRetry:query"),
+    ),
+  );
+
   return {
     insertIfAbsent,
     upsert,
     getByCommandId,
+    getLatestRetry,
   } satisfies OrchestrationCommandReceiptRepository["Service"];
 });
 

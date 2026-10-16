@@ -54,6 +54,8 @@ export const CommandReceiptV2 = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: CommandReceiptV2Status,
   error: Schema.NullOr(Schema.String),
+  retryGroup: Schema.optionalKey(Schema.NullOr(CommandId)),
+  retryAttempt: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
 });
 export type CommandReceiptV2 = typeof CommandReceiptV2.Type;
 
@@ -82,6 +84,10 @@ export interface CommandReceiptStoreV2Shape {
   readonly getByCommandId: (
     commandId: CommandId,
   ) => Effect.Effect<Option.Option<CommandReceiptV2>, CommandReceiptStoreV2Error>;
+  readonly getLatestRetry: (input: {
+    readonly threadId: ThreadId;
+    readonly retryGroup: CommandId;
+  }) => Effect.Effect<Option.Option<CommandReceiptV2>, CommandReceiptStoreV2Error>;
   /** A project command's receipt; none when the command id belongs to a thread command. */
   readonly getProjectByCommandId: (
     commandId: CommandId,
@@ -118,6 +124,8 @@ function fromApplicationReceipt(receipt: OrchestrationCommandReceipts.Orchestrat
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    retryGroup: receipt.retryGroup ?? null,
+    retryAttempt: receipt.retryAttempt ?? null,
   });
 }
 
@@ -134,6 +142,9 @@ function toApplicationReceipt(
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    ...("retryGroup" in receipt
+      ? { retryGroup: receipt.retryGroup, retryAttempt: receipt.retryAttempt }
+      : {}),
   };
 }
 
@@ -202,6 +213,18 @@ const layerBase: Layer.Layer<
                 }).pipe(Effect.map(Option.some)),
           ),
           Effect.mapError((cause) => new CommandReceiptStoreReadError({ commandId, cause })),
+        ),
+      getLatestRetry: (input) =>
+        receipts.getLatestRetry(input).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(Option.none()),
+              onSome: (receipt) => fromApplicationReceipt(receipt).pipe(Effect.map(Option.some)),
+            }),
+          ),
+          Effect.mapError(
+            (cause) => new CommandReceiptStoreReadError({ commandId: input.retryGroup, cause }),
+          ),
         ),
     } satisfies CommandReceiptStoreV2Shape);
   }),

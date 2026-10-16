@@ -21,6 +21,20 @@ export interface ScopedMobileSettingsTarget {
   readonly sources: ReturnType<typeof resolveProjectSettings>["sources"];
 }
 
+export function mobileModelFallbackControl(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "settings">[],
+) {
+  const first = targets[0]?.settings.modelFallback.enabled ?? null;
+  const value = targets.every((target) => target.settings.modelFallback.enabled === first)
+    ? first
+    : null;
+  const configured =
+    targets.length > 0 &&
+    targets.every((target) => target.settings.modelFallback.models.length > 0);
+  const canToggle = configured || targets.some((target) => target.settings.modelFallback.enabled);
+  return { value, configured, canToggle, mixedValue: configured };
+}
+
 export function resolveMobileSettingsTargets(
   environments: readonly SettingsTarget[],
   members: readonly { readonly environmentId: EnvironmentId; readonly id: ProjectId }[] | null,

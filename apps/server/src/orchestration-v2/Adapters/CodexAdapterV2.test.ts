@@ -12,10 +12,12 @@ import {
   CheckpointId,
   CodexSettings,
   EnvironmentId,
+  isProviderNativeSubagentThread,
   MessageId,
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   ProjectId,
@@ -6706,6 +6708,745 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }),
       childTurnCompleted(RESUME_CHILD_TURN_2),
     ],
+  });
+
+  describe("native child failures", () => {
+    const message = "Child request stopped.";
+    const notification = (
+      method: string,
+      params: unknown,
+    ): CodexReplay.CodexAppServerReplayEntry => ({
+      type: "emit_inbound",
+      label: method,
+      frame: { method, params },
+    });
+    const childStart = resumeSubagentTranscript.entries.find(
+      (entry) =>
+        entry.type === "emit_inbound" && entry.label === "item/completed/subAgentActivity-started",
+    )!;
+    const snapshot = (
+      status = "errored",
+      snapshotMessage: string | null = "Usage limit exceeded.",
+    ) =>
+      notification("item/completed", {
+        threadId: RESUME_NATIVE_THREAD,
+        turnId: RESUME_NATIVE_TURN,
+        item: {
+          type: "collabAgentToolCall",
+          id: `child-snapshot-${status}`,
+          tool: "listAgents",
+          status: "completed",
+          senderThreadId: RESUME_NATIVE_THREAD,
+          receiverThreadIds: [RESUME_CHILD_THREAD],
+          agentsStates: { [RESUME_CHILD_THREAD]: { status, message: snapshotMessage } },
+        },
+      });
+    const nativeFailureCases: ReadonlyArray<{
+      readonly name: string;
+      readonly notificationCode?: string;
+      readonly willRetry?: boolean;
+      readonly terminalCode?: string;
+      readonly terminalMessage?: string;
+      readonly status?: "failed" | "completed" | "interrupted";
+      readonly snapshot?: "before" | "after" | "after output";
+      readonly snapshotStatus?: "errored" | "interrupted" | "shutdown";
+      readonly recover?: boolean;
+      readonly rootFailed?: boolean;
+      readonly afterRoot?: boolean;
+      readonly expectedFailure: OrchestrationV2ProviderFailure | null;
+    }> = [
+      {
+        name: "usage terminal",
+        terminalCode: "usageLimitExceeded",
+        expectedFailure: {
+          class: "usage_limit",
+          code: "usageLimitExceeded",
+          message,
+          retryable: null,
+        },
+      },
+      {
+        name: "rate terminal after snapshot",
+        terminalCode: "rateLimitExceeded",
+        snapshot: "before",
+        expectedFailure: {
+          class: "usage_limit",
+          code: "rateLimitExceeded",
+          message,
+          retryable: null,
+        },
+      },
+      {
+        name: "notification details",
+        notificationCode: "usageLimitExceeded",
+        expectedFailure: {
+          class: "usage_limit",
+          code: "usageLimitExceeded",
+          message: "Child-specific details.",
+          retryable: null,
+        },
+      },
+      {
+        name: "replacement error",
+        notificationCode: "usageLimitExceeded",
+        terminalCode: "contextWindowExceeded",
+        terminalMessage: "Different child failure.",
+        expectedFailure: {
+          class: "provider_error",
+          code: "contextWindowExceeded",
+          message: "Different child failure.",
+          retryable: null,
+        },
+      },
+      {
+        name: "replacement message",
+        notificationCode: "usageLimitExceeded",
+        terminalMessage: "Different child failure.",
+        expectedFailure: {
+          class: "unknown",
+          code: null,
+          message: "Different child failure.",
+          retryable: null,
+        },
+      },
+      {
+        name: "exhausted retry",
+        notificationCode: "rateLimitExceeded",
+        willRetry: true,
+        expectedFailure: {
+          class: "usage_limit",
+          code: "rateLimitExceeded",
+          message: "Child-specific details.",
+          retryable: true,
+        },
+      },
+      {
+        name: "recovered retry",
+        notificationCode: "usageLimitExceeded",
+        willRetry: true,
+        recover: true,
+        status: "completed",
+        expectedFailure: null,
+      },
+      {
+        name: "recovered retry before opaque failure",
+        notificationCode: "usageLimitExceeded",
+        willRetry: true,
+        recover: true,
+        expectedFailure: { class: "unknown", code: null, message, retryable: null },
+      },
+      {
+        name: "recovered notification",
+        notificationCode: "usageLimitExceeded",
+        status: "completed",
+        expectedFailure: null,
+      },
+      {
+        name: "interrupted retry",
+        notificationCode: "usageLimitExceeded",
+        willRetry: true,
+        status: "interrupted",
+        expectedFailure: null,
+      },
+      {
+        name: "snapshot after typed terminal",
+        terminalCode: "usageLimitExceeded",
+        snapshot: "after",
+        expectedFailure: {
+          class: "usage_limit",
+          code: "usageLimitExceeded",
+          message,
+          retryable: null,
+        },
+      },
+      {
+        name: "snapshot recovered by terminal",
+        snapshot: "before",
+        status: "completed",
+        expectedFailure: null,
+      },
+      {
+        name: "snapshot recovered by final output",
+        snapshot: "before",
+        recover: true,
+        status: "completed",
+        expectedFailure: null,
+      },
+      {
+        name: "snapshot after final output recovered by terminal",
+        snapshot: "after output",
+        recover: true,
+        status: "completed",
+        expectedFailure: null,
+      },
+      ...(["errored", "interrupted", "shutdown"] as const).flatMap((snapshotStatus) =>
+        [false, true].map((recover) => ({
+          name: `late ${snapshotStatus} snapshot after ${recover ? "recovered" : "empty"} success`,
+          snapshot: "after" as const,
+          snapshotStatus,
+          recover,
+          status: "completed" as const,
+          expectedFailure: null,
+        })),
+      ),
+      {
+        name: "parent quota with opaque child",
+        rootFailed: true,
+        expectedFailure: { class: "unknown", code: null, message, retryable: null },
+      },
+      {
+        name: "background failure after root completion",
+        afterRoot: true,
+        terminalCode: "rateLimitExceeded",
+        expectedFailure: {
+          class: "usage_limit",
+          code: "rateLimitExceeded",
+          message,
+          retryable: null,
+        },
+      },
+    ];
+
+    it.effect.each(nativeFailureCases)(
+      "preserves child-owned failure evidence for $name",
+      (scenario) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const status = scenario.status ?? "failed";
+            const childTerminal = notification("turn/completed", {
+              threadId: RESUME_CHILD_THREAD,
+              turn: {
+                ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status }),
+                error:
+                  status === "failed"
+                    ? {
+                        message: scenario.terminalMessage ?? message,
+                        ...(scenario.terminalCode === undefined
+                          ? {}
+                          : { codexErrorInfo: scenario.terminalCode }),
+                      }
+                    : null,
+              },
+            });
+            const rootTerminal = notification("turn/completed", {
+              threadId: RESUME_NATIVE_THREAD,
+              turn: {
+                ...makeCodexReplayTurn({
+                  id: RESUME_NATIVE_TURN,
+                  status: scenario.rootFailed ? "failed" : "completed",
+                }),
+                error: scenario.rootFailed
+                  ? { message: "Parent quota.", codexErrorInfo: "usageLimitExceeded" }
+                  : null,
+              },
+            });
+            const transcript = makeCodexReplayTranscript({
+              scenario: `native-child-failure-${scenario.name}`,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId: RESUME_NATIVE_THREAD,
+                  nativeTurnId: RESUME_NATIVE_TURN,
+                  prompt: RESUME_PROMPT,
+                }),
+                notification("account/rateLimits/updated", {
+                  rateLimits: {
+                    limitId: "codex",
+                    primary: { usedPercent: 100, resetsAt: 2000100000, windowDurationMins: 300 },
+                  },
+                }),
+                childStart,
+                ...(scenario.afterRoot ? [rootTerminal] : []),
+                childTurnStarted(RESUME_CHILD_TURN_1),
+                ...(scenario.rootFailed
+                  ? [
+                      notification("error", {
+                        threadId: RESUME_NATIVE_THREAD,
+                        turnId: RESUME_NATIVE_TURN,
+                        willRetry: false,
+                        error: { message: "Parent quota.", codexErrorInfo: "usageLimitExceeded" },
+                      }),
+                    ]
+                  : []),
+                ...(scenario.snapshot === "before" ? [snapshot()] : []),
+                ...(scenario.notificationCode === undefined
+                  ? []
+                  : [
+                      notification("error", {
+                        threadId: RESUME_CHILD_THREAD,
+                        turnId: RESUME_CHILD_TURN_1,
+                        willRetry: scenario.willRetry ?? false,
+                        error: {
+                          message,
+                          codexErrorInfo: scenario.notificationCode,
+                          additionalDetails: "Child-specific details.",
+                        },
+                      }),
+                    ]),
+                ...(scenario.recover
+                  ? [
+                      notification("item/reasoning/summaryTextDelta", {
+                        threadId: RESUME_CHILD_THREAD,
+                        turnId: RESUME_CHILD_TURN_1,
+                        itemId: "recovered-reasoning",
+                        summaryIndex: 0,
+                        delta: "Recovered child output.",
+                      }),
+                      childAgentMessage({
+                        id: "recovered-answer",
+                        text: "Implemented usage limit reporting.",
+                        turnId: RESUME_CHILD_TURN_1,
+                        completedAtMs: 1782622442000,
+                      }),
+                    ]
+                  : []),
+                ...(scenario.snapshot === "after output" ? [snapshot()] : []),
+                childTerminal,
+                childTerminal,
+                ...(scenario.snapshot === "after" ? [snapshot(scenario.snapshotStatus)] : []),
+                ...(scenario.afterRoot ? [] : [rootTerminal]),
+              ],
+            });
+            const childCompleted = yield* Deferred.make<void>();
+            const requests: Array<string> = [];
+            const harness = yield* makeCodexReplayHarness(
+              transcript,
+              (event) =>
+                Effect.gen(function* () {
+                  if (
+                    event.type === "provider_turn.updated" &&
+                    event.providerTurn.nativeTurnRef?.nativeId === RESUME_CHILD_TURN_1 &&
+                    event.providerTurn.status !== "running"
+                  ) {
+                    yield* Deferred.succeed(childCompleted, undefined);
+                  }
+                }),
+              (method) =>
+                Effect.sync(() => {
+                  requests.push(method);
+                }),
+            );
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`native-child-${scenario.name}`),
+                text: RESUME_PROMPT,
+              }),
+            );
+            yield* Deferred.await(childCompleted);
+            yield* harness.firstTerminal;
+            const updates = harness.subagentUpdates().map((event) => event.subagent);
+            const task = updates.at(-1)!;
+            assert.equal(task.status, status);
+            assert.deepEqual(task.failure ?? null, scenario.expectedFailure);
+            if (status === "completed") {
+              const expectedResult = scenario.recover ? "Implemented usage limit reporting." : null;
+              assert.equal(task.result, expectedResult);
+              assert.equal(
+                harness.events
+                  .flatMap((event) =>
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.type === "subagent" &&
+                    event.turnItem.subagentId === task.id
+                      ? [event.turnItem]
+                      : [],
+                  )
+                  .at(-1)?.result,
+                expectedResult,
+              );
+            }
+            assert.equal(task.origin, "provider_native");
+            assert.isNotNull(task.childThreadId);
+            assert.isNotNull(task.providerThreadId);
+            assert.deepEqual(
+              harness
+                .terminalEvents()
+                .map((event) => [
+                  event.providerThreadId,
+                  event.status,
+                  event.failure?.class ?? null,
+                ]),
+              [
+                [
+                  harness.providerThread.id,
+                  scenario.rootFailed ? "failed" : "completed",
+                  scenario.rootFailed ? "usage_limit" : null,
+                ],
+              ],
+            );
+            const childNodes = harness.events.flatMap((event) =>
+              event.type === "node.updated" && event.node.threadId === task.childThreadId
+                ? [event.node]
+                : [],
+            );
+            assert.equal(childNodes.at(-1)?.status, status);
+            for (const node of childNodes) {
+              assert.isNull(node.runId);
+              assert.isFalse(node.countsForRun);
+            }
+            assert.deepEqual(
+              harness.events.flatMap((event) =>
+                event.type === "provider_turn.updated" && event.threadId === task.childThreadId
+                  ? [event.providerTurn.runAttemptId]
+                  : [],
+              ),
+              [null, null],
+            );
+            if (scenario.snapshot === "before") {
+              assert.deepEqual(updates.find((update) => update.status === "failed")?.failure, {
+                class: "unknown",
+                code: null,
+                message: "Usage limit exceeded.",
+                retryable: null,
+              });
+            }
+            if (scenario.recover) assert.equal(task.result, "Implemented usage limit reporting.");
+            for (const update of updates.filter((task) => task.status === "running")) {
+              assert.isUndefined(update.failure);
+            }
+            assert.deepEqual(
+              requests.filter((method) => method.startsWith("turn/") || method === "thread/resume"),
+              ["turn/start"],
+            );
+            assert.deepEqual(harness.continuationRequests, []);
+            assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+        ),
+    );
+
+    const persistedTerminalCases: ReadonlyArray<{
+      readonly name: string;
+      readonly output: "none" | "before" | "after";
+      readonly fallbackEnabled: boolean;
+      readonly failureCode?: "usageLimitExceeded" | "rateLimitExceeded";
+    }> = [
+      { name: "success without output", output: "none", fallbackEnabled: true },
+      { name: "success with output before snapshot", output: "before", fallbackEnabled: true },
+      { name: "success with output after snapshot", output: "after", fallbackEnabled: true },
+      ...(["usageLimitExceeded", "rateLimitExceeded"] as const).flatMap((failureCode) =>
+        [false, true].map((fallbackEnabled) => ({
+          name: `${failureCode} with fallback ${fallbackEnabled ? "enabled" : "disabled"}`,
+          output: "none" as const,
+          fallbackEnabled,
+          failureCode,
+        })),
+      ),
+    ];
+
+    it.effect.each(persistedTerminalCases)(
+      "persists background native child terminal reconciliation for $name",
+      (scenario) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-terminal-" });
+            const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+            for (const args of [
+              ["init", "--quiet"],
+              [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "Initial commit",
+              ],
+            ])
+              assert.equal(
+                Number(yield* spawner.exitCode(ChildProcess.make("git", args, { cwd }))),
+                0,
+              );
+            const releaseSnapshot = yield* Deferred.make<void>();
+            const releaseTerminal = yield* Deferred.make<void>();
+            yield* Effect.addFinalizer(() =>
+              Deferred.succeed(releaseSnapshot, undefined).pipe(
+                Effect.andThen(Deferred.succeed(releaseTerminal, undefined)),
+              ),
+            );
+            const output = childAgentMessage({
+              id: "persisted-child-answer",
+              text: "Recovered child answer.",
+              turnId: RESUME_CHILD_TURN_1,
+              completedAtMs: 1782622442000,
+            });
+            const failedSnapshot = {
+              ...snapshot(),
+              label: "persisted-native:snapshot",
+            };
+            const status = scenario.failureCode === undefined ? "completed" : "failed";
+            const terminal = {
+              ...notification("turn/completed", {
+                threadId: RESUME_CHILD_THREAD,
+                turn: {
+                  ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status }),
+                  error:
+                    scenario.failureCode === undefined
+                      ? null
+                      : { message, codexErrorInfo: scenario.failureCode },
+                },
+              }),
+              label: "persisted-native:terminal",
+            };
+            const transcript = makeCodexReplayTranscript({
+              scenario: `persisted-native-${scenario.name}`,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId: RESUME_NATIVE_THREAD,
+                  nativeTurnId: RESUME_NATIVE_TURN,
+                  prompt: RESUME_PROMPT,
+                }),
+                childStart,
+                childTurnStarted(RESUME_CHILD_TURN_1),
+                notification("turn/completed", {
+                  threadId: RESUME_NATIVE_THREAD,
+                  turn: makeCodexReplayTurn({ id: RESUME_NATIVE_TURN, status: "completed" }),
+                }),
+                ...(scenario.output === "before" ? [output] : []),
+                failedSnapshot,
+                ...(scenario.output === "after" ? [output] : []),
+                terminal,
+                terminal,
+              ],
+            });
+            const localTranscript = yield* decodeReplayTranscriptJson(
+              (yield* encodeReplayTranscriptJson(transcript)).replaceAll(
+                yield* encodeStringJson("/workspace"),
+                yield* encodeStringJson(cwd),
+              ),
+            );
+            const driver = yield* CodexReplay.makeReplayDriver(localTranscript, {
+              beforeEmitInbound: (entry) =>
+                entry.label === "persisted-native:snapshot"
+                  ? Deferred.await(releaseSnapshot)
+                  : entry.label === "persisted-native:terminal"
+                    ? Deferred.await(releaseTerminal)
+                    : Effect.void,
+            });
+            yield* Effect.gen(function* () {
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              const key = scenario.name.replace(/[^a-z0-9]+/gi, "-");
+              const threadId = ThreadId.make(`thread:persisted-native-${key}`);
+              const rootWaiting = yield* Deferred.make<void>();
+              const rootCompleted = yield* Deferred.make<void>();
+              const snapshotPersisted = yield* Deferred.make<void>();
+              const terminalPersisted = yield* Deferred.make<void>();
+              yield* orchestrator.streamDomainEvents.pipe(
+                Stream.runForEach((event) =>
+                  Effect.gen(function* () {
+                    if (
+                      event.type === "run.updated" &&
+                      event.payload.threadId === threadId &&
+                      event.payload.status === "waiting"
+                    )
+                      yield* Deferred.succeed(rootWaiting, undefined);
+                    if (
+                      event.type === "run.updated" &&
+                      event.payload.threadId === threadId &&
+                      event.payload.status === "completed"
+                    )
+                      yield* Deferred.succeed(rootCompleted, undefined);
+                    if (
+                      event.type === "turn-item.updated" &&
+                      event.payload.type === "subagent" &&
+                      event.payload.threadId === threadId &&
+                      event.payload.status === "failed" &&
+                      event.payload.result === "Usage limit exceeded."
+                    )
+                      yield* Deferred.succeed(snapshotPersisted, undefined);
+                    if (
+                      event.type === "provider-turn.updated" &&
+                      event.payload.nativeTurnRef?.nativeId === RESUME_CHILD_TURN_1 &&
+                      event.payload.status !== "running"
+                    )
+                      yield* Deferred.succeed(terminalPersisted, undefined);
+                  }),
+                ),
+                Effect.forkChild({ startImmediately: true }),
+              );
+              yield* orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`create-persisted-native-${key}`),
+                threadId,
+                projectId: ProjectId.make(`project:persisted-native-${key}`),
+                title: "Native terminal delivery",
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: cwd,
+                createdBy: "user",
+                creationSource: "web",
+              });
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`start-persisted-native-${key}`),
+                threadId,
+                messageId: MessageId.make(`message:persisted-native-${key}`),
+                text: RESUME_PROMPT,
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+              const draining = yield* worker.drain().pipe(Effect.forkScoped);
+              yield* Deferred.await(rootWaiting);
+              yield* Fiber.join(draining);
+              yield* worker.drain();
+              yield* Deferred.await(rootCompleted);
+              const settledRoot = yield* orchestrator.getThreadProjection(threadId);
+              assert.equal(settledRoot.runs[0]?.status, "completed");
+              assert.equal(settledRoot.subagents[0]?.status, "running");
+              yield* Deferred.succeed(releaseSnapshot, undefined);
+              yield* Deferred.await(snapshotPersisted);
+              const snapshotRoot = yield* orchestrator.getThreadProjection(threadId);
+              assert.equal(snapshotRoot.subagents[0]?.failure?.class, "unknown");
+              const childId = snapshotRoot.subagents[0]?.childThreadId;
+              assert.isDefined(childId);
+              assert.isNotNull(childId);
+              const activeChild = yield* orchestrator.getThreadProjection(childId);
+              assert.equal(activeChild.providerTurns[0]?.status, "running");
+              yield* Deferred.succeed(releaseTerminal, undefined);
+              yield* Deferred.await(terminalPersisted);
+              yield* worker.drain();
+              const parent = yield* orchestrator.getThreadProjection(threadId);
+              const task = parent.subagents[0]!;
+              const child = yield* orchestrator.getThreadProjection(childId);
+              assert.equal(task.status, status);
+              assert.equal(
+                task.failure?.class ?? null,
+                scenario.failureCode ? "usage_limit" : null,
+              );
+              assert.equal(task.failure?.code ?? null, scenario.failureCode ?? null);
+              const expectedResult = scenario.output === "none" ? null : "Recovered child answer.";
+              if (status === "completed") assert.equal(task.result, expectedResult);
+              const taskItem = parent.turnItems.find(
+                (item) => item.type === "subagent" && item.subagentId === task.id,
+              );
+              assert.equal(taskItem?.status, status);
+              if (taskItem?.type !== "subagent") throw new Error("Missing native task transcript");
+              assert.equal(taskItem.result, task.result);
+              assert.equal(parent.nodes.find((node) => node.id === task.id)?.status, status);
+              assert.equal(child.providerTurns[0]?.status, status);
+              assert.equal(child.nodes.find((node) => node.kind === "root_turn")?.status, status);
+              assert.isTrue(isProviderNativeSubagentThread(child.thread));
+              assert.lengthOf(child.runs, 0);
+              assert.isTrue(child.nodes.every((node) => node.runId === null && !node.countsForRun));
+              assert.lengthOf(parent.runs, 1);
+              assert.equal(parent.runs[0]?.status, "completed");
+              assert.deepEqual(parent.thread.modelSelection, CODEX_TEST_MODEL_SELECTION);
+              assert.lengthOf(parent.contextTransfers, 0);
+              const notices = parent.turnItems.filter(
+                (item) => item.type === "system_notice" && item.nodeId === task.id,
+              );
+              assert.lengthOf(notices, scenario.failureCode && scenario.fallbackEnabled ? 1 : 0);
+              if (scenario.failureCode) {
+                const failureItem = child.turnItems.find((item) => item.type === "error");
+                assert.equal(
+                  failureItem?.type === "error" ? failureItem.failure?.class : null,
+                  "usage_limit",
+                );
+              }
+              assert.isFalse(
+                parent.turnItems.some(
+                  (item) => item.type === "error" && item.failure?.class === "usage_limit",
+                ),
+              );
+              assert.isNull((yield* Ref.get(driver.state)).failure);
+            }).pipe(
+              Effect.provide(
+                ProviderReplayHarness.layerWithRegistry(
+                  {
+                    name: `codex-native-terminal-${scenario.name}`,
+                    runtimePolicyOverride: { cwd },
+                  },
+                  CodexAdapterV2Testkit.layer({ transcript: localTranscript, driver }),
+                  {
+                    runEffectWorker: false,
+                    modelFallback: {
+                      enabled: scenario.fallbackEnabled,
+                      models: [CODEX_TEST_MODEL_SELECTION],
+                    },
+                  },
+                ),
+              ),
+            );
+          }).pipe(Effect.provide(NodeServices.layer)),
+        ),
+    );
+
+    it.effect.each(["completed", "interrupted", "cancelled"] as const)(
+      "clears native failure metadata when a reopened child becomes %s",
+      (status) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const transcript = makeCodexReplayTranscript({
+              scenario: `native-child-reopen-${status}`,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId: RESUME_NATIVE_THREAD,
+                  nativeTurnId: RESUME_NATIVE_TURN,
+                  prompt: RESUME_PROMPT,
+                }),
+                childStart,
+                childTurnStarted(RESUME_CHILD_TURN_1),
+                notification("turn/completed", {
+                  threadId: RESUME_CHILD_THREAD,
+                  turn: {
+                    ...makeCodexReplayTurn({ id: RESUME_CHILD_TURN_1, status: "failed" }),
+                    error: { message, codexErrorInfo: "usageLimitExceeded" },
+                  },
+                }),
+                childTurnStarted(RESUME_CHILD_TURN_2),
+                ...(status === "cancelled" ? [snapshot("shutdown", null)] : []),
+                notification("turn/completed", {
+                  threadId: RESUME_CHILD_THREAD,
+                  turn: makeCodexReplayTurn({
+                    id: RESUME_CHILD_TURN_2,
+                    status: status === "completed" ? "completed" : "interrupted",
+                  }),
+                }),
+                notification("turn/completed", {
+                  threadId: RESUME_NATIVE_THREAD,
+                  turn: makeCodexReplayTurn({ id: RESUME_NATIVE_TURN, status: "completed" }),
+                }),
+              ],
+            });
+            const harness = yield* makeCodexReplayHarness(transcript);
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`native-child-reopen-${status}`),
+                text: RESUME_PROMPT,
+              }),
+            );
+            yield* harness.firstTerminal;
+            const updates = harness.subagentUpdates().map((event) => event.subagent);
+            const failed = updates.findIndex((task) => task.status === "failed");
+            assert.deepEqual(updates[failed]?.failure, {
+              class: "usage_limit",
+              code: "usageLimitExceeded",
+              message,
+              retryable: null,
+            });
+            assert.equal(updates[failed + 1]?.status, "running");
+            assert.isUndefined(updates[failed + 1]?.failure);
+            assert.equal(updates.at(-1)?.status, status);
+            assert.isUndefined(updates.at(-1)?.failure);
+            assert.equal(new Set(updates.map((task) => task.id)).size, 1);
+            assert.deepEqual(
+              harness.terminalEvents().map((event) => event.status),
+              ["completed"],
+            );
+          }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+        ),
+    );
   });
 
   it.effect.each([

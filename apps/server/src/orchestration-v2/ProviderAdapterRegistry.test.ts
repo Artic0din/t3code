@@ -87,6 +87,47 @@ it.effect("routes two configured instances of the same driver independently", ()
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("reads current known quota ownership without capability probes", () =>
+  Effect.gen(function* () {
+    const current = yield* Ref.make<readonly ProviderInstance[]>([
+      { ...instances[0], quotaOwnerKey: "codex:shared-auth" },
+      { ...instances[1], quotaOwnerKey: "codex:shared-auth" },
+      makeInstance(ProviderInstanceId.make("unknown"), personalAdapter),
+    ]);
+    const live = Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+      getInstance: (instanceId) =>
+        Ref.get(current).pipe(
+          Effect.map((entries) => entries.find((entry) => entry.instanceId === instanceId)),
+        ),
+      listInstances: Ref.get(current),
+      listUnavailable: Effect.succeed([]),
+      streamChanges: Stream.empty,
+      subscribeChanges: Effect.never,
+    });
+    yield* Effect.gen(function* () {
+      const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      assert.isDefined(registry.getQuotaOwnerKeys);
+      if (registry.getQuotaOwnerKeys === undefined) return;
+      assert.deepEqual(
+        [...(yield* registry.getQuotaOwnerKeys())],
+        [
+          [personalId, "codex:shared-auth"],
+          [workId, "codex:shared-auth"],
+        ],
+      );
+      yield* Ref.set(current, [{ ...instances[1], quotaOwnerKey: "codex:isolated-auth" }]);
+      assert.deepEqual(
+        [...(yield* registry.getQuotaOwnerKeys())],
+        [[workId, "codex:isolated-auth"]],
+      );
+    }).pipe(
+      Effect.provide(
+        ProviderAdapterRegistry.layerFromProviderInstanceRegistry.pipe(Layer.provide(live)),
+      ),
+    );
+  }),
+);
+
 const lifecycleDriver = ProviderDriverKind.make("lifecycle-test");
 const lifecycleInstanceId = ProviderInstanceId.make("lifecycle-test");
 const lifecycleConfigMap: ProviderInstanceConfigMap = {

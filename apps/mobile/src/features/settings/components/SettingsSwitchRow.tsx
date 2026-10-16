@@ -9,6 +9,7 @@ export function SettingsSwitchRow(
   props: Omit<ComponentProps<typeof SettingsControlRow>, "children"> & {
     readonly value: boolean | null;
     readonly onValueChange: (value: boolean) => void;
+    readonly mixedValue?: boolean;
   },
 ) {
   return (
@@ -20,13 +21,15 @@ export function SettingsSwitchRow(
     >
       {props.value === null ? (
         <Pressable
-          accessibilityLabel={`Set ${props.label} on for selected environments`}
+          accessibilityLabel={`Set ${props.label} ${props.mixedValue === false ? "off" : "on"} for selected environments`}
           accessibilityRole="button"
           disabled={props.disabled}
           className="rounded-full bg-subtle px-3 py-2 active:opacity-70"
-          onPress={() => props.onValueChange(true)}
+          onPress={() => props.onValueChange(props.mixedValue ?? true)}
         >
-          <Text className="text-sm font-t3-medium text-foreground">Mixed · Set on</Text>
+          <Text className="text-sm font-t3-medium text-foreground">
+            Mixed · Set {props.mixedValue === false ? "off" : "on"}
+          </Text>
         </Pressable>
       ) : (
         <ThemedSwitch

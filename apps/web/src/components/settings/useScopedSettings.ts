@@ -40,9 +40,12 @@ export function useScopedSettings<T = UnifiedSettings>(
   return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
 }
 
-export function useScopedSettingsMixed(keys: readonly (keyof ServerSettings)[]): boolean {
+export function useScopedSettingsMixed(
+  keys: readonly (keyof ServerSettings)[],
+  settingValue?: (settings: ServerSettings) => unknown,
+): boolean {
   const { targets } = useSettingsScope();
-  return scopedSettingsAreMixed(targets, keys);
+  return scopedSettingsAreMixed(targets, keys, settingValue);
 }
 
 /** Where the keys' effective values come from across the selected targets. */

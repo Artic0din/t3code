@@ -2781,6 +2781,7 @@ interface ActiveClaudeSubagent {
   // message id. A completion result equal to it is already on screen.
   lastAssistantText: string | null;
   lastAssistantMessageId: string | null;
+  latestAssistantError: SDKAssistantMessage["error"];
 }
 
 interface ClaudeLiveQueryContext {
@@ -4090,6 +4091,7 @@ export function makeClaudeAdapterV2(
             resultItemOrdinal: null,
             lastAssistantText: null,
             lastAssistantMessageId: null,
+            latestAssistantError: undefined,
           };
           yield* Ref.update(sessionSubagentsByTaskId, (current) =>
             new Map(current).set(resume.taskId, subagent),
@@ -4120,14 +4122,20 @@ export function makeClaudeAdapterV2(
           // The session registry lets a wake-replay turn (fresh context maps)
           // hydrate a subagent that was created by an earlier, settled turn.
           const existingSubagent =
+            (yield* Ref.get(sessionSubagentsByTaskId)).get(input.taskId) ??
             input.context.subagentsByTaskId.get(input.taskId) ??
             (input.toolUseId === undefined
               ? undefined
-              : input.context.subagentsByToolUseId.get(input.toolUseId)) ??
-            (yield* Ref.get(sessionSubagentsByTaskId)).get(input.taskId);
+              : input.context.subagentsByToolUseId.get(input.toolUseId));
           if (existingSubagent === undefined && input.status !== "running") {
             return;
           }
+          const latestAssistantError =
+            input.reopen === true ? undefined : existingSubagent?.latestAssistantError;
+          const status =
+            input.status === "completed" && latestAssistantError === "rate_limit"
+              ? "failed"
+              : input.status;
           // Status is monotone with one exception: task_started for a known
           // task id is an authoritative CLI lifecycle event (SendMessage to a
           // completed subagent resumes it and re-emits task_started with the
@@ -4137,11 +4145,11 @@ export function makeClaudeAdapterV2(
             input.reopen === true &&
             existingSubagent !== undefined &&
             existingSubagent.task.status !== "running" &&
-            input.status === "running";
+            status === "running";
           if (
             existingSubagent !== undefined &&
             existingSubagent.task.status !== "running" &&
-            input.status === "running" &&
+            status === "running" &&
             !isReopen
           ) {
             return;
@@ -4159,12 +4167,12 @@ export function makeClaudeAdapterV2(
               : null;
           const lifecycleChanged =
             existingSubagent === undefined ||
-            existingSubagent.task.status !== input.status ||
+            existingSubagent.task.status !== status ||
             // A drain-replayed resume task_started finds the registry entry
             // already pre-opened to running by bufferWakeMessage while the
             // projection node still holds the old terminal status; re-emit
             // the node lifecycle for authoritative task_started updates.
-            (input.reopen === true && input.status === "running");
+            (input.reopen === true && status === "running");
 
           const now = yield* DateTime.now;
           const nativeItemId = `task:${input.taskId}`;
@@ -4212,7 +4220,23 @@ export function makeClaudeAdapterV2(
               result: null,
               startedAt: now,
             }),
-            status: input.status,
+            status,
+            failure:
+              status === "failed"
+                ? makeProviderFailure({
+                    class:
+                      latestAssistantError === "rate_limit"
+                        ? "usage_limit"
+                        : latestAssistantError === undefined
+                          ? "unknown"
+                          : "provider_error",
+                    code: latestAssistantError,
+                    message:
+                      input.result ??
+                      existingSubagent?.lastAssistantText ??
+                      "Claude delegated agent failed.",
+                  })
+                : undefined,
             // A reopen replayed under a continuation run re-attributes the
             // subagent to that run. RunExecutionService routes parent-thread
             // events by runId, and only the resuming run's ingestion fiber is
@@ -4220,9 +4244,7 @@ export function makeClaudeAdapterV2(
             // subagents terminalize); attribution also enrolls the subagent
             // in the resuming run's active-child tracking so its fiber
             // outlives settle until the resumed task completes.
-            ...(input.reopen === true &&
-            input.status === "running" &&
-            existingSubagent !== undefined
+            ...(input.reopen === true && status === "running" && existingSubagent !== undefined
               ? { runId: input.context.input.runId }
               : {}),
             ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
@@ -4231,7 +4253,7 @@ export function makeClaudeAdapterV2(
             ...(input.progress === undefined ? {} : { progress: input.progress }),
             ...(input.result === undefined ? {} : { result: input.result }),
             ...(isReopen ? { startedAt: now } : {}),
-            completedAt: input.status === "running" ? null : (priorTask?.completedAt ?? now),
+            completedAt: status === "running" ? null : (priorTask?.completedAt ?? now),
             updatedAt: now,
           } satisfies OrchestrationV2Subagent;
           const subagent = {
@@ -4254,6 +4276,8 @@ export function makeClaudeAdapterV2(
               input.reopen === true ? null : (existingSubagent?.lastAssistantText ?? null),
             lastAssistantMessageId:
               input.reopen === true ? null : (existingSubagent?.lastAssistantMessageId ?? null),
+            latestAssistantError:
+              status === "completed" || status === "cancelled" ? undefined : latestAssistantError,
           } satisfies ActiveClaudeSubagent;
           input.context.subagentsByTaskId.set(input.taskId, subagent);
           if (input.toolUseId !== undefined) {
@@ -4277,7 +4301,7 @@ export function makeClaudeAdapterV2(
             if (
               registered !== undefined &&
               registered.task.status !== "running" &&
-              input.status === "running" &&
+              status === "running" &&
               !(isReopen && registered === existingSubagent)
             ) {
               return current;
@@ -4328,7 +4352,7 @@ export function makeClaudeAdapterV2(
                 parentNodeId: task.parentNodeId,
                 rootNodeId: subagent.rootNodeId,
                 kind: "subagent",
-                status: input.status,
+                status,
                 countsForRun: false,
                 providerThreadId: input.context.input.providerThread.id,
                 providerTurnId: input.context.providerTurnId,
@@ -4353,7 +4377,7 @@ export function makeClaudeAdapterV2(
                 parentNodeId: null,
                 rootNodeId: childRootNodeId,
                 kind: "root_turn",
-                status: input.status,
+                status,
                 countsForRun: false,
                 providerThreadId: null,
                 providerTurnId: null,
@@ -4448,14 +4472,14 @@ export function makeClaudeAdapterV2(
           // message, which is already in the child thread when its text was
           // routed there. Failures and cancellations always get the message.
           const resultAlreadyShown =
-            input.status === "completed" &&
+            status === "completed" &&
             input.result !== undefined &&
             normalizeClaudeResultText(subagent.lastAssistantText ?? "") ===
               normalizeClaudeResultText(input.result);
           if (
             input.result !== undefined &&
             input.result.trim().length > 0 &&
-            input.status !== "running" &&
+            status !== "running" &&
             !resultAlreadyShown
           ) {
             const resultNativeItemId = `${nativeItemId}:result`;
@@ -5294,11 +5318,13 @@ export function makeClaudeAdapterV2(
                 task: {
                   ...priorTask,
                   status: "running",
+                  failure: undefined,
                   result: null,
                   startedAt: now,
                   completedAt: null,
                   updatedAt: now,
                 },
+                latestAssistantError: undefined,
               });
             });
           }
@@ -6015,6 +6041,13 @@ export function makeClaudeAdapterV2(
             return;
           }
 
+          if (message.type === "assistant" && message.parent_tool_use_id !== null) {
+            const subagent = yield* resolveSubagentByToolUseId(context, message.parent_tool_use_id);
+            if (subagent !== undefined) {
+              subagent.latestAssistantError = message.error;
+            }
+          }
+
           if (message.type === "system" && message.subtype === "task_started") {
             if (isClaudeNonSubagentTask(message)) {
               context.ignoredTaskIds.add(message.task_id);
@@ -6201,7 +6234,7 @@ export function makeClaudeAdapterV2(
           }
 
           for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
-            const subagent = context.subagentsByToolUseId.get(toolResult.tool_use_id);
+            const subagent = yield* resolveSubagentByToolUseId(context, toolResult.tool_use_id);
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
