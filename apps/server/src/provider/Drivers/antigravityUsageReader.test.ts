@@ -603,8 +603,9 @@ describe("readAntigravityUsage", () => {
         }),
       );
       yield* fileSystem.writeFileString(path.join(dir, "broken.db"), "not a sqlite database");
+      yield* fileSystem.writeFileString(path.join(dir, "empty.db"), "");
       const result = yield* readAntigravityUsage(dir, 0);
-      assert.strictEqual(result.errors.length, 1);
+      assert.deepStrictEqual(result.errors, [path.join(dir, "broken.db")]);
       assert.strictEqual(records(result)[0]?.model, "gemini-2.5-pro");
       assert.strictEqual(records(result)[0]?.totals.outputTokens, 5);
     }).pipe(Effect.provide(NodeServices.layer)),
