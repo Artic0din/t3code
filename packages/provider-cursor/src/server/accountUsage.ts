@@ -101,6 +101,9 @@ function boundaryOverlap(previous: readonly string[], current: readonly string[]
 
 /** Never forward the access token through a redirect. */
 const NO_REDIRECT: RequestInit = { redirect: "error" };
+// A first read can span dozens of 1,000-event pages, and slower hosts take ~10s per page.
+const PAGE_TIMEOUT = Duration.seconds(30);
+const READ_TIMEOUT = Duration.minutes(5);
 
 export const makeCursorAccountUsageReader = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
@@ -267,7 +270,7 @@ export const makeCursorAccountUsageReader = Effect.gen(function* () {
             return events as unknown[];
           },
           Effect.timeoutOrElse({
-            duration: Duration.seconds(10),
+            duration: PAGE_TIMEOUT,
             orElse: () => invalid("Account usage request timed out"),
           }),
           pageSlots.withPermit,
@@ -420,7 +423,7 @@ export const makeCursorAccountUsageReader = Effect.gen(function* () {
     return yield* read.pipe(
       Effect.scoped,
       Effect.timeoutOrElse({
-        duration: Duration.seconds(60),
+        duration: READ_TIMEOUT,
         orElse: () => invalid("Account usage read timed out"),
       }),
       Effect.orElseSucceed(
