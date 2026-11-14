@@ -564,10 +564,10 @@ describe("readCursorAccountUsage", () => {
         );
         if (queued) {
           yield* Effect.all(Array.from({ length: 6 }, () => Queue.take(started)));
-          yield* TestClock.adjust("6 seconds");
+          yield* TestClock.adjust("25 seconds");
           yield* Deferred.succeed(firstBatch, undefined);
           yield* Effect.all(Array.from({ length: 6 }, () => Queue.take(started)));
-          yield* TestClock.adjust("6 seconds");
+          yield* TestClock.adjust("25 seconds");
           yield* Deferred.succeed(secondBatch, undefined);
         }
         const result = yield* Fiber.join(read);

@@ -2014,6 +2014,67 @@ describe("UsageService", () => {
     }),
   );
 
+  it.effect("waits out the retry cooldown after a slow Cursor read fails", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      let reads = 0;
+      const started = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const context = yield* Layer.build(
+          layerCursorUsageAccounts(
+            Layer.succeed(CursorAccountReader.CursorAccountReader, {
+              read: () =>
+                Effect.gen(function* () {
+                  reads++;
+                  if (reads === 1) {
+                    yield* Deferred.succeed(started, undefined);
+                    yield* Effect.sleep(Duration.minutes(2));
+                  }
+                  return {
+                    accountKey: null,
+                    records: [],
+                    missing: false,
+                    error: "Cursor account usage could not be read.",
+                  };
+                }),
+            }),
+          ),
+        );
+        const accounts = Context.get(context, CursorUsageAccounts.CursorUsageAccounts);
+        const scan = accounts.scan({
+          instances: [
+            {
+              instanceId: ProviderInstanceId.make("cursor"),
+              environment: { CURSOR_API_KEY: "slow-key" },
+            },
+          ],
+          windowStartMs: 0,
+          retentionCutoffMs: 0,
+          awaitRefresh: true,
+        });
+        const first = yield* Effect.forkChild(scan);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust(Duration.minutes(2));
+        yield* Fiber.join(first);
+        yield* scan;
+        assert.strictEqual(reads, 1);
+        yield* TestClock.adjust(Duration.seconds(61));
+        yield* scan;
+        assert.strictEqual(reads, 2);
+      }).pipe(
+        Effect.provide(
+          layerService({
+            prefix: "usage-service-cursor-slow-failure",
+            home,
+            settings,
+            platform: "linux",
+            environment: {},
+          }),
+        ),
+      );
+    }),
+  );
+
   it.effect("reports one Cursor source when two API keys belong to the same account", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

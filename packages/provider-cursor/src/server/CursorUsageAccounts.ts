@@ -132,7 +132,8 @@ const make = Effect.gen(function* () {
     const { range, result } = fetched;
     if (result.missing || result.error !== null || result.accountKey === null) {
       failures.set(credentialKey, {
-        atMs: nowMs,
+        // A first read can run for minutes; the retry cooldown starts when it fails.
+        atMs: yield* Clock.currentTimeMillis,
         error: result.missing || result.error !== null ? result.error : CURSOR_ACCOUNT_READ_ERROR,
       });
       yield* schedulePersist;
