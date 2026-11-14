@@ -500,6 +500,8 @@ export const readAntigravityUsage = Effect.fn("readAntigravityUsage")(function* 
       );
     const { stat, part } = yield* fingerprintOf(path);
     const wal = yield* fingerprintOf(`${path}-wal`).pipe(Effect.option);
+    // Antigravity creates a conversation file before its first write; until then it has no usage.
+    if (stat.size === 0 && (wal._tag === "None" || wal.value.stat.size === 0)) return null;
     const fingerprint = `${part}/${wal._tag === "Some" ? wal.value.part : "-"}`;
     const cached = cache?.get(canonical);
     if (cached?.fingerprint === fingerprint) return cached.data;
