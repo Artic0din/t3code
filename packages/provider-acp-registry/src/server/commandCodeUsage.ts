@@ -63,9 +63,10 @@ function parseRecord(
     reasoningTokens: 0,
   };
   const cost = usage.costUsd;
+  // Command Code omits costUsd for models missing from its catalog; 0 is a free model.
   const reportedCostUsd =
-    typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
-  if (totalTokens(totals) === 0 && reportedCostUsd === null) return [];
+    typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : null;
+  if (totalTokens(totals) === 0 && !reportedCostUsd) return [];
   return [
     {
       provider: "commandcode",
@@ -102,7 +103,6 @@ export const commandCodeUsageFormat: TranscriptUsageFormat<typeof CommandCodeSca
   },
   parseProjected: parseRecord,
   state: { initial: () => ({ sessionId: "" }), schema: CommandCodeScanState },
-  sharedSessionsAcrossFiles: true,
 };
 
 /** Command Code keeps every session, inside T3 Code or not, under ~/.commandcode/projects. */
@@ -112,7 +112,10 @@ export const commandCodeUsageReader: ProviderUsageReader<AcpRegistrySettings, Pa
   format: commandCodeUsageFormat,
   directories: Effect.fn("commandCodeUsageReader.directories")(function* ({ environment }) {
     const path = yield* Path.Path;
-    const home = environment.HOME || (yield* HostProcess.HomeDirectory);
+    const platform = yield* HostProcess.Platform;
+    const home =
+      (platform === "win32" ? environment.USERPROFILE : environment.HOME) ||
+      (yield* HostProcess.HomeDirectory);
     return [{ dir: path.join(home, ".commandcode", "projects") }];
   }),
 };

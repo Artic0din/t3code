@@ -50,20 +50,22 @@ describe("commandCodeUsageFormat", () => {
     expect(totalTokens(record!.totals)).toBe(36064);
   });
 
-  it("ignores user turns, empty usage and malformed lines, and estimates missing cost", () => {
+  it("ignores user turns, empty usage and malformed lines, and keeps free and missing costs apart", () => {
     const { costUsd: _cost, ...uncosted } = assistant.usage;
     const records = parseAll([
       session,
-      { ...assistant, id: "user", message: { role: "user", content: [] }, usage: undefined },
+      { ...assistant, id: "user", message: { role: "user", content: [] } },
       {
         ...assistant,
         id: "empty",
         usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       },
       { ...assistant, id: "no-model", model: undefined },
+      { ...assistant, id: "free", usage: { ...assistant.usage, costUsd: 0 } },
       { ...assistant, id: "byok", usage: uncosted },
     ]);
     expect(records.map((record) => [record.reportedCostUsd, record.totals.outputTokens])).toEqual([
+      [0, 6],
       [null, 6],
     ]);
     expect(commandCodeUsageFormat.parseLine("{not json", { sessionId: "" })).toEqual([]);

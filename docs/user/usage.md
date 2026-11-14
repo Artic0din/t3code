@@ -38,8 +38,8 @@ variable to the same directory. Pi includes recorded tool and summary costs unde
 Muse Code reads native session history, including child sessions, from the home reported by the
 configured Muse CLI. Its environment settings, including `XDG_DATA_HOME`, apply. Models without
 known prices still contribute tokens and appear as unpriced; set custom prices to estimate their cost.
-Command Code reads `~/.commandcode/projects`, including sessions run outside T3, and uses the cost
-Command Code records for each reply.
+Command Code reads `~/.commandcode/projects`, including sessions run outside T3, and uses Command
+Code's own list-price estimate for each reply.
 Use absolute paths or `~/` paths in the account's environment settings; relative environment paths
 depend on each project's working directory and cannot be reliably discovered by Usage. Accounts
 sharing a history directory count once.
