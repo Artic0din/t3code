@@ -8,9 +8,9 @@ On mobile, choose **Usage** in the workspace navigation.
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Muse Code, and Cursor history
-from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
-cost, split by token type and by speed. These estimates are not your subscription bill.
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Muse Code, Command Code,
+and Cursor history from your connected environments. It shows token use, cache savings, model
+breakdowns, and estimated API-equivalent cost, split by token type and by speed. These estimates are not your subscription bill.
 **Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
@@ -38,6 +38,8 @@ variable to the same directory. Pi includes recorded tool and summary costs unde
 Muse Code reads native session history, including child sessions, from the home reported by the
 configured Muse CLI. Its environment settings, including `XDG_DATA_HOME`, apply. Models without
 known prices still contribute tokens and appear as unpriced; set custom prices to estimate their cost.
+Command Code reads `~/.commandcode/projects`, including sessions run outside T3, and uses Command
+Code's own list-price estimate for each reply.
 Use absolute paths or `~/` paths in the account's environment settings; relative environment paths
 depend on each project's working directory and cannot be reliably discovered by Usage. Accounts
 sharing a history directory count once.
@@ -99,8 +101,8 @@ To count only some models, or to leave some out, add `usageModelFilter` to the s
 ```
 
 `include` keeps only the listed models and `exclude` leaves the listed models out. `provider` is
-one of `claude`, `codex`, `cursor`, `grok`, `opencode`, `antigravity`, `pi`, or `muse`; omit it
-to match a model ID from any provider. Use the model ID that Usage shows without **Map to**, such
+one of `claude`, `codex`, `cursor`, `grok`, `opencode`, `antigravity`, `pi`, `muse`, or
+`commandcode`; omit it to match a model ID from any provider. Use the model ID that Usage shows without **Map to**, such
 as a provider-prefixed ID for Pi. Filters apply before **Map to**, so a model you leave out is not
 counted under its mapped name. Usage applies each environment's own filter. Remove the setting to
 show every model again.
